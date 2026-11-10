@@ -7,11 +7,11 @@ import Head from 'next/head';
 import { useRouter } from 'next/router';
 import { useTranslation } from 'next-i18next';
 import React from 'react';
+import { SidebarContent } from '../components/sidebar/SidebarContent';
 import { Sidebar } from '@/features/app/components/sidebar/Sidebar';
 import { SidebarHeaderLeft } from '@/features/app/components/sidebar/SidebarHeaderLeft';
 import { useSdkLocale } from '@/features/app/hooks/useSdkLocale';
 import { AppLayout } from '@/features/app/layouts';
-import { SidebarContent } from '../components/sidebar/SidebarContent';
 
 export const AdminLayout: React.FC<{
   children: React.ReactNode;
@@ -28,6 +28,12 @@ export const AdminLayout: React.FC<{
   };
 
   const routes = [
+    {
+      Icon: ShieldUser,
+      label: t('admin.directory.title'),
+      route: '/admin/directory',
+      pathTo: '/admin/directory',
+    },
     {
       Icon: Settings,
       label: t('settings.title'),

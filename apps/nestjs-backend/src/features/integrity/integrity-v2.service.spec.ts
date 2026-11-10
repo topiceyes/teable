@@ -61,23 +61,10 @@ const createMetaDb = (rows: ReadonlyArray<ReturnType<typeof createBaseTablePrefl
   };
 };
 const createThrowingRepairStream = (message: string): AsyncGenerator<SchemaRepairResult> =>
-  ({
-    async next() {
-      throw new Error(message);
-    },
-    async return() {
-      return {
-        done: true,
-        value: undefined,
-      };
-    },
-    async throw(error) {
-      throw error;
-    },
-    [Symbol.asyncIterator]() {
-      return this;
-    },
-  }) as AsyncGenerator<SchemaRepairResult>;
+  (async function* () {
+    yield* [];
+    throw new Error(message);
+  })();
 
 class FakeSpan {
   name: string;
@@ -188,26 +175,10 @@ const createRepairResult = (): SchemaRepairResult => ({
   },
 });
 
-const createEmptyRepairStream = (): AsyncGenerator<SchemaRepairResult> => ({
-  async next() {
-    return {
-      done: true,
-      value: undefined,
-    };
-  },
-  async return() {
-    return {
-      done: true,
-      value: undefined,
-    };
-  },
-  async throw(error) {
-    throw error;
-  },
-  [Symbol.asyncIterator]() {
-    return this;
-  },
-});
+const createEmptyRepairStream = (): AsyncGenerator<SchemaRepairResult> =>
+  (async function* () {
+    yield* [];
+  })();
 
 const createFakeRepairDb = () => {
   const execute = vi.fn().mockResolvedValue([]);
@@ -529,7 +500,7 @@ describe('IntegrityV2Service repair telemetry', () => {
     );
 
     const preflight = await service['inspectBaseTablesBeforeHydration'](
-      metaDb,
+      metaDb as unknown as Parameters<IntegrityV2Service['inspectBaseTablesBeforeHydration']>[0],
       BaseId.create(baseId)._unsafeUnwrap()
     );
     const target = await service['resolveBaseTarget'](baseId);

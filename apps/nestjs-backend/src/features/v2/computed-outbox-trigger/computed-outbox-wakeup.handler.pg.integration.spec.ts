@@ -189,7 +189,11 @@ it.runIf(process.env.TEABLE_V2_RUN_PG_INTEGRATION === '1')(
         cause: 'created',
       });
 
-      const handled = handler.handle(wakeup);
+      const handled = handler.handle({
+        ...wakeup,
+        availableAt: wakeup.availableAt.toISOString(),
+        emittedAt: wakeup.emittedAt.toISOString(),
+      });
       await waitForSleepingStatement(marker, runtime.db);
       await expect(handled).rejects.toBeInstanceOf(ComputedOutboxBaseAdmissionLeaseLostError);
 

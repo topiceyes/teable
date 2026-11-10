@@ -37,6 +37,7 @@ describe('V2 Excel import sheet summary', () => {
       {
         attachmentUrl: '/import.xlsx',
         fileType: SUPPORTEDTYPE.EXCEL,
+        tz: 'UTC',
         worksheets: {
           data: { ...worksheet, name: 'Data' },
           empty: { ...worksheet, name: 'Empty' },

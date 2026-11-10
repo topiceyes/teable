@@ -2,10 +2,10 @@
 /* eslint-disable @typescript-eslint/naming-convention */
 
 import type { INestApplication } from '@nestjs/common';
-import type { ILinkFieldOptions, IRecord, ITableFullVo } from '@teable/core';
+import type { ILinkFieldOptions, IRecord } from '@teable/core';
 import { FieldKeyType, FieldType, Relationship, getRandomString } from '@teable/core';
 import { PrismaService } from '@teable/db-main-prisma';
-import { updateRecords as apiUpdateRecords } from '@teable/openapi';
+import { updateRecords as apiUpdateRecords, type ITableFullVo } from '@teable/openapi';
 import type { Knex } from 'knex';
 import type { Doc } from 'sharedb/lib/client';
 import { Connection } from 'sharedb/lib/client';
@@ -195,10 +195,13 @@ describe('asynchronous link title realtime (e2e)', () => {
         })),
       });
 
-      const socket = new SockJS(`http://127.0.0.1:${process.env.PORT}/socket`, null, {
+      const socketOptions: NonNullable<ConstructorParameters<typeof SockJS>[2]> & {
+        transportOptions: { websocket: { headers: { cookie: string } } };
+      } = {
         transports: ['websocket'],
         transportOptions: { websocket: { headers: { cookie } } },
-      });
+      };
+      const socket = new SockJS(`http://127.0.0.1:${process.env.PORT}/socket`, null, socketOptions);
       const connection = new Connection(socket as Socket);
       const doc: Doc<IRecord> = connection.get(
         `rec_${launchesTable.id}`,

@@ -52,12 +52,18 @@ module.exports = function (options) {
       // nest default tsconfig path is tsconfig.build.json
       ...options.plugins.filter((plugin) => !(plugin instanceof ForkTsCheckerWebpackPlugin)),
       new rspack.HotModuleReplacementPlugin(),
-      new ForkTsCheckerWebpackPlugin({
-        typescript: {
-          configFile: 'tsconfig.json',
-          memoryLimit: 4096,
-        },
-      }),
+      // TS_CHECKER=off skips in-process type checking (saves ~4GB RAM on low-memory
+      // machines during dev; rely on the IDE / `pnpm typecheck` instead)
+      ...(process.env.TS_CHECKER === 'off'
+        ? []
+        : [
+            new ForkTsCheckerWebpackPlugin({
+              typescript: {
+                configFile: 'tsconfig.json',
+                memoryLimit: 4096,
+              },
+            }),
+          ]),
       new rspack.CopyRspackPlugin({ patterns: mailTemplatePatterns }),
     ],
     resolve: {

@@ -9,6 +9,7 @@ import { CacheConfig, ICacheConfig } from '../configs/cache.config';
 import { EventEmitterService } from '../event-emitter/event-emitter.service';
 import { PermissionService } from '../features/auth/permission.service';
 import { SessionHandleService } from '../features/auth/session/session-handle.service';
+import { TableDataAccessService } from '../features/organization/authority-matrix/table-data-access.service';
 import { PerformanceCacheService } from '../performance-cache';
 import type { IClsStore } from '../types/cls';
 import { Timing } from '../utils/timing';
@@ -56,7 +57,8 @@ export class ShareDbService extends ShareDBClass {
     private readonly performanceCacheService: PerformanceCacheService,
     private readonly sessionHandleService: SessionHandleService,
     private readonly permissionService: PermissionService,
-    @Optional() private readonly realtimeMetrics?: RealtimeMetricsService
+    @Optional() private readonly realtimeMetrics?: RealtimeMetricsService,
+    @Optional() private readonly dataAccess?: TableDataAccessService
   ) {
     super({
       presence: true,
@@ -78,6 +80,17 @@ export class ShareDbService extends ShareDBClass {
 
     registerQueryCancellation(this);
     authMiddleware(this, {
+      authorizePresenceData: async (userId, tableId, baseId) => {
+        if (!this.dataAccess || (await this.dataAccess.isAdministrator(userId))) return;
+        if (
+          (tableId && (await this.dataAccess.scope(tableId, userId))) ||
+          (await this.dataAccess.restrictedTables(baseId)).length
+        ) {
+          throw new Error('Live presence is unavailable under data restrictions');
+        }
+      },
+      sanitizeDocument: (userId, type, parentId, message) =>
+        this.dataAccess?.sanitizeDocument(userId, type, parentId, message) || Promise.resolve(),
       sessionHandleService: this.sessionHandleService,
       permissionService: this.permissionService,
       clsService: this.cls,

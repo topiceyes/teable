@@ -32,7 +32,6 @@ import {
   READ_PATH,
   UPDATE_USER_AVATAR,
   USER_ME,
-  ResourceType,
   TableTrashType,
   TrashType,
   UploadType,
@@ -867,7 +866,7 @@ describe('OpenAPI AttachmentController (e2e)', () => {
     }
     expect(fieldTrashExists).toBe(true);
 
-    await resetTrashItems({ resourceType: ResourceType.Table, resourceId: table.id });
+    await resetTrashItems({ resourceType: TrashType.Table, resourceId: table.id });
 
     await expect(prisma.field.findUnique({ where: { id: deletedField.id } })).resolves.toBeNull();
     await expect(
@@ -949,7 +948,7 @@ describe('OpenAPI AttachmentController (e2e)', () => {
         await new Promise<void>((resolve) => setTimeout(resolve, 100));
       }
       expect(fieldTrashExists).toBe(true);
-      await resetTrashItems({ resourceId: exportTable.id, resourceType: ResourceType.Table });
+      await resetTrashItems({ resourceId: exportTable.id, resourceType: TrashType.Table });
 
       const awaitExport = createAwaitWithEventWithResult<{
         status?: 'success' | 'failed';

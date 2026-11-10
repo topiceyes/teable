@@ -1,5 +1,4 @@
 import { axios } from '@teable/openapi';
-import type { Suite } from 'vitest';
 import { VitestTestRunner } from 'vitest/runners';
 import type { IBaseConfig } from '../../src/configs/base.config';
 import { baseConfig } from '../../src/configs/base.config';
@@ -38,8 +37,8 @@ export default class E2eTestRunner extends VitestTestRunner {
     super.onCollectStart(file);
   }
 
-  onAfterRunSuite(suite: Suite): void {
-    super.onAfterRunSuite(suite);
+  async onAfterRunSuite(suite: Parameters<VitestTestRunner['onAfterRunSuite']>[0]): Promise<void> {
+    await super.onAfterRunSuite(suite);
     if (!('filepath' in suite)) return;
 
     restoreBaselineEnv();

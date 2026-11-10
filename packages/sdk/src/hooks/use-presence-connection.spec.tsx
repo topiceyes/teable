@@ -3,6 +3,11 @@ import type { ReactNode } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import { AppContext } from '../context/app/AppContext';
 import type { IAppContext } from '../context/app/AppContext';
+import { BaseContext } from '../context/base/BaseContext';
+import {
+  TablePermissionContext,
+  TablePermissionContextDefaultValue,
+} from '../context/table-permission/TablePermissionContext';
 import { usePresenceConnection } from './use-presence-connection';
 
 const connection = { id: 'conn' };
@@ -16,6 +21,24 @@ const withApp =
   );
 
 describe('usePresenceConnection', () => {
+  it('does not subscribe to optional channels when the server restricts base data', () => {
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <BaseContext.Provider value={{ permission: { realtimeEnabled: false } as never }}>
+        {children}
+      </BaseContext.Provider>
+    );
+    expect(renderHook(() => usePresenceConnection(), { wrapper }).result.current).toBeUndefined();
+  });
+  it('honors the table restriction even outside a base provider', () => {
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <TablePermissionContext.Provider
+        value={{ ...TablePermissionContextDefaultValue, realtimeEnabled: false }}
+      >
+        {children}
+      </TablePermissionContext.Provider>
+    );
+    expect(renderHook(() => usePresenceConnection(), { wrapper }).result.current).toBeUndefined();
+  });
   it('hands out the connection in the app and on share links', () => {
     expect(renderHook(() => usePresenceConnection(), { wrapper: withApp({}) }).result.current).toBe(
       connection

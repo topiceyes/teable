@@ -1,27 +1,37 @@
-import { Controller, Get } from '@nestjs/common';
-import type {
-  IGetDepartmentListVo,
-  IGetDepartmentUserVo,
-  IOrganizationMeVo,
+import { Controller, Get, Query } from '@nestjs/common';
+import {
+  getDepartmentListRoSchema,
+  getDepartmentUserRoSchema,
+  organizationQueryRoSchema,
+  type IGetDepartmentListRo,
+  type IGetDepartmentListVo,
+  type IGetDepartmentUserRo,
+  type IGetDepartmentUserVo,
+  type IOrganizationMeVo,
+  type IOrganizationQueryRo,
 } from '@teable/openapi';
+import { ZodValidationPipe } from '../../zod.validation.pipe';
+import { OrganizationService } from './organization.service';
 
 @Controller('api/organization')
 export class OrganizationController {
+  constructor(private readonly service: OrganizationService) {}
   @Get('me')
-  async getOrganizationMe(): Promise<IOrganizationMeVo> {
-    return null;
+  getOrganizationMe(
+    @Query(new ZodValidationPipe(organizationQueryRoSchema)) ro: IOrganizationQueryRo
+  ): Promise<IOrganizationMeVo> {
+    return this.service.me(ro);
   }
-
   @Get('department-user')
-  async getDepartmentUsers(): Promise<IGetDepartmentUserVo> {
-    return {
-      users: [],
-      total: 0,
-    };
+  getDepartmentUsers(
+    @Query(new ZodValidationPipe(getDepartmentUserRoSchema)) ro: IGetDepartmentUserRo
+  ): Promise<IGetDepartmentUserVo> {
+    return this.service.users(ro);
   }
-
   @Get('department')
-  async getDepartmentList(): Promise<IGetDepartmentListVo> {
-    return [];
+  getDepartmentList(
+    @Query(new ZodValidationPipe(getDepartmentListRoSchema)) ro: IGetDepartmentListRo
+  ): Promise<IGetDepartmentListVo> {
+    return this.service.departments(ro);
   }
 }

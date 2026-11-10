@@ -1,5 +1,7 @@
 import { useContext } from 'react';
 import { AppContext } from '../context/app/AppContext';
+import { BaseContext } from '../context/base/BaseContext';
+import { TablePermissionContext } from '../context/table-permission/TablePermissionContext';
 import { useConnection } from './use-connection';
 
 /**
@@ -13,5 +15,11 @@ import { useConnection } from './use-connection';
 export const usePresenceConnection = () => {
   const { connection } = useConnection();
   const { template } = useContext(AppContext) || {};
-  return template ? undefined : connection;
+  const { permission } = useContext(BaseContext);
+  const tablePermission = useContext(TablePermissionContext);
+  return template ||
+    permission?.realtimeEnabled === false ||
+    tablePermission.realtimeEnabled === false
+    ? undefined
+    : connection;
 };

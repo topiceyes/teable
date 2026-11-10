@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import type { IBaseRole, Action, IShareViewMeta } from '@teable/core';
 import {
   HttpErrorCode,
@@ -26,6 +26,7 @@ import {
 import { hashSharePassword } from '../../utils/share-password-hash';
 import { CollaboratorModel } from '../model/collaborator';
 import { TemplateModel } from '../model/template';
+import { TableAuthorityService } from '../organization/authority-matrix/table-authority.service';
 import { TeableJwtService } from './jwt/teable-jwt.service';
 
 interface IBaseNodeCacheItem {
@@ -74,7 +75,8 @@ export class PermissionService {
     private readonly cls: ClsService<IClsStore>,
     private readonly collaboratorModel: CollaboratorModel,
     private readonly templateModel: TemplateModel,
-    private readonly jwtService: TeableJwtService
+    private readonly jwtService: TeableJwtService,
+    @Optional() private readonly tableAuthority?: TableAuthorityService
   ) {}
 
   private getDepartmentIds() {
@@ -429,7 +431,15 @@ export class PermissionService {
 
   private async getPermissionByTableId(tableId: string, includeInactiveResource?: boolean) {
     const baseId = (await this.getUpperIdByTableId(tableId, includeInactiveResource)).baseId;
-    return this.getPermissionByBaseId(baseId, includeInactiveResource);
+    const existing = await this.getPermissionByBaseId(baseId, includeInactiveResource);
+    if (
+      !this.tableAuthority ||
+      includeInactiveResource ||
+      isRobot(this.cls.get('user.id')) ||
+      isAnonymous(this.cls.get('user.id'))
+    )
+      return existing;
+    return this.tableAuthority.apply(baseId, tableId, existing);
   }
 
   async getPermissionsByResourceId(resourceId: string, includeInactiveResource?: boolean) {

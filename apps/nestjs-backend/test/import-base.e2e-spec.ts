@@ -471,12 +471,13 @@ describe('OpenAPI BaseController for base import (e2e)', () => {
 
       // Import rewrites plugin view options to reference the newly created installs,
       // so compare views without pluginInstallId and assert the rewritten ids below.
-      const withoutPluginInstallId = <T extends { options?: unknown }>(views: T[]) =>
+      const withoutPluginInstallId = <T extends { id?: string; options?: unknown }>(views: T[]) =>
         views.map((view) => {
+          if (typeof view.id !== 'string') throw new Error('Expected an imported view id');
           const options = view.options as IPluginViewOptions | undefined;
           return options?.pluginInstallId
-            ? { ...view, options: omit(options, 'pluginInstallId') }
-            : view;
+            ? { ...view, id: view.id, options: omit(options, 'pluginInstallId') }
+            : { ...view, id: view.id };
         });
 
       // The v2 importer regenerates complete default columnMeta (every table field

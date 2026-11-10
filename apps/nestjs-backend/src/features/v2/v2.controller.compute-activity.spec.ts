@@ -53,7 +53,10 @@ describe('V2Controller compute activity route', () => {
     const createContext = vi.fn().mockResolvedValue(context);
     const controller = new V2Controller(
       { getContainerForTable } as never,
-      { createContext } as never
+      { createContext } as never,
+      {} as never,
+      {} as never,
+      {} as never
     );
 
     const result = await controller.getComputeActivity().callable()({ baseId, tableId });

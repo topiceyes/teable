@@ -1,0 +1,81 @@
+name: teable-community
+
+services:
+  app:
+    image: ${TEABLE_IMAGE:?Set the custom application image}
+    init: true
+    restart: unless-stopped
+    ports:
+      - '127.0.0.1:3000:3000'
+    env_file: .env.production.local
+    environment:
+      NODE_ENV: production
+      PORT: '3000'
+      SOCKET_PORT: '3000'
+      NEXTJS_DIR: apps/nextjs-app
+      PRISMA_DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      PRISMA_META_DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      BACKEND_CACHE_PROVIDER: redis
+      BACKEND_CACHE_REDIS_URI: redis://default:${REDIS_PASSWORD}@cache:6379/0
+      BACKEND_STORAGE_PROVIDER: local
+      BACKEND_SESSION_COOKIE_SECURE: 'true'
+      BACKEND_SESSION_ORIGIN_CHECK_ENABLED: 'true'
+      BACKEND_TRUST_PROXY: '1'
+      TZ: Asia/Shanghai
+    volumes:
+      - assets:/app/.assets
+      - temporary:/app/.temporary
+    depends_on:
+      db:
+        condition: service_healthy
+      cache:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD', 'curl', '--fail', '--silent', '--max-time', '5', 'http://127.0.0.1:3000/health']
+      interval: 30s
+      timeout: 6s
+      start_period: 180s
+      retries: 5
+    logging: &logging
+      driver: json-file
+      options:
+        max-size: '20m'
+        max-file: '5'
+
+  db:
+    image: ${POSTGRES_IMAGE:?Set the PostgreSQL image}
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?Set the database name}
+      POSTGRES_USER: ${POSTGRES_USER:?Set the database user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set the database password}
+      TZ: Asia/Shanghai
+    volumes:
+      - database:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    logging: *logging
+
+  cache:
+    image: ${REDIS_IMAGE:?Set the Redis image}
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Set the Redis password}
+    command: ['sh', '-c', 'exec redis-server --appendonly yes --requirepass "$$REDIS_PASSWORD"']
+    volumes:
+      - cache:/data
+    healthcheck:
+      test: ['CMD-SHELL', '[ "$$(REDISCLI_AUTH="$$REDIS_PASSWORD" redis-cli --raw ping)" = PONG ]']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    logging: *logging
+
+volumes:
+  database:
+  assets:
+  temporary:
+  cache:

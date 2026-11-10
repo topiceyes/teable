@@ -14,6 +14,7 @@ import type * as V2ContractHttp from '@teable/v2-contract-http';
 import { tableProvisionPendingError, v2CoreTokens } from '@teable/v2-core';
 import { err, ok } from 'neverthrow';
 import { describe, expect, it, vi } from 'vitest';
+import { thresholdConfig } from '../../../configs/threshold.config';
 
 // Mapping tests inject their service dependencies explicitly; keep database and
 // application bootstrap code outside this unit test boundary.
@@ -68,6 +69,12 @@ vi.mock('@teable/v2-contract-http', async (importOriginal) => {
 import { FieldOpenApiV2Service } from './field-open-api-v2.service';
 
 type ITestFieldOpenApiV2Service = {
+  getFieldFromV2: (tableId: string, fieldId: string) => Promise<IFieldVo>;
+  extractFieldVoFromDomainTable: (
+    table: unknown,
+    fieldId: string,
+    context: Record<string, unknown>
+  ) => Promise<IFieldVo>;
   mapLegacyCreateFieldToV2: (
     ro: Record<string, unknown>,
     table?: {
@@ -137,7 +144,8 @@ const createService = () =>
     {} as never,
     {} as never,
     {} as never,
-    {} as never
+    {} as never,
+    thresholdConfig()
   ) as unknown as ITestFieldOpenApiV2Service;
 
 const createV2ContainerService = (commandBus: unknown, tableQueryService: unknown) => {
@@ -222,7 +230,8 @@ describe('FieldOpenApiV2Service deleteField', () => {
         get: vi.fn((key: string) => (key === 'user.id' ? `usr${'f'.repeat(16)}` : undefined)),
       } as never,
       {} as never,
-      {} as never
+      {} as never,
+      thresholdConfig()
     );
 
     await service.deleteField(tableId, fieldId);
@@ -259,14 +268,16 @@ describe('FieldOpenApiV2Service getSnapshotBulk', () => {
     const fieldId = `fld${'b'.repeat(16)}`;
     const currentField = { id: fieldId, name: 'Current name' } as IFieldVo;
     const field = createSnapshotField(fieldId, currentField);
-    const execute = vi.fn(async () => ({
-      isErr: () => false,
-      value: {
-        snapshots: [{ id: fieldId, version: 9, field }],
-        fields: [field],
-        primaryFieldId: { equals: () => false },
-      },
-    }));
+    const execute = vi.fn(
+      async (_context: unknown, _query: { fieldIds?: ReadonlyArray<{ toString(): string }> }) => ({
+        isErr: () => false,
+        value: {
+          snapshots: [{ id: fieldId, version: 9, field }],
+          fields: [field],
+          primaryFieldId: { equals: (): boolean => false },
+        },
+      })
+    );
     const prismaService = {
       txClient: vi.fn(),
     };
@@ -291,7 +302,7 @@ describe('FieldOpenApiV2Service getSnapshotBulk', () => {
     ]);
     expect(prismaService.txClient).not.toHaveBeenCalled();
     expect(
-      execute.mock.calls[0]?.[1].fieldIds?.map((id: { toString(): string }) => id.toString())
+      execute.mock.calls[0]?.[1]?.fieldIds?.map((id: { toString(): string }) => id.toString())
     ).toEqual([fieldId]);
   });
 
@@ -336,7 +347,7 @@ describe('FieldOpenApiV2Service getSnapshotBulk', () => {
       value: {
         snapshots: [{ id: fieldId, version: 9, field }],
         fields: [field],
-        primaryFieldId: { equals: () => false },
+        primaryFieldId: { equals: (): boolean => false },
       },
     }));
     const tableMeta = {
@@ -390,7 +401,7 @@ describe('FieldOpenApiV2Service getSnapshotBulk', () => {
                 field,
               })),
               fields,
-              primaryFieldId: { equals: () => false },
+              primaryFieldId: { equals: (): boolean => false },
             },
           };
         }
@@ -405,7 +416,7 @@ describe('FieldOpenApiV2Service getSnapshotBulk', () => {
                 options: { choices: sourceChoices },
               } as IFieldVo),
             ],
-            primaryFieldId: { equals: () => false },
+            primaryFieldId: { equals: (): boolean => false },
           },
         };
       }
@@ -487,7 +498,7 @@ describe('FieldOpenApiV2Service getSnapshotBulk', () => {
           value: {
             snapshots: [{ id: lookupId, version: hostVersion, field }],
             fields: [field],
-            primaryFieldId: { equals: () => false },
+            primaryFieldId: { equals: (): boolean => false },
           },
         };
       }
@@ -504,7 +515,7 @@ describe('FieldOpenApiV2Service getSnapshotBulk', () => {
               options: {},
             } as IFieldVo),
           ],
-          primaryFieldId: { equals: () => false },
+          primaryFieldId: { equals: (): boolean => false },
         },
       };
     });
@@ -560,7 +571,7 @@ describe('FieldOpenApiV2Service getSnapshotBulk', () => {
           value: {
             snapshots: [{ id: lookupId, version: hostVersion, field }],
             fields: [field],
-            primaryFieldId: { equals: () => false },
+            primaryFieldId: { equals: (): boolean => false },
           },
         };
       }
@@ -577,7 +588,7 @@ describe('FieldOpenApiV2Service getSnapshotBulk', () => {
               options: {},
             } as IFieldVo),
           ],
-          primaryFieldId: { equals: () => false },
+          primaryFieldId: { equals: (): boolean => false },
         },
       };
     });
@@ -829,7 +840,7 @@ describe('FieldOpenApiV2Service lookup metadata reads (T7180)', () => {
               return field;
             },
           })),
-          primaryFieldId: { equals: () => false },
+          primaryFieldId: { equals: (): boolean => false },
         },
       };
     });
@@ -959,7 +970,8 @@ describe('FieldOpenApiV2Service updateField', () => {
         get: vi.fn((key: string) => (key === 'user.id' ? `usr${'f'.repeat(16)}` : undefined)),
       } as never,
       {} as never,
-      {} as never
+      {} as never,
+      thresholdConfig()
     );
 
     await service.updateField(tableId, fieldId, { name: 'Renamed linked table' });
@@ -1034,12 +1046,17 @@ describe('FieldOpenApiV2Service updateField', () => {
       { field: { invalidateTables: vi.fn() } } as never,
       { get: vi.fn(() => undefined) } as never,
       fieldSupplementService as never,
-      {} as never
+      {} as never,
+      thresholdConfig()
     );
 
-    await service.updateField(tableId, fieldId, {
+    // Exercise the legacy runtime patch without weakening the public update schema.
+    const legacyPatch: Parameters<FieldOpenApiV2Service['updateField']>[2] & {
+      options: { foreignTableId: string };
+    } = {
       options: { foreignTableId: otherForeignTableId },
-    });
+    };
+    await service.updateField(tableId, fieldId, legacyPatch);
 
     // The foreign read check now runs in CrossBaseLinkAccessFieldOperationPlugin,
     // inside the command. The space invariant stays at the entry point because
@@ -2483,7 +2500,8 @@ describe('FieldOpenApiV2Service normalizeFieldVo', () => {
       {} as never,
       {} as never,
       createFieldSupplementService() as never,
-      {} as never
+      {} as never,
+      thresholdConfig()
     ) as unknown as ITestFieldOpenApiV2Service;
 
   it('derives cellValueType, dbFieldType for singleLineText field', () => {
@@ -2909,7 +2927,8 @@ describe('FieldOpenApiV2Service normalizeFieldVo', () => {
       {} as never,
       {} as never,
       createFieldSupplementService() as never,
-      {} as never
+      {} as never,
+      thresholdConfig()
     ) as unknown as ITestFieldOpenApiV2Service;
     const vo = await (
       service as unknown as {
@@ -2977,16 +2996,17 @@ describe('FieldOpenApiV2Service createField', () => {
       { field: { invalidateTables: vi.fn() } } as never,
       {} as never,
       createFieldSupplementService() as never,
-      {} as never
+      {} as never,
+      thresholdConfig()
     ) as unknown as ITestFieldOpenApiV2Service;
 
-    vi.spyOn(service as object, 'hasDuplicatedDbFieldName' as never).mockReturnValue(false);
-    vi.spyOn(service as object, 'completeLegacyLinkDbConfigForCreate' as never).mockImplementation(
+    vi.spyOn(service, 'hasDuplicatedDbFieldName').mockReturnValue(false);
+    vi.spyOn(service, 'completeLegacyLinkDbConfigForCreate').mockImplementation(
       async (field) => field as Record<string, unknown>
     );
 
     const extractFieldVoFromDomainTable = vi
-      .spyOn(service as object, 'extractFieldVoFromDomainTable' as never)
+      .spyOn(service, 'extractFieldVoFromDomainTable')
       .mockResolvedValue({
         id: 'fldCreated000000001',
         name: 'Created Field',
@@ -3035,11 +3055,12 @@ describe('FieldOpenApiV2Service createField', () => {
       { field: { invalidateTables: vi.fn() } } as never,
       {} as never,
       createFieldSupplementService() as never,
-      {} as never
+      {} as never,
+      thresholdConfig()
     ) as unknown as ITestFieldOpenApiV2Service;
 
-    vi.spyOn(service as object, 'hasDuplicatedDbFieldName' as never).mockReturnValue(false);
-    vi.spyOn(service as object, 'completeLegacyLinkDbConfigForCreate' as never).mockImplementation(
+    vi.spyOn(service, 'hasDuplicatedDbFieldName').mockReturnValue(false);
+    vi.spyOn(service, 'completeLegacyLinkDbConfigForCreate').mockImplementation(
       async () =>
         ({
           id: 'fldLookup000000001',
@@ -3052,21 +3073,19 @@ describe('FieldOpenApiV2Service createField', () => {
         }) as Record<string, unknown>
     );
 
-    vi.spyOn(service as object, 'extractFieldVoFromDomainTable' as never).mockResolvedValue({
+    vi.spyOn(service, 'extractFieldVoFromDomainTable').mockResolvedValue({
       id: 'fldLookup000000001',
       name: 'Lookup Field',
       type: 'singleLineText',
     } as IFieldVo);
-    const getFieldFromV2 = vi
-      .spyOn(service as object, 'getFieldFromV2' as never)
-      .mockResolvedValue({
-        id: 'fldLookup000000001',
-        name: 'Lookup Field',
-        type: 'singleLineText',
-        isLookup: true,
-        dbFieldType: DbFieldType.Json,
-        isMultipleCellValue: true,
-      } as IFieldVo);
+    const getFieldFromV2 = vi.spyOn(service, 'getFieldFromV2').mockResolvedValue({
+      id: 'fldLookup000000001',
+      name: 'Lookup Field',
+      type: 'singleLineText',
+      isLookup: true,
+      dbFieldType: DbFieldType.Json,
+      isMultipleCellValue: true,
+    } as IFieldVo);
 
     const createdField = await service.createField('tbl3sYKYH4tDz0IEg91', {
       type: 'singleLineText',
@@ -3116,15 +3135,16 @@ describe('FieldOpenApiV2Service createFields', () => {
       { field: { invalidateTables: vi.fn() } } as never,
       {} as never,
       createFieldSupplementService() as never,
-      {} as never
+      {} as never,
+      thresholdConfig()
     ) as unknown as ITestFieldOpenApiV2Service;
 
-    vi.spyOn(service as object, 'hasDuplicatedDbFieldName' as never).mockReturnValue(false);
-    vi.spyOn(service as object, 'completeLegacyLinkDbConfigForCreate' as never).mockImplementation(
+    vi.spyOn(service, 'hasDuplicatedDbFieldName').mockReturnValue(false);
+    vi.spyOn(service, 'completeLegacyLinkDbConfigForCreate').mockImplementation(
       async (field) => field as Record<string, unknown>
     );
 
-    vi.spyOn(service as object, 'extractFieldVoFromDomainTable' as never)
+    vi.spyOn(service, 'extractFieldVoFromDomainTable')
       .mockResolvedValueOnce({
         id: 'fldText000000000001',
         name: 'Text Field',
@@ -3135,16 +3155,14 @@ describe('FieldOpenApiV2Service createFields', () => {
         name: 'Lookup Field',
         type: 'singleLineText',
       } as IFieldVo);
-    const getFieldFromV2 = vi
-      .spyOn(service as object, 'getFieldFromV2' as never)
-      .mockResolvedValue({
-        id: 'fldLookup000000001',
-        name: 'Lookup Field',
-        type: 'singleLineText',
-        isLookup: true,
-        dbFieldType: DbFieldType.Json,
-        isMultipleCellValue: true,
-      } as IFieldVo);
+    const getFieldFromV2 = vi.spyOn(service, 'getFieldFromV2').mockResolvedValue({
+      id: 'fldLookup000000001',
+      name: 'Lookup Field',
+      type: 'singleLineText',
+      isLookup: true,
+      dbFieldType: DbFieldType.Json,
+      isMultipleCellValue: true,
+    } as IFieldVo);
 
     const createdFields = await service.createFields('tbl3sYKYH4tDz0IEg91', [
       {
@@ -3236,7 +3254,8 @@ describe('overlayStoredPendingState (T6581)', () => {
       {} as never,
       {} as never,
       {} as never,
-      prismaService as never
+      prismaService as never,
+      thresholdConfig()
     ) as unknown as IOverlayTestService;
     return { service, findMany };
   };
@@ -3345,7 +3364,8 @@ describe('T7141 lookup unique legacy boundary', () => {
         {} as never,
         {} as never,
         createFieldSupplementService() as never,
-        {} as never
+        {} as never,
+        thresholdConfig()
       ) as unknown as ITestFieldOpenApiV2Service;
       const common = {
         id: 'fldLookup000000001',
@@ -3402,7 +3422,8 @@ describe('FieldOpenApiV2Service pending propagation', () => {
       {} as never,
       {} as never,
       createFieldSupplementService() as never,
-      {} as never
+      {} as never,
+      thresholdConfig()
     );
     await expect(
       service.deleteFields('tbl3sYKYH4tDz0IEg91', ['fld3sYKYH4tDz0IEg91'])

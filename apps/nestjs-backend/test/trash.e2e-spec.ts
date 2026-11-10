@@ -386,7 +386,7 @@ describe('Trash (e2e)', () => {
 
       const findTrash = async () =>
         (await getTrash({ resourceType: TrashType.Space })).data.trashItems.find(
-          (item) => item.resourceId === spaceId
+          (item) => ('resourceId' in item ? item.resourceId : undefined) === spaceId
         );
       await expect.poll(findTrash).toBeDefined();
       const trash = await findTrash();
@@ -401,7 +401,7 @@ describe('Trash (e2e)', () => {
 
       const findTrash = async () =>
         (await getTrash({ resourceType: TrashType.Base })).data.trashItems.find(
-          (item) => item.resourceId === baseId
+          (item) => ('resourceId' in item ? item.resourceId : undefined) === baseId
         );
       await expect.poll(findTrash).toBeDefined();
       const trash = await findTrash();
@@ -922,7 +922,9 @@ describe('Trash (e2e)', () => {
         }
         const listed = await getTrash({ resourceType: TrashType.Space });
         expect(
-          listed.data.trashItems.find((item) => item.resourceId === space.id)
+          listed.data.trashItems.find(
+            (item) => ('resourceId' in item ? item.resourceId : undefined) === space.id
+          )
         ).not.toMatchObject({ isByodb: true });
       } finally {
         await permanentDeleteSpace(space.id);

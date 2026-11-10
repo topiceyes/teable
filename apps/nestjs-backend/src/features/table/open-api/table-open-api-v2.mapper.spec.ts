@@ -1,7 +1,11 @@
-import { FieldType } from '@teable/core';
+import type { IFieldRo, IFieldVo } from '@teable/core';
+import { FieldType, ViewType, CellValueType } from '@teable/core';
 import { describe, expect, it } from 'vitest';
 
 import { mapLegacyCreateTableToV2Input } from './table-open-api-v2.mapper';
+
+type ILegacyCreateField = IFieldRo &
+  Partial<Pick<IFieldVo, 'cellValueType' | 'isMultipleCellValue'>>;
 
 describe('mapLegacyCreateTableToV2Input', () => {
   const foreignTableId = 'tblForeign';
@@ -9,27 +13,28 @@ describe('mapLegacyCreateTableToV2Input', () => {
   const sumValuesExpression = 'sum({values})';
 
   it('maps legacy rollup fields into v2 create-table config', () => {
+    const legacyFields = [
+      {
+        id: 'fldRollup',
+        name: 'Revenue Total',
+        type: FieldType.Rollup,
+        cellValueType: CellValueType.Number,
+        isMultipleCellValue: false,
+        options: {
+          expression: sumValuesExpression,
+          timeZone: 'UTC',
+        },
+        lookupOptions: {
+          linkFieldId: 'fldLink',
+          foreignTableId,
+          lookupFieldId: revenueFieldId,
+        },
+      },
+    ] satisfies ILegacyCreateField[];
     const input = mapLegacyCreateTableToV2Input('bseTest', {
       name: 'Rollup Table',
-      fields: [
-        {
-          id: 'fldRollup',
-          name: 'Revenue Total',
-          type: FieldType.Rollup,
-          cellValueType: 'number',
-          isMultipleCellValue: false,
-          options: {
-            expression: sumValuesExpression,
-            timeZone: 'UTC',
-          },
-          lookupOptions: {
-            linkFieldId: 'fldLink',
-            foreignTableId,
-            lookupFieldId: revenueFieldId,
-          },
-        },
-      ],
-      views: [{ type: 'grid', name: 'Grid' }],
+      fields: legacyFields,
+      views: [{ type: ViewType.Grid, name: 'Grid' }],
       records: [],
     });
 
@@ -38,7 +43,7 @@ describe('mapLegacyCreateTableToV2Input', () => {
         id: 'fldRollup',
         name: 'Revenue Total',
         type: 'rollup',
-        cellValueType: 'number',
+        cellValueType: CellValueType.Number,
         options: {
           expression: sumValuesExpression,
           timeZone: 'utc',
@@ -53,47 +58,48 @@ describe('mapLegacyCreateTableToV2Input', () => {
   });
 
   it('maps legacy conditional rollup and conditional lookup fields into v2 create-table inputs', () => {
+    const legacyFields = [
+      {
+        id: 'fldConditionalRollup',
+        name: 'High Revenue Total',
+        type: FieldType.ConditionalRollup,
+        cellValueType: CellValueType.Number,
+        isMultipleCellValue: false,
+        options: {
+          foreignTableId,
+          lookupFieldId: revenueFieldId,
+          expression: sumValuesExpression,
+          timeZone: 'UTC',
+          filter: {
+            conjunction: 'and',
+            filterSet: [{ fieldId: revenueFieldId, operator: 'isGreater', value: 100 }],
+          },
+        },
+      },
+      {
+        id: 'fldConditionalLookup',
+        name: 'High Revenue Company',
+        type: FieldType.SingleLineText,
+        isLookup: true,
+        isConditionalLookup: true,
+        isMultipleCellValue: true,
+        options: {
+          formatting: { type: 'singleLineText' },
+        },
+        lookupOptions: {
+          foreignTableId,
+          lookupFieldId: 'fldName',
+          filter: {
+            conjunction: 'and',
+            filterSet: [{ fieldId: revenueFieldId, operator: 'isGreater', value: 100 }],
+          },
+        },
+      },
+    ] satisfies ILegacyCreateField[];
     const input = mapLegacyCreateTableToV2Input('bseTest', {
       name: 'Conditional Table',
-      fields: [
-        {
-          id: 'fldConditionalRollup',
-          name: 'High Revenue Total',
-          type: FieldType.ConditionalRollup,
-          cellValueType: 'number',
-          isMultipleCellValue: false,
-          options: {
-            foreignTableId,
-            lookupFieldId: revenueFieldId,
-            expression: sumValuesExpression,
-            timeZone: 'UTC',
-            filter: {
-              conjunction: 'and',
-              filterSet: [{ fieldId: revenueFieldId, operator: 'isGreater', value: 100 }],
-            },
-          },
-        },
-        {
-          id: 'fldConditionalLookup',
-          name: 'High Revenue Company',
-          type: FieldType.SingleLineText,
-          isLookup: true,
-          isConditionalLookup: true,
-          isMultipleCellValue: true,
-          options: {
-            formatting: { type: 'singleLineText' },
-          },
-          lookupOptions: {
-            foreignTableId,
-            lookupFieldId: 'fldName',
-            filter: {
-              conjunction: 'and',
-              filterSet: [{ fieldId: revenueFieldId, operator: 'isGreater', value: 100 }],
-            },
-          },
-        },
-      ],
-      views: [{ type: 'grid', name: 'Grid' }],
+      fields: legacyFields,
+      views: [{ type: ViewType.Grid, name: 'Grid' }],
       records: [],
     });
 
@@ -102,7 +108,7 @@ describe('mapLegacyCreateTableToV2Input', () => {
         id: 'fldConditionalRollup',
         name: 'High Revenue Total',
         type: 'conditionalRollup',
-        cellValueType: 'number',
+        cellValueType: CellValueType.Number,
         options: {
           expression: sumValuesExpression,
           timeZone: 'utc',
@@ -152,7 +158,7 @@ describe('mapLegacyCreateTableToV2Input', () => {
           type: FieldType.SingleLineText,
         },
       ],
-      views: [{ type: 'grid', name: 'Grid' }],
+      views: [{ type: ViewType.Grid, name: 'Grid' }],
       records: [],
     });
 
@@ -184,7 +190,7 @@ describe('mapLegacyCreateTableToV2Input', () => {
           },
         },
       ],
-      views: [{ type: 'grid', name: 'Grid' }],
+      views: [{ type: ViewType.Grid, name: 'Grid' }],
       records: [],
     });
 
@@ -225,7 +231,7 @@ describe('lookup unique values table creation', () => {
             isUnique,
           },
         })),
-        views: [{ type: 'grid', name: 'Grid' }],
+        views: [{ type: ViewType.Grid, name: 'Grid' }],
         records: [],
       });
       expect(input.fields).toEqual([

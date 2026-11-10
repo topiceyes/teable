@@ -49,6 +49,7 @@ describe('convertFormulaToGeneratedColumn blank numeric comparisons', () => {
       type: FieldType.Number,
       cellValueType: CellValueType.Number,
       dbFieldType: DbFieldType.Real,
+      options: {},
     });
     const table = new TableDomain({
       id: 'tblFormulaUnit',
@@ -79,6 +80,7 @@ describe('convertFormulaToSelectQuery blank numeric comparisons', () => {
       type: FieldType.Number,
       cellValueType: CellValueType.Number,
       dbFieldType: DbFieldType.Real,
+      options: {},
     });
     const table = new TableDomain({
       id: 'tblFormulaUnit',

@@ -6,6 +6,7 @@ import type { ClsService } from 'nestjs-cls';
 import { GlobalModule } from '../../global/global.module';
 import type { IClsStore } from '../../types/cls';
 import type { AuditScope } from '../audit/audit-scope';
+import { type PermissionService } from '../auth/permission.service';
 import type { BaseImportService } from '../base/base-import.service';
 import type { CollaboratorService } from '../collaborator/collaborator.service';
 import { DashboardModule } from './dashboard.module';
@@ -54,7 +55,10 @@ describe('DashboardService audit', () => {
       cls,
       {} as CollaboratorService,
       {} as BaseImportService,
-      { emitAtomic } as unknown as AuditScope
+      { emitAtomic } as unknown as AuditScope,
+      {
+        getBaseShareVisibleResourceIds: vi.fn().mockReturnValue(null),
+      } as unknown as PermissionService
     );
   });
 

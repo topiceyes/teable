@@ -76,14 +76,14 @@ import {
   getShareViewGroupPoints,
   GroupPointType,
   ShareViewLinkRecordsType,
-} from '@teable/openapi';
-import type {
-  ICopyVo,
-  IButtonClickVo,
-  IGroupPoint,
-  ITableFullVo,
-  ShareViewAuthVo,
-  ShareViewGetVo,
+  type ISearchCountVo,
+  type ISearchIndexVo,
+  type ICopyVo,
+  type IButtonClickVo,
+  type IGroupPoint,
+  type ITableFullVo,
+  type ShareViewAuthVo,
+  type ShareViewGetVo,
 } from '@teable/openapi';
 import { map } from 'lodash';
 import { vi } from 'vitest';
@@ -1329,11 +1329,16 @@ describe('OpenAPI ShareController (e2e)', () => {
     });
 
     it('cannot use caller viewId or ignoreViewQuery to escape the shared View', async () => {
-      const result = await getShareViewSearchCount(searchShareId, {
-        viewId: `viw${'x'.repeat(16)}`,
-        ignoreViewQuery: true,
-        search: ['Al', searchFieldId, false],
-      });
+      const result = await axios.get<ISearchCountVo>(
+        urlBuilder(GET_SHARE_VIEW_SEARCH_COUNT, { shareId: searchShareId }),
+        {
+          params: {
+            viewId: `viw${'x'.repeat(16)}`,
+            ignoreViewQuery: true,
+            search: ['Al', searchFieldId, false],
+          },
+        }
+      );
 
       expect(result.data.count).toBe(1);
     });
@@ -1464,13 +1469,18 @@ describe('OpenAPI ShareController (e2e)', () => {
     });
 
     it('honors projection and cannot escape the authorized shared View', async () => {
-      const result = await getShareViewSearchIndex(searchShareId, {
-        take: 10,
-        projection: [nameFieldId],
-        viewId: `viw${'x'.repeat(16)}`,
-        ignoreViewQuery: true,
-        search: ['Alpha', '', false],
-      });
+      const result = await axios.get<ISearchIndexVo>(
+        urlBuilder(GET_SHARE_VIEW_SEARCH_INDEX, { shareId: searchShareId }),
+        {
+          params: {
+            take: 10,
+            projection: [nameFieldId],
+            viewId: `viw${'x'.repeat(16)}`,
+            ignoreViewQuery: true,
+            search: ['Alpha', '', false],
+          },
+        }
+      );
 
       expect(result.data).toHaveLength(1);
       expect(result.data?.[0]).toEqual(expect.objectContaining({ index: 1, fieldId: nameFieldId }));

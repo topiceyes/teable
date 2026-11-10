@@ -5,7 +5,9 @@ import { restoreFieldRecordValues } from './restore-field-record-values';
 describe('restoreFieldRecordValues', () => {
   it('restores only non-empty values in chunks', async () => {
     const updater = {
-      updateRecords: vi.fn().mockResolvedValue([]),
+      updateRecords: vi
+        .fn<Parameters<typeof restoreFieldRecordValues>[2]['updateRecords']>()
+        .mockResolvedValue([]),
     };
     const nonEmptyRecords = Array.from({ length: 501 }, (_, index) => ({
       id: `rec${index}`,
@@ -36,7 +38,9 @@ describe('restoreFieldRecordValues', () => {
 
   it('keeps falsy cell values that are not empty defaults', async () => {
     const updater = {
-      updateRecords: vi.fn().mockResolvedValue([]),
+      updateRecords: vi
+        .fn<Parameters<typeof restoreFieldRecordValues>[2]['updateRecords']>()
+        .mockResolvedValue([]),
     };
 
     await restoreFieldRecordValues(

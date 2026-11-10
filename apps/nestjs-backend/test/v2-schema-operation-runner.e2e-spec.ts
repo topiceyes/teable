@@ -255,7 +255,7 @@ describeV2('V2 schema operation runner recovery (e2e)', () => {
   it('repairs a failed schema-only table create operation from the Nest background runner', async () => {
     const createRes = await apiCreateTable(baseId, {
       name: 'Schema operation recovery',
-      fields: [{ name: 'Name', type: FieldType.SingleLineText, isPrimary: true }],
+      fields: [{ name: 'Name', type: FieldType.SingleLineText }],
       records: [],
     });
     expect(createRes.status).toBe(201);
@@ -312,7 +312,7 @@ describeV2('V2 schema operation runner recovery (e2e)', () => {
       apiCreateTable(baseId, {
         name: 'Required field create records',
         fields: [
-          { name: 'Name', type: FieldType.SingleLineText, isPrimary: true },
+          { name: 'Name', type: FieldType.SingleLineText },
           { name: 'Required Code', type: FieldType.SingleLineText, notNull: true },
         ],
         records: [{ fields: { Name: 'Row 1' } }],
@@ -352,7 +352,7 @@ describeV2('V2 schema operation runner recovery (e2e)', () => {
     const createRes = await apiCreateTable(baseId, {
       name: 'Record update data failure availability',
       fields: [
-        { name: 'Name', type: FieldType.SingleLineText, isPrimary: true },
+        { name: 'Name', type: FieldType.SingleLineText },
         {
           name: 'Status',
           type: FieldType.SingleSelect,
@@ -426,7 +426,7 @@ describeV2('V2 schema operation runner recovery (e2e)', () => {
     const createRes = await apiCreateTable(baseId, {
       name: 'Computed backfill data failure availability',
       fields: [
-        { name: 'Name', type: FieldType.SingleLineText, isPrimary: true },
+        { name: 'Name', type: FieldType.SingleLineText },
         { name: 'Amount', type: FieldType.Number },
       ],
       records: [],
@@ -477,7 +477,7 @@ describeV2('V2 schema operation runner recovery (e2e)', () => {
     const createRes = await apiCreateTable(baseId, {
       name: 'Interrupted table update recovery',
       fields: [
-        { name: 'Name', type: FieldType.SingleLineText, isPrimary: true },
+        { name: 'Name', type: FieldType.SingleLineText },
         { name: 'Amount', type: FieldType.Number },
       ],
       records: [],
@@ -493,7 +493,7 @@ describeV2('V2 schema operation runner recovery (e2e)', () => {
     // A real view update goes through TableUpdateFlow and produces a genuine
     // table.update schema operation row for this table. Its completion is
     // written before the response returns, so a single read is enough.
-    await updateViewFilter(table.id, table.defaultViewId, {
+    await updateViewFilter(table.id, table.views[0].id, {
       filter: {
         conjunction: 'and',
         filterSet: [
@@ -554,7 +554,7 @@ describeV2('V2 schema operation runner recovery (e2e)', () => {
     const createRes = await apiCreateTable(baseId, {
       name: 'Connection timeout table update settlement',
       fields: [
-        { name: 'Name', type: FieldType.SingleLineText, isPrimary: true },
+        { name: 'Name', type: FieldType.SingleLineText },
         { name: 'Amount', type: FieldType.Number },
       ],
       records: [],
@@ -567,7 +567,7 @@ describeV2('V2 schema operation runner recovery (e2e)', () => {
     const amountField = table.fields.find((field) => field.name === 'Amount');
     expect(amountField?.id).toBeTruthy();
 
-    await updateViewFilter(table.id, table.defaultViewId, {
+    await updateViewFilter(table.id, table.views[0].id, {
       filter: {
         conjunction: 'and',
         filterSet: [
@@ -629,7 +629,7 @@ describeV2('V2 schema operation runner recovery (e2e)', () => {
     const createRes = await apiCreateTable(baseId, {
       name: 'Missing column update recovery',
       fields: [
-        { name: 'Name', type: FieldType.SingleLineText, isPrimary: true },
+        { name: 'Name', type: FieldType.SingleLineText },
         { name: 'Amount', type: FieldType.Number },
       ],
       records: [],

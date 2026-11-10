@@ -266,9 +266,10 @@ describe('OpenAPI FieldController (e2e)', () => {
           });
 
           const expression = `"x"&{${numberField.id}}`;
-          await updateField(table.id, formulaField.id, {
-            options: { expression },
-          });
+          const legacyPatch: Parameters<typeof updateField>[2] & {
+            options: { expression: string };
+          } = { options: { expression } };
+          await updateField(table.id, formulaField.id, legacyPatch);
           const updatedField = await getField(table.id, formulaField.id);
 
           expect(updatedField.options).toMatchObject({ expression, timeZone: 'Asia/Shanghai' });

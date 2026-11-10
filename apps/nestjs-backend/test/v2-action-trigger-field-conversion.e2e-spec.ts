@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import type { INestApplication } from '@nestjs/common';
-import { FieldKeyType, FieldType } from '@teable/core';
+import { FieldKeyType, FieldType, Relationship } from '@teable/core';
 import { axios, X_CANARY_HEADER } from '@teable/openapi';
 import { ShareDbService } from '../src/share-db/share-db.service';
 import { collectActionTriggers } from './utils/action-trigger';
@@ -216,10 +216,10 @@ describe('V2 action trigger field conversion (e2e)', () => {
     const foreignTable = await createTable(baseId, {
       name: 'v2-action-trigger-foreign-schema-source',
       fields: [
-        { name: 'Name', type: 'singleLineText' },
+        { name: 'Name', type: FieldType.SingleLineText },
         {
           name: 'Status',
-          type: 'singleSelect',
+          type: FieldType.SingleSelect,
           options: { choices: [optionOpen, optionDone] },
         },
       ],
@@ -241,14 +241,14 @@ describe('V2 action trigger field conversion (e2e)', () => {
         {
           id: hostPrimaryFieldId,
           name: 'Name',
-          type: 'singleLineText',
+          type: FieldType.SingleLineText,
         },
         {
           id: linkFieldId,
           name: 'Link',
-          type: 'link',
+          type: FieldType.Link,
           options: {
-            relationship: 'manyOne',
+            relationship: Relationship.ManyOne,
             foreignTableId: foreignTable.id,
             lookupFieldId: foreignPrimaryFieldId,
             isOneWay: true,

@@ -259,7 +259,7 @@ describe('filter-query invalid filter skip', () => {
     const dateField = createDateField(
       'fld_date_time_day',
       'date_time_day_col',
-      TimeFormatting.HH_MM
+      TimeFormatting.Hour24
     );
     const filter = {
       conjunction: 'and',
@@ -294,7 +294,7 @@ describe('filter-query invalid filter skip', () => {
     const dateField = createDateField(
       'fld_date_time_exact',
       'date_time_exact_col',
-      TimeFormatting.HH_MM
+      TimeFormatting.Hour24
     );
     const filter = {
       conjunction: 'and',

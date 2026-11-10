@@ -52,12 +52,12 @@ describeV2('V2 duplicate reverse one-many link field (e2e)', () => {
   it('duplicates a two-way many-one reverse field as an independent one-way link with values', async () => {
     const parent = await createTable(baseId, {
       name: `T8231 Parent ${Date.now()}`,
-      fields: [{ name: 'Parent name', type: FieldType.SingleLineText, isPrimary: true }],
+      fields: [{ name: 'Parent name', type: FieldType.SingleLineText }],
       records: [],
     });
     const child = await createTable(baseId, {
       name: `T8231 Child ${Date.now()}`,
-      fields: [{ name: 'Child name', type: FieldType.SingleLineText, isPrimary: true }],
+      fields: [{ name: 'Child name', type: FieldType.SingleLineText }],
       records: [],
     });
 

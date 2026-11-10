@@ -1,5 +1,5 @@
 import type { ConfigService } from '@nestjs/config';
-import { HttpErrorCode, type IFilter } from '@teable/core';
+import { HttpErrorCode, type IFilter, SortFunc, RowHeightLevel } from '@teable/core';
 import type { PrismaService } from '@teable/db-main-prisma';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 
@@ -11,7 +11,7 @@ const filterItem = {
   fieldId: 'fldTest',
   operator: 'is',
   value: 'x',
-  isSymbol: false,
+  isSymbol: false as const,
 };
 
 const createService = (
@@ -107,8 +107,8 @@ describe('ViewDataSafetyLimitService', () => {
       () => ({
         sort: {
           sortObjs: [
-            { fieldId: 'fldA', order: 'asc' },
-            { fieldId: 'fldB', order: 'desc' },
+            { fieldId: 'fldA', order: SortFunc.Asc },
+            { fieldId: 'fldB', order: SortFunc.Desc },
           ],
         },
       }),
@@ -118,15 +118,15 @@ describe('ViewDataSafetyLimitService', () => {
       { TABLE_LIMIT_VIEW_GROUP_ITEMS_MAX: '1' },
       () => ({
         group: [
-          { fieldId: 'fldA', order: 'asc' },
-          { fieldId: 'fldB', order: 'desc' },
+          { fieldId: 'fldA', order: SortFunc.Asc },
+          { fieldId: 'fldB', order: SortFunc.Desc },
         ],
       }),
     ],
     [
       'validation.limit.view_options_max_bytes',
       { TABLE_LIMIT_VIEW_OPTIONS_MAX_BYTES: '4' },
-      () => ({ options: { rowHeight: 1 } }),
+      () => ({ options: { rowHeight: RowHeightLevel.Tall } }),
     ],
   ])('rejects %s for view payloads', (expectedCode, env, payloadFactory) => {
     const { service } = createService(env);
@@ -146,8 +146,8 @@ describe('ViewDataSafetyLimitService', () => {
       service.ensureSerializedProperties({
         sort: JSON.stringify({
           sortObjs: [
-            { fieldId: 'fldA', order: 'asc' },
-            { fieldId: 'fldB', order: 'desc' },
+            { fieldId: 'fldA', order: SortFunc.Asc },
+            { fieldId: 'fldB', order: SortFunc.Desc },
           ],
         }),
       });

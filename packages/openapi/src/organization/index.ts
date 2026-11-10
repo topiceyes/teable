@@ -1,3 +1,7 @@
 export * from './get-me';
 export * from './departments';
 export * from './user-get';
+export * from './directory-sync';
+export * from './directory-member';
+export * from './directory-role';
+export * from './table-authority-policy';

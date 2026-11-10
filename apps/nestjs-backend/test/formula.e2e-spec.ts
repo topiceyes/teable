@@ -1,15 +1,13 @@
 /* eslint-disable @typescript-eslint/naming-convention */
 /* eslint-disable sonarjs/no-duplicate-string */
 import type { INestApplication } from '@nestjs/common';
-import type {
-  IFieldRo,
-  IFieldVo,
-  IFilter,
-  ILinkFieldOptionsRo,
-  ILookupOptionsRo,
-  ISelectFieldOptionsRo,
-} from '@teable/core';
 import {
+  type IFieldRo,
+  type IFieldVo,
+  type IFilter,
+  type ILinkFieldOptionsRo,
+  type ILookupOptionsRo,
+  type ISelectFieldOptionsRo,
   DateFormattingPreset,
   DbFieldType,
   FieldKeyType,
@@ -19,6 +17,7 @@ import {
   NumberFormattingType,
   Relationship,
   TimeFormatting,
+  type IFormulaFieldOptions,
 } from '@teable/core';
 import {
   X_CANARY_HEADER,
@@ -3573,7 +3572,7 @@ describe('OpenAPI formula (e2e)', () => {
           formulaFieldRos.map((field) => ({
             ...field,
             options: {
-              expression: field.options!.expression.replaceAll(
+              expression: (field.options as IFormulaFieldOptions).expression.replaceAll(
                 lookupFieldId,
                 resolvedLookupFieldId
               ),

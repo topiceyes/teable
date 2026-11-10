@@ -45,6 +45,8 @@ import {
   X_CANARY_HEADER,
   type ITableFullVo,
   type IDataDbMigrationJobStatusVo,
+  TrashType,
+  TableTrashType,
 } from '@teable/openapi';
 import Knex from 'knex';
 import type { Knex as KnexType } from 'knex';
@@ -1532,7 +1534,7 @@ describeByodbStorage('BYODB space storage placement (e2e)', () => {
       restoreBaseId = restoreBase.id;
       const restoreTable = await createTable(restoreBase.id, {
         name: 'BYODB V2 record trash restore table',
-        fields: [{ name: 'Name', type: FieldType.SingleLineText, isPrimary: true }],
+        fields: [{ name: 'Name', type: FieldType.SingleLineText }],
         records: [{ fields: { Name: 'Restore row' } }],
       });
       restoreTableId = restoreTable.id;
@@ -1577,11 +1579,11 @@ describeByodbStorage('BYODB space storage placement (e2e)', () => {
 
       const trash = await getTrashItems({
         resourceId: restoreTable.id,
-        resourceType: ResourceType.Table,
+        resourceType: TrashType.Table,
       });
       const recordTrashItem = trash.data.trashItems.find(
         (item) =>
-          item.resourceType === ResourceType.Record &&
+          item.resourceType === TableTrashType.Record &&
           'resourceIds' in item &&
           item.resourceIds.includes(recordId)
       );
@@ -2159,7 +2161,7 @@ describeByodbStorage('BYODB space storage placement (e2e)', () => {
             internalSchema,
             'table_trash',
             `${quoteIdent('table_id')} = ? AND ${quoteIdent('resource_type')} = ?`,
-            [lifecycleTable.id, ResourceType.Table]
+            [lifecycleTable.id, TrashType.Table]
           ),
         1
       )
@@ -2170,7 +2172,7 @@ describeByodbStorage('BYODB space storage placement (e2e)', () => {
         'public',
         'table_trash',
         `${quoteIdent('table_id')} = ? AND ${quoteIdent('resource_type')} = ?`,
-        [lifecycleTable.id, ResourceType.Table]
+        [lifecycleTable.id, TrashType.Table]
       )
     ).resolves.toBe(0);
 

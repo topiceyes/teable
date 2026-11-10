@@ -72,7 +72,7 @@ describe('V2 self many-one update scope (real HTTP/PostgreSQL e2e)', () => {
       const table = await createTable(base.id, {
         name: 'T8242 self-link update scope',
         fields: [
-          { name: 'Name', type: FieldType.SingleLineText, isPrimary: true },
+          { name: 'Name', type: FieldType.SingleLineText },
           { name: 'Note', type: FieldType.SingleLineText },
         ],
         records: [

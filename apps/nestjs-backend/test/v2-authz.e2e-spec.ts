@@ -47,7 +47,7 @@ describe('V2Controller authorization (e2e)', () => {
 
     const table = await createTable(baseId, {
       name: 'v2 authz',
-      fields: [{ name: 'Title', type: FieldType.SingleLineText, isPrimary: true }],
+      fields: [{ name: 'Title', type: FieldType.SingleLineText }],
     });
     tableId = table.id;
     const titleFieldId = table.fields[0].id;

@@ -16,7 +16,9 @@ const createService = (useV2 = false) => {
     viewOpenApiV2Service as never,
     {} as never,
     {} as never,
-    { get: vi.fn().mockReturnValue(useV2) } as never
+    { get: vi.fn().mockReturnValue(useV2) } as never,
+    {} as never,
+    {} as never
   );
   return { service, viewService, viewOpenApiV2Service };
 };
@@ -104,7 +106,9 @@ describe('ShareSocketService record snapshot projection', () => {
         getDiffIdsByIdAndFilter: vi.fn().mockResolvedValue([]),
         getSnapshotBulk,
       } as never,
-      { get: vi.fn() } as never
+      { get: vi.fn() } as never,
+      {} as never,
+      {} as never
     );
 
     await service.getRecordSnapshotBulk(

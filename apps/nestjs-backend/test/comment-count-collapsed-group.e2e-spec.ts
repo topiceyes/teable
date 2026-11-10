@@ -135,7 +135,6 @@ describe('OpenAPI Comment count with collapsed groups (e2e)', () => {
 
     const query: IGetRecordsRo = {
       viewId: hostTable.views[0].id,
-      type: 'rec',
       take: 300,
       skip: 0,
       groupBy,

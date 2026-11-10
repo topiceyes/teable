@@ -260,7 +260,7 @@ describe('V2 attachment batch no-op race (real multipart/PostgreSQL e2e)', () =>
       const table = await createTable(base.id, {
         name: 'T8242 attachment batch no-op race',
         fields: [
-          { name: 'Name', type: FieldType.SingleLineText, isPrimary: true },
+          { name: 'Name', type: FieldType.SingleLineText },
           { name: 'Gate', type: FieldType.SingleLineText },
           { name: 'Marker', type: FieldType.SingleLineText },
           { name: 'Files', type: FieldType.Attachment },

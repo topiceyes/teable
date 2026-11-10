@@ -46,7 +46,9 @@ const databaseUrl = 'postgresql://teable:secret@db.example.com:5432/teable';
 
 const createService = () => {
   const configService = {
-    get: vi.fn((key: string) => (key === 'PRISMA_DATABASE_URL' ? databaseUrl : undefined)),
+    get: vi.fn((key: string): string | undefined =>
+      key === 'PRISMA_DATABASE_URL' ? databaseUrl : undefined
+    ),
   };
   const release = vi.fn().mockResolvedValue(undefined);
   const pool = {};
@@ -228,6 +230,7 @@ describe('TableQueryObservationRuntimeService', () => {
       since: new Date('2026-08-28T00:00:00.000Z'),
       minSlowCount: 5,
       limit: 10,
+      wideSearchFields: 20,
     };
 
     const result = await service.findSearchHeatByTable({} as never, input);

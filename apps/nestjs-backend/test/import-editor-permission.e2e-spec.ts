@@ -106,7 +106,12 @@ describe('CSV append import permission (e2e)', () => {
       `/attachments/upload/${signature.token}`,
       fs.createReadStream(tempFilePath),
       {
-        headers: { ...signature.requestHeaders },
+        headers: Object.fromEntries(
+          Object.entries(signature.requestHeaders).map(([name, value]) => {
+            if (typeof value !== 'string') throw new Error('Expected a string upload header');
+            return [name, value] as const;
+          })
+        ),
       }
     );
 

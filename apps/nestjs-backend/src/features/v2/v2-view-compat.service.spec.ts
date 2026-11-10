@@ -65,7 +65,11 @@ const errResult = <T>(error: T) => ({
   isErr: () => true,
 });
 
-const createViewOperationPluginRunner = (guardResult = okResult(undefined)) => {
+const createViewOperationPluginRunner = (
+  guardResult:
+    | ReturnType<typeof okResult<undefined>>
+    | ReturnType<typeof errResult<unknown>> = okResult(undefined)
+) => {
   const guard = vi.fn().mockResolvedValue(guardResult);
   const prepare = vi.fn().mockResolvedValue(okResult({ guard }));
   return { guard, prepare };

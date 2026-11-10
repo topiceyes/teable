@@ -92,11 +92,11 @@ describe('V2ViewDeleteSideEffectService', () => {
   it('returns a domain error when Kysely cleanup fails', async () => {
     const { db } = createDeleteDb();
     db.deleteFrom.mockImplementationOnce((_table: string) => ({
-      where: (_column: string, _operator: string, _value: string) => ({
-        where: (_nextColumn: string, _nextOperator: string, _nextValue: string) => ({
+      where: vi.fn((_column: string, _operator: string, _value: string) => ({
+        where: vi.fn((_nextColumn: string, _nextOperator: string, _nextValue: string) => ({
           execute: vi.fn().mockRejectedValue(new Error('cleanup failed')),
-        }),
-      }),
+        })),
+      })),
     }));
     const projection = new V2ViewDeletedResourceCleanupProjection(db as never);
 

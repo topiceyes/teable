@@ -1,0 +1,8 @@
+
+ RUN  v4.1.12 <workspace>/packages/sdk
+
+
+ Test Files  2 passed (2)
+      Tests  7 passed (7)
+   Start at  14:44:03
+   Duration  286ms (transform 58ms, setup 84ms, import 85ms, tests 11ms, environment 208ms)

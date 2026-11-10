@@ -1,6 +1,7 @@
 import { APP_ROBOT_ID } from '@teable/core';
 import type { ClsService } from 'nestjs-cls';
 import { describe, expect, it, vi, type Mock } from 'vitest';
+import { type IClsStore } from '../../types/cls';
 import { CrossBaseLinkAccessService } from './cross-base-link-access.service';
 
 const HOST_TABLE_ID = `tbl${'h'.repeat(16)}`;
@@ -36,7 +37,7 @@ const buildService = (
     accessTokenId: ACCESS_TOKEN_ID,
     ...options.clsValues,
   };
-  const cls = { get: (key: string) => clsValues[key] } as unknown as ClsService;
+  const cls = { get: (key: string) => clsValues[key] } as unknown as ClsService<IClsStore>;
   const service = new CrossBaseLinkAccessService(
     {
       txClient: () => ({

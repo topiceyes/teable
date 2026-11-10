@@ -1,6 +1,6 @@
 import type { TestingModule } from '@nestjs/testing';
 import { Test } from '@nestjs/testing';
-import { ViewType } from '@teable/core';
+import { ViewType, SortFunc } from '@teable/core';
 import { vi } from 'vitest';
 import { GlobalModule } from '../../global/global.module';
 import type { IShareViewInfo } from './share-auth.service';
@@ -176,7 +176,7 @@ describe('ShareService.getShareViewV2', () => {
       skip: 5,
       take: 20,
       projection: ['fldHidden'],
-      orderBy: [{ fieldId: 'fldVisible', order: 'desc' }],
+      orderBy: [{ fieldId: 'fldVisible', order: SortFunc.Desc }],
     });
 
     expect(fixture.recordRead).toHaveBeenCalledWith(
@@ -186,7 +186,7 @@ describe('ShareService.getShareViewV2', () => {
         skip: 5,
         take: 20,
         projection: ['fldPrimary', 'fldVisible'],
-        orderBy: [{ fieldId: 'fldVisible', order: 'desc' }],
+        orderBy: [{ fieldId: 'fldVisible', order: SortFunc.Desc }],
       })
     );
     expect(fixture.legacyFieldRead).not.toHaveBeenCalled();

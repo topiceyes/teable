@@ -40,16 +40,16 @@ import {
   type IV2NodeTestContainer,
 } from '../../../../packages/v2/container-node-test/src';
 import {
+  dataDbKnexClientFactory,
+  type IDataDbPreflightClient,
+} from '../features/space/data-db-preflight.service';
+import { buildMigrationSharedTableSqlCopyPlans } from '../features/space/space-data-db-copy-plan';
+import {
   DataDbClientManager,
   restoreComputedOutboxDeadLetterRows,
   type IComputedOutboxDeadLetterRow,
 } from './data-db-client-manager.service';
 import { DataDbRuntimeCacheService } from './data-db-runtime-cache.service';
-import { buildMigrationSharedTableSqlCopyPlans } from '../features/space/space-data-db-copy-plan';
-import {
-  dataDbKnexClientFactory,
-  type IDataDbPreflightClient,
-} from '../features/space/data-db-preflight.service';
 
 // The shared helper drains only currently due work. Recovery assertions must also
 // await this fixture's scheduled rows: a zero poll is not durable completion.
@@ -1109,7 +1109,6 @@ it.runIf(process.env.TEABLE_V2_RUN_PG_INTEGRATION === '1')(
         updatedAt: now,
         lockedAt: null,
         lockedBy: null,
-        lastError: null,
       };
       const logger = {
         info() {},
@@ -1332,8 +1331,8 @@ it.runIf(process.env.TEABLE_V2_RUN_PG_INTEGRATION === '1')(
       const claimed = claimResult.value;
       // Planned reruns move their bounded membership into the stage ledger before
       // the worker claims them; no archive IDs remain inline.
-      expect(claimed?.seedRecordIds).toEqual([]);
-      expect(claimed?.extraSeedRecords).toEqual([]);
+      expect(claimed).toHaveProperty('seedRecordIds', []);
+      expect(claimed).toHaveProperty('extraSeedRecords', []);
       const hydrated = await sql<{ kind: string; tableId: string; recordId: string }>`select
         kind, table_id as "tableId", record_id as "recordId"
         from ${sql.id(targetSchema, 'computed_update_stage_ledger')}

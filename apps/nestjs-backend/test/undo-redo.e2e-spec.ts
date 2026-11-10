@@ -1,13 +1,11 @@
 /* eslint-disable sonarjs/no-duplicate-string */
 import type { INestApplication } from '@nestjs/common';
-import type {
-  IButtonFieldCellValue,
-  IFieldRo,
-  IFieldVo,
-  ILinkFieldOptions,
-  IRollupFieldOptions,
-} from '@teable/core';
 import {
+  type IButtonFieldCellValue,
+  type IFieldRo,
+  type IFieldVo,
+  type ILinkFieldOptions,
+  type IRollupFieldOptions,
   CellValueType,
   Colors,
   DbFieldType,
@@ -18,6 +16,8 @@ import {
   Role,
   SortFunc,
   ViewType,
+  RowHeightLevel,
+  type IRole,
 } from '@teable/core';
 import {
   axios,
@@ -53,7 +53,6 @@ import {
   getRecords,
   getTrashItems,
   getViewInstallPlugin,
-  ResourceType,
   getView,
   getViewList,
   getShareView,
@@ -79,6 +78,7 @@ import {
   refreshViewShareId,
   X_CANARY_HEADER,
   ensureUndoRedoWindowIdHeader,
+  TrashType,
 } from '@teable/openapi';
 import type { ITableFullVo, IUndoVo, IUserMeVo } from '@teable/openapi';
 import type { AxiosInstance } from 'axios';
@@ -98,14 +98,14 @@ const canRunCanaryV2 =
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const waitForTableTrashCount = async (tableId: string, expectedCount: number, maxRetries = 100) => {
   for (let i = 0; i < maxRetries; i++) {
-    const result = await getTrashItems({ resourceId: tableId, resourceType: ResourceType.Table });
+    const result = await getTrashItems({ resourceId: tableId, resourceType: TrashType.Table });
     if (result.data.trashItems.length === expectedCount) {
       return result;
     }
     await sleep(100);
   }
 
-  return await getTrashItems({ resourceId: tableId, resourceType: ResourceType.Table });
+  return await getTrashItems({ resourceId: tableId, resourceType: TrashType.Table });
 };
 const waitForViewVisibility = async (
   tableId: string,
@@ -544,7 +544,7 @@ describe('Undo Redo (e2e)', () => {
     async () => {
       const constrainedTable = await createTable(baseId, {
         name: `undo-trash-${getRandomString(6)}`,
-        fields: [{ type: FieldType.SingleLineText, name: 'Title', isPrimary: true }],
+        fields: [{ type: FieldType.SingleLineText, name: 'Title' }],
         records: [],
       });
       const previousCanaryHeader = axios.defaults.headers.common[X_CANARY_HEADER];
@@ -892,7 +892,7 @@ describe('Undo Redo (e2e)', () => {
     async () => {
       const constrainedTable = await createTable(baseId, {
         name: `undo-constrained-${getRandomString(6)}`,
-        fields: [{ type: FieldType.SingleLineText, name: 'Title', isPrimary: true }],
+        fields: [{ type: FieldType.SingleLineText, name: 'Title' }],
         records: [],
       });
       const previousCanaryHeader = axios.defaults.headers.common[X_CANARY_HEADER];
@@ -1617,7 +1617,7 @@ describe('Undo Redo (e2e)', () => {
     expect((await getView(table.id, view.id)).data.group).toEqual(group);
 
     // options
-    const options = { rowHeight: 'tall' as const, fieldNameDisplayLines: 2 };
+    const options = { rowHeight: RowHeightLevel.Tall as const, fieldNameDisplayLines: 2 };
     const optionsResponse = await awaitWithEvent(() =>
       updateViewOptions(table.id, view.id, { options })
     );
@@ -2273,7 +2273,7 @@ describe('Undo Redo (e2e)', () => {
     let editorAxios: AxiosInstance;
     let editorId: string;
 
-    const setEditorRole = (role: Role) =>
+    const setEditorRole = (role: Exclude<IRole, typeof Role.Owner>) =>
       updateBaseCollaborator({
         baseId,
         updateBaseCollaborateRo: { principalId: editorId, principalType: PrincipalType.User, role },

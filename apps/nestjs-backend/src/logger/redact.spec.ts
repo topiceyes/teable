@@ -79,7 +79,7 @@ describe('LOG_REDACT_PATHS', () => {
           url: '/x',
           headers: { authorization: 'Bearer t', cookie: 'auth_session=s' },
         },
-        body: { token: 't', name: 'n' },
+        body: { token: 't', appSecret: 'dingtalk-secret', name: 'n' },
         err: { config: { headers: { Authorization: 'Bearer t' } } },
       },
       'hello'
@@ -89,7 +89,7 @@ describe('LOG_REDACT_PATHS', () => {
     expect(log.password).toBe(REDACTED);
     expect(log.user).toEqual({ id: 'usr1', apiKey: REDACTED });
     expect(log.req.headers).toEqual({ authorization: REDACTED, cookie: REDACTED });
-    expect(log.body).toEqual({ token: REDACTED, name: 'n' });
+    expect(log.body).toEqual({ token: REDACTED, appSecret: REDACTED, name: 'n' });
     expect(log.err.config.headers.Authorization).toBe(REDACTED);
     expect(log.req.url).toBe('/x');
   });

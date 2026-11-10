@@ -39,6 +39,7 @@ describe('Import open API write freeze', () => {
       service.createTableFromCsvImport('bseImport', {
         attachmentUrl: importCsvUrl,
         fileType: SUPPORTEDTYPE.CSV,
+        tz: 'UTC',
         worksheets: {},
       })
     ).rejects.toBe(freezeError);
@@ -70,6 +71,7 @@ describe('Import open API write freeze', () => {
       service.createTableFromExcelImport('bseImport', {
         attachmentUrl: 'https://example.com/import.xlsx',
         fileType: SUPPORTEDTYPE.EXCEL,
+        tz: 'UTC',
         worksheets: {},
       })
     ).rejects.toBe(freezeError);
@@ -132,6 +134,7 @@ describe('Import open API write freeze', () => {
       service.createTableFromImport('bseImport', {
         attachmentUrl: importCsvUrl,
         fileType: SUPPORTEDTYPE.CSV,
+        tz: 'UTC',
         worksheets: {},
       })
     ).rejects.toBe(freezeError);

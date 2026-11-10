@@ -165,7 +165,7 @@ describeByodbRunner('V2 schema operation runner BYODB routing (e2e)', () => {
 
     const createRes = await apiCreateTable(base.id, {
       name: 'BYODB runner recovery',
-      fields: [{ name: 'Name', type: FieldType.SingleLineText, isPrimary: true }],
+      fields: [{ name: 'Name', type: FieldType.SingleLineText }],
       records: [],
     });
     expect(createRes.status).toBe(201);

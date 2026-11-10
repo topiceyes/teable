@@ -1,4 +1,4 @@
-import { FieldType } from '@teable/core';
+import { FieldType, Relationship } from '@teable/core';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const {
@@ -126,7 +126,7 @@ describe('TableOpenApiV2Service.createTable', () => {
             name: 'Related',
             type: FieldType.Link,
             options: {
-              relationship: 'manyMany',
+              relationship: Relationship.ManyMany,
               foreignTableId: 'tblForeign',
             },
           },
@@ -151,7 +151,7 @@ describe('TableOpenApiV2Service.createTable', () => {
           name: 'Related',
           type: 'link',
           options: {
-            relationship: 'manyMany',
+            relationship: Relationship.ManyMany,
             foreignTableId: 'tblForeign',
             lookupFieldId: 'fldPrimary',
           },

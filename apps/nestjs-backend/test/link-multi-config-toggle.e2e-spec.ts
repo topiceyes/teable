@@ -118,15 +118,12 @@ describe('Link field multi-config toggle regression (e2e)', () => {
       });
       expect((convertedField.options as ILinkFieldOptions).symmetricFieldId).toBeUndefined();
 
+      const sourceRecordIds = sourceTable.records.map((record) => record.id);
       const sourceRecords = await getRecords(sourceTable.id, {
         fieldKeyType: FieldKeyType.Id,
       });
-      const firstRecord = sourceRecords.records.find(
-        (record) => record.id === sourceTable.records[0].id
-      );
-      const secondRecord = sourceRecords.records.find(
-        (record) => record.id === sourceTable.records[1].id
-      );
+      const firstRecord = sourceRecords.records.find((record) => record.id === sourceRecordIds[0]);
+      const secondRecord = sourceRecords.records.find((record) => record.id === sourceRecordIds[1]);
 
       expect(firstRecord?.fields[linkField.id]).toEqual([
         expect.objectContaining({

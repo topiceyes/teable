@@ -981,7 +981,16 @@ describe('interactive record query cancellation (real PostgreSQL / HTTP / ShareD
         expect(
           result.value
             ._unsafeUnwrap()
-            .map((row: { __id: string }) => row.__id)
+            .map((row) => {
+              if (
+                !row ||
+                typeof row !== 'object' ||
+                !('__id' in row) ||
+                typeof row.__id !== 'string'
+              )
+                throw new Error('Expected a row id');
+              return row.__id;
+            })
             .toSorted((a: string, b: string) => Number(a > b) - Number(a < b))
         ).toEqual(
           [...recordIds()].toSorted((a: string, b: string) => Number(a > b) - Number(a < b))

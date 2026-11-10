@@ -1,3 +1,4 @@
+import type * as OpenTelemetryApi from '@opentelemetry/api';
 import { TraceFlags } from '@opentelemetry/api';
 import { describe, expect, it, vi } from 'vitest';
 import {
@@ -11,7 +12,7 @@ const { getActiveSpan } = vi.hoisted(() => ({
 }));
 
 vi.mock('@opentelemetry/api', async () => {
-  const actual = await vi.importActual('@opentelemetry/api');
+  const actual = await vi.importActual<typeof OpenTelemetryApi>('@opentelemetry/api');
   return {
     ...actual,
     trace: {

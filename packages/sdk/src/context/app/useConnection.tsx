@@ -4,6 +4,7 @@ import type { ConnectionReceiveRequest, Socket } from 'sharedb/lib/sharedb';
 import { ReconnectingSockJS } from '../../utils/reconnectingSockJS';
 import { addQueryParamsToWebSocketUrl } from '../../utils/urlParams';
 import { useTranslation } from './i18n';
+import { installPresenceErrorHandling } from './presenceErrorHandling';
 import { handleShareDbReceive, handleShareDbError } from './shareDbErrorHandler';
 import { isConnected, useConnectionAutoManage } from './useConnectionAutoManage';
 
@@ -47,6 +48,7 @@ export const useConnection = (path?: string) => {
       socket.reconnect();
     }
     const connection = new Connection(socket as Socket);
+    installPresenceErrorHandling(connection);
     setConnection(connection);
 
     let pingInterval: ReturnType<typeof setInterval>;

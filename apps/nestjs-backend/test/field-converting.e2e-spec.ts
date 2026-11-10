@@ -45,6 +45,8 @@ import {
   deleteBaseCollaborator,
   PrincipalType,
   X_CANARY_HEADER,
+  CONVERT_FIELD,
+  urlBuilder,
 } from '@teable/openapi';
 import type { Knex } from 'knex';
 import type { MockInstance } from 'vitest';
@@ -3902,21 +3904,25 @@ describe('OpenAPI Freely perform column transformations (e2e)', () => {
       );
 
       // Client often re-saves with only lookupOptions / type, omitting options (or null).
-      const updated = await convertField(table2.id, lookupField.id, {
-        type: FieldType.SingleSelect,
-        isLookup: true,
-        options: null,
-        lookupOptions: {
-          foreignTableId: table1.id,
-          lookupFieldId: selectField.id,
-          linkFieldId: linkField.id,
-          filter: {
-            conjunction: 'and',
-            filterSet: [{ fieldId: selectField.id, operator: 'is', value: 'Arabic' }],
+      const { data: updated, status: updatedStatus } = await axios.put<IFieldVo>(
+        urlBuilder(CONVERT_FIELD, { tableId: table2.id, fieldId: lookupField.id }),
+        {
+          type: FieldType.SingleSelect,
+          isLookup: true,
+          options: null,
+          lookupOptions: {
+            foreignTableId: table1.id,
+            lookupFieldId: selectField.id,
+            linkFieldId: linkField.id,
+            filter: {
+              conjunction: 'and',
+              filterSet: [{ fieldId: selectField.id, operator: 'is', value: 'Arabic' }],
+            },
           },
-        },
-      });
+        }
+      );
 
+      expect(updatedStatus).toBe(200);
       expect((updated.options as ISelectFieldOptions).choices).toEqual(
         expect.arrayContaining([
           expect.objectContaining({ name: 'Arabic' }),

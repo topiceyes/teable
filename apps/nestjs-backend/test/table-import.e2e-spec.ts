@@ -211,7 +211,8 @@ const uploadCsv = (contents: string | Buffer, fileName: string): Promise<string>
 
 const uploadBannerExcel = async (): Promise<string> => {
   const bannerWorkbook = XLSX.utils.book_new();
-  const bannerSheet = XLSX.utils.aoa_to_sheet(
+  const bannerSheet = XLSX.utils.sheet_add_aoa<string | number>(
+    {},
     [
       ['Template title'],
       [],

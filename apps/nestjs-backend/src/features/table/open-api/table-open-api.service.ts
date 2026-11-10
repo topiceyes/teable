@@ -49,7 +49,6 @@ import { DatabaseRouter } from '../../../global/database-router.service';
 import { RawOpType } from '../../../share-db/interface';
 import type { IClsStore } from '../../../types/cls';
 import { baseDisplayName } from '../../../utils/base-name';
-import { getMaxLevelRole } from '../../../utils/get-max-level-role';
 import { updateOrder } from '../../../utils/update-order';
 import { AuditScope } from '../../audit/audit-scope';
 import { Audit } from '../../audit/audit.decorator';
@@ -1127,25 +1126,22 @@ export class TableOpenApiService {
       }
       return this.getPermissionByPermissionMap(permissionMap);
     }
-    // A user can hold a role on the base (personally or through a department)
-    // and a higher one on the space at the same time. Request authorization
-    // (PermissionService.getPermissionByBaseId) grants the union of both, so
-    // the table permission map must derive from the highest role as well,
-    // otherwise the UI renders a department's viewer grant as read-only while
-    // the space owner is actually allowed to write.
-    const { spaceId } = await this.permissionService.getUpperIdByBaseId(baseId);
-    const baseRole = await this.permissionService.getRoleByBaseId(baseId);
-    const spaceRole = await this.permissionService.getRoleBySpaceId(spaceId);
-    const roles = [baseRole, spaceRole].filter((r): r is IRole => Boolean(r));
-    const role = roles.length ? getMaxLevelRole(roles.map((roleName) => ({ roleName }))) : null;
-    if (!role) {
-      throw new CustomHttpException(`Role not found`, HttpErrorCode.NOT_FOUND, {
-        localization: {
-          i18nKey: 'httpErrors.role.notFound',
-        },
-      });
-    }
-    return this.getPermissionByRole(tableId, role);
+    const table = await this.prismaService.txClient().tableMeta.findFirst({
+      where: { id: tableId, baseId, deletedTime: null },
+      select: { id: true },
+    });
+    if (!table) throw new NotFoundException('Table not found in this base');
+    // The same authorization path drives HTTP guards and the UI permissions DTO.
+    const actions = new Set(
+      await this.permissionService.getPermissions(tableId, this.cls.get('accessTokenId'))
+    );
+    const permissionMap = Object.fromEntries(
+      Object.keys(TemplateRolePermission).map((action) => [
+        action,
+        actions.has(action as BasePermission),
+      ])
+    ) as Record<BasePermission, boolean>;
+    return this.getPermissionByPermissionMap(permissionMap);
   }
 
   private async getPermissionByPermissionMap(permissionMap: Record<BasePermission, boolean>) {

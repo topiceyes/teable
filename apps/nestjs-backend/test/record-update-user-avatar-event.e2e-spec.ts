@@ -82,7 +82,7 @@ describe('V2 user avatar update events (real HTTP/PostgreSQL e2e)', () => {
       const table = await createTable(base.id, {
         name: 'T8242 user avatar event acceptance',
         fields: [
-          { name: 'Name', type: FieldType.SingleLineText, isPrimary: true },
+          { name: 'Name', type: FieldType.SingleLineText },
           { name: 'Owner', type: FieldType.User },
         ],
         records: [{ fields: { Name: 'missing avatar' } }, { fields: { Name: 'stale avatar' } }],

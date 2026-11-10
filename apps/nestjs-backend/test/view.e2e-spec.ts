@@ -1893,19 +1893,19 @@ describe('OpenAPI ViewController (e2e)', () => {
         name: 'Range date',
         type: FieldType.Date,
       });
-      const sourceFilter = {
+      const sourceFilter: NonNullable<Parameters<typeof createViewApi>[1]['filter']> = {
         conjunction: 'and' as const,
         filterSet: [
           {
             fieldId: table.fields[0].id,
             operator: '=',
-            isSymbol: true,
+            isSymbol: true as const,
             value: 'alpha',
           },
           {
             fieldId: table.fields[0].id,
             operator: 'IN',
-            isSymbol: true,
+            isSymbol: true as const,
             value: 'alpha',
           },
           {
@@ -3970,25 +3970,28 @@ describe('OpenAPI ViewController (e2e)', () => {
       [{ password: 'ab' }, 'short password'],
       [{ allowCopy: 'yes' }, 'non-boolean flag'],
       [{ submit: { requireLogin: 'yes' } }, 'invalid nested submit flag'],
-    ])('rejects invalid metadata at the HTTP boundary: %s (%s)', async (shareMeta) => {
-      const view = (await getViews(table.id))[0]!;
-      const rowBefore = await prismaService.view.findUniqueOrThrow({
-        where: { id: view.id },
-        select: { shareMeta: true, version: true },
-      });
-
-      const error = await getError(() =>
-        axios.put(`/table/${table.id}/view/${view.id}/share-meta`, shareMeta)
-      );
-
-      expect(error?.status).toBe(400);
-      await expect(
-        prismaService.view.findUniqueOrThrow({
+    ])(
+      'rejects invalid metadata at the HTTP boundary: %s (%s)',
+      async (shareMeta, _description) => {
+        const view = (await getViews(table.id))[0]!;
+        const rowBefore = await prismaService.view.findUniqueOrThrow({
           where: { id: view.id },
           select: { shareMeta: true, version: true },
-        })
-      ).resolves.toEqual(rowBefore);
-    });
+        });
+
+        const error = await getError(() =>
+          axios.put(`/table/${table.id}/view/${view.id}/share-meta`, shareMeta)
+        );
+
+        expect(error?.status).toBe(400);
+        await expect(
+          prismaService.view.findUniqueOrThrow({
+            where: { id: view.id },
+            select: { shareMeta: true, version: true },
+          })
+        ).resolves.toEqual(rowBefore);
+      }
+    );
   });
 
   describe('Refresh View share ID v2 canary (T6420)', () => {

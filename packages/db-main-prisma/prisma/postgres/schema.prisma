@@ -233,6 +233,7 @@ model Base {
   tables           TableMeta[]
   dataDbMoveJobs   BaseDataDbMoveJob[]
   userOrders       UserBaseOrder[]
+  authorityPolicy TableAuthorityPolicy?
 
   @@index([order])
   @@index([spaceId])
@@ -702,6 +703,7 @@ model User {
 
   accounts   Account[]
   baseOrders UserBaseOrder[]
+  directoryMembers DirectoryMember[]
 
   @@map("users")
 }
@@ -1350,4 +1352,142 @@ model ShortLink {
   @@unique([type, resourceId])
   @@index([deletedTime])
   @@map("short_link")
+}
+
+// External organization identities are independent of Table domain permissions.
+model DirectoryConnection {
+  id           String   @id @default(cuid())
+  provider     String
+  tenantId     String   @map("tenant_id")
+  name         String
+  enabled      Boolean  @default(true)
+  appKey       String?  @map("app_key")
+  appSecret    String?  @map("app_secret")
+  configurationVersion Int @default(0) @map("configuration_version")
+  createdTime  DateTime @default(now()) @map("created_time")
+  modifiedTime DateTime @updatedAt @map("modified_time")
+
+  departments DirectoryDepartment[]
+  members     DirectoryMember[]
+  syncRuns    DirectorySyncRun[]
+  businessRoles DirectoryBusinessRole[]
+  authorityPolicies TableAuthorityPolicy[]
+
+  @@unique([provider, tenantId])
+  @@map("directory_connection")
+}
+
+model DirectoryDepartment {
+  id           String    @id @default(cuid())
+  connectionId String    @map("connection_id")
+  externalId   String    @map("external_id")
+  // Parent is resolved within the same connection; null represents a root.
+  parentExternalId String? @map("parent_external_id")
+  name         String
+  inactiveTime DateTime? @map("inactive_time")
+  createdTime  DateTime  @default(now()) @map("created_time")
+  modifiedTime DateTime  @updatedAt @map("modified_time")
+
+  connection DirectoryConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  memberships DirectoryMembership[]
+
+  @@unique([connectionId, externalId])
+  @@unique([id, connectionId])
+  @@index([connectionId, parentExternalId])
+  @@map("directory_department")
+}
+
+model DirectoryMember {
+  id           String    @id @default(cuid())
+  connectionId String    @map("connection_id")
+  externalId   String    @map("external_id")
+  unionId      String?   @map("union_id")
+  // Explicitly linked local account; never matched by display name or email alone.
+  userId       String?   @map("user_id")
+  name         String
+  email        String?
+  // Source roles are metadata, not Teable permission grants.
+  externalRoleIds String[] @default([]) @map("external_role_ids")
+  inactiveTime DateTime? @map("inactive_time")
+  createdTime  DateTime  @default(now()) @map("created_time")
+  modifiedTime DateTime  @updatedAt @map("modified_time")
+
+  connection DirectoryConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+  memberships DirectoryMembership[]
+
+  @@unique([connectionId, externalId])
+  @@unique([connectionId, userId])
+  @@unique([id, connectionId])
+  @@index([userId])
+  @@map("directory_member")
+}
+
+model DirectoryMembership {
+  connectionId String @map("connection_id")
+  memberId     String @map("member_id")
+  departmentId String @map("department_id")
+
+  // Composite foreign keys prevent linking employees to another tenant's departments.
+  member DirectoryMember @relation(fields: [memberId, connectionId], references: [id, connectionId], onDelete: Cascade)
+  department DirectoryDepartment @relation(fields: [departmentId, connectionId], references: [id, connectionId], onDelete: Cascade)
+
+  @@id([memberId, departmentId])
+  @@index([departmentId, connectionId])
+  @@map("directory_membership")
+}
+
+model DirectorySyncRun {
+  id           String    @id @default(cuid())
+  connectionId String    @map("connection_id")
+  // pending | running | succeeded | failed; completion must be atomic with reconciliation.
+  status       String    @default("pending")
+  startedTime  DateTime  @default(now()) @map("started_time")
+  finishedTime DateTime? @map("finished_time")
+  // Counters and sanitized error code only; never tokens or raw provider responses.
+  departmentCount Int @default(0) @map("department_count")
+  memberCount Int @default(0) @map("member_count")
+  errorCode String? @map("error_code")
+
+  connection DirectoryConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  @@index([connectionId, startedTime])
+  @@map("directory_sync_run")
+}
+
+
+// Application identity roles; a role by itself never grants table operations.
+model DirectoryBusinessRole {
+  id           String   @id @default(cuid())
+  connectionId String   @map("connection_id")
+  name         String
+  nameKey      String   @map("name_key")
+  enabled      Boolean  @default(true)
+  rules        Json
+  version      Int      @default(1)
+  createdTime  DateTime @default(now()) @map("created_time")
+  modifiedTime DateTime @updatedAt @map("modified_time")
+
+  connection DirectoryConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  @@unique([connectionId, nameKey])
+  @@unique([id, connectionId])
+  @@map("directory_business_role")
+}
+
+
+// Host authorization policy: deliberately outside the v2 Table domain.
+model TableAuthorityPolicy {
+  baseId       String   @id @map("base_id")
+  connectionId String   @map("connection_id")
+  policy       Json
+  revision     Int      @default(1)
+  modifiedBy   String   @map("modified_by")
+  modifiedTime DateTime @updatedAt @map("modified_time")
+
+  base Base @relation(fields: [baseId], references: [id], onDelete: Cascade)
+  connection DirectoryConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  @@index([connectionId])
+  @@map("table_authority_policy")
 }

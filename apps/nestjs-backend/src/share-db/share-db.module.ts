@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { SessionHandleModule } from '../features/auth/session/session-handle.module';
 import { FieldModule } from '../features/field/field.module';
+import { TableAuthorityModule } from '../features/organization/authority-matrix/table-authority.module';
 import { TableModule } from '../features/table/table.module';
 import { RealtimeMetricsModule } from './metrics/realtime-metrics.module';
 import { ReadonlyModule } from './readonly/readonly.module';
@@ -11,6 +12,7 @@ import { ShareDbService } from './share-db.service';
 @Module({
   imports: [
     TableModule,
+    TableAuthorityModule,
     FieldModule,
     ReadonlyModule,
     RepairAttachmentOpModule,

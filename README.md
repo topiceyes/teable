@@ -1,3 +1,6 @@
+> 本 Fork 定制版 **1.0.0**：钉钉组织目录与社区版权限矩阵。
+> [发布说明](doc/releases/1.0.0.md) · [部署说明](deploy/organization-community/README.md) · [需求与设计知识库](doc/knowledge-base/organization-permissions/README.md)
+
 <div align="center">
   <h1 align="center">
     <picture>

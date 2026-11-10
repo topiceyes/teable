@@ -12,7 +12,7 @@ describe('TableDuplicateService.duplicateTableData', () => {
     const sourceColumnSql = 'source-column-info';
     const targetColumnSql = 'target-column-info';
     const dataPrisma = {
-      $queryRawUnsafe: vi.fn(async <T = unknown>(sql: string): Promise<T> => {
+      $queryRawUnsafe: async <T = unknown>(sql: string): Promise<T> => {
         if (sql === sourceColumnSql) {
           return [
             { name: '__id' },
@@ -36,7 +36,7 @@ describe('TableDuplicateService.duplicateTableData', () => {
           return [{ count: 1 }] as T;
         }
         return [] as T;
-      }),
+      },
       $executeRawUnsafe: vi.fn(async (sql: string) => {
         executedSql.push(sql);
         return 1;

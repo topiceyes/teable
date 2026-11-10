@@ -124,14 +124,20 @@ describeDedicated('actual-value frontier with default Nest worker budgets', () =
         if (category === 'frontierInsert' && observation.frontierInsertExamples.length < 3)
           observation.frontierInsertExamples.push(statement);
       }
-      const result = Reflect.apply(originalQuery, this, args);
-      if (observation && result && typeof result.then === 'function') {
+      const result: unknown = Reflect.apply(originalQuery, this, args);
+      if (
+        observation &&
+        result &&
+        typeof result === 'object' &&
+        'then' in result &&
+        typeof result.then === 'function'
+      ) {
         const finish = () => {
           observation.sql[category].elapsedMs += performance.now() - start;
         };
         void result.then(finish, finish);
       }
-      return result;
+      return result as ReturnType<typeof originalQuery>;
     });
     restorers.push(() => querySpy.mockRestore());
 

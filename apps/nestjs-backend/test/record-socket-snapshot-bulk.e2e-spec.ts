@@ -1,5 +1,5 @@
 import type { INestApplication } from '@nestjs/common';
-import { FieldType } from '@teable/core';
+import { FieldType, type IRecord, type ISnapshotBase } from '@teable/core';
 import type { ITableFullVo } from '@teable/openapi';
 import { ClsService } from 'nestjs-cls';
 import { RecordReadonlyServiceAdapter } from '../src/share-db/readonly/record-readonly.service';
@@ -59,7 +59,7 @@ describe('Record socket snapshot-bulk (e2e)', () => {
       table.fields.reduce((sum, field) => sum + `projection[${field.id}]=true&`.length, 0);
     expect(asGetQueryLength).toBeGreaterThan(16 * 1024);
 
-    const snapshots = await clsService.runWith(
+    const snapshots: ISnapshotBase<IRecord>[] = await clsService.runWith(
       {
         user: {
           id: globalThis.testConfig.userId,

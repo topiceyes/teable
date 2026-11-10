@@ -2403,9 +2403,10 @@ describe('OpenAPI SelectionController (e2e)', () => {
         expect(await pasteLink('A')).toBeNull();
 
         // Switch "show by" to the non-primary Code column.
-        await updateField(sources.id, targetFieldId, {
-          options: { lookupFieldId: targets.fields[1].id },
-        });
+        const legacyPatch: Parameters<typeof updateField>[2] & {
+          options: { lookupFieldId: string };
+        } = { options: { lookupFieldId: targets.fields[1].id } };
+        await updateField(sources.id, targetFieldId, legacyPatch);
         const fieldsAfterSwitch = (await getFields(sources.id)).data;
         expect(
           fieldsAfterSwitch.find((field) => field.id === targetFieldId)?.options

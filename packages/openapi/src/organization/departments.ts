@@ -2,14 +2,15 @@ import type { RouteConfig } from '@asteasolutions/zod-to-openapi';
 import { axios } from '../axios';
 import { registerRoute } from '../utils';
 import { z } from '../zod';
+import { organizationQueryRoSchema } from './get-me';
 
 export const GET_DEPARTMENT_LIST = '/organization/department';
 
-export const getDepartmentListRoSchema = z.object({
-  parentId: z.string().optional(),
-  search: z.string().optional(),
+export const getDepartmentListRoSchema = organizationQueryRoSchema.extend({
+  parentId: z.string().min(1).optional(),
+  search: z.string().trim().max(200).optional(),
   includeChildrenDepartment: z
-    .string()
+    .enum(['true', 'false'])
     .transform((value) => value === 'true')
     .optional()
     .meta({ type: 'string' }),
@@ -36,9 +37,6 @@ export const getDepartmentListRoute: RouteConfig = registerRoute({
   method: 'get',
   path: GET_DEPARTMENT_LIST,
   request: {
-    params: z.object({
-      organizationId: z.string(),
-    }),
     query: getDepartmentListRoSchema,
   },
   responses: {

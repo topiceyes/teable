@@ -7,6 +7,8 @@ import { z } from '../zod';
 export const GET_TABLE_PERMISSION = '/base/{baseId}/table/{tableId}/permission';
 
 export const tablePermissionVoSchema = z.object({
+  realtimeEnabled: z.boolean().optional(),
+  dataRestrictionsEnabled: z.boolean().optional(),
   table: z.record(z.custom<TableAction>(), z.boolean()),
   view: z.record(z.custom<ViewAction>(), z.boolean()),
   record: z.record(z.custom<RecordAction>(), z.boolean()),

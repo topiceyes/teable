@@ -49,7 +49,7 @@
     "test-e2e": "pnpm pre-test-e2e && vitest run --config ./vitest-e2e.config.ts --silent",
     "test-e2e:computed-outbox-bullmq": "pnpm pre-test-e2e && cross-env FORCE_V2_ALL=true V2_COMPUTED_OUTBOX_BULLMQ_E2E=true BACKEND_CACHE_PROVIDER=redis BACKEND_CACHE_REDIS_URI=redis://default:${REDIS_PASSWORD:-teable}@127.0.0.1:6379/14 vitest run --config ./vitest-e2e.config.ts test/computed-outbox-bullmq.e2e-spec.ts",
     "test-e2e-cover": "pnpm test-e2e --coverage --bail 1 ${VITEST_SHARD:+--shard=$VITEST_SHARD}",
-    "typecheck": "tsc --project ./tsconfig.json --noEmit",
+    "typecheck": "node --max-old-space-size=8192 ./node_modules/typescript/bin/tsc --project ./tsconfig.json --noEmit",
     "lint": "oxlint && oxfmt --check",
     "fix-all-files": "oxlint --fix && oxfmt",
     "flamegraph-home": "npx 0x --output-dir './.debug/flamegraph/{pid}.0x' --on-port 'autocannon http://localhost:$PORT --duration 20' -- node ../../node_modules/.bin/next start",

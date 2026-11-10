@@ -5,8 +5,9 @@ import {
   FieldKeyType,
   FieldType,
   TimeFormatting,
+  type IFilter,
 } from '@teable/core';
-import type { IFilter, ITableFullVo } from '@teable/openapi';
+import type { ITableFullVo } from '@teable/openapi';
 import {
   getRecords as apiGetRecords,
   getRowCount,

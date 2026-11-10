@@ -27,6 +27,8 @@ import { TeableJwtModule } from '../features/auth/jwt/teable-jwt.module';
 import { PermissionModule } from '../features/auth/permission.module';
 import { DataLoaderModule } from '../features/data-loader/data-loader.module';
 import { ModelModule } from '../features/model/model.module';
+import { TableAuthorityModule } from '../features/organization/authority-matrix/table-authority.module';
+import { TableDataAccessInterceptor } from '../features/organization/authority-matrix/table-data-access.interceptor';
 import { DataDbHealthService } from '../features/space/data-db-health.service';
 import { DataDbMigrationService } from '../features/space/data-db-migration.service';
 import { SpaceDataDbMigrationGuardService } from '../features/space/space-data-db-migration-guard.service';
@@ -78,6 +80,7 @@ const globalModules = {
     PrismaModule,
     DataPrismaModule,
     PermissionModule,
+    TableAuthorityModule,
     DataLoaderModule,
     PerformanceCacheModule,
     TeableJwtModule,
@@ -111,6 +114,7 @@ const globalModules = {
 
   // for overriding the default TablePermissionService, FieldPermissionService, RecordPermissionService, and ViewPermissionService
   providers: [
+    { provide: APP_INTERCEPTOR, useClass: TableDataAccessInterceptor },
     DbProvider,
     DataDbRuntimeCacheService,
     DataDbClientManager,

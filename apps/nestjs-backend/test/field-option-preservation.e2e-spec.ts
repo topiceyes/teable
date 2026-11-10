@@ -267,7 +267,7 @@ const optionCases: OptionCase[] = [
       options: {
         formatting: { type: NumberFormattingType.Decimal, precision: 0 },
         showAs: {
-          type: 'bar',
+          type: SingleNumberDisplayType.Bar,
           color: Colors.Green,
           showValue: true,
           maxValue: 100,
@@ -277,7 +277,7 @@ const optionCases: OptionCase[] = [
     expected: {
       formatting: { type: NumberFormattingType.Decimal, precision: 0 },
       showAs: {
-        type: 'bar',
+        type: SingleNumberDisplayType.Bar,
         color: Colors.Green,
         showValue: true,
         maxValue: 100,

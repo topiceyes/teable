@@ -126,7 +126,7 @@ describe('Community cross-base paste link auto-create authorization (T8153/Y3568
         {
           name: 'Name',
           type: FieldType.SingleSelect,
-          isPrimary: true,
+
           options: {
             choices: [{ name: 'Existing foreign title', color: Colors.Blue }],
           },

@@ -1,3 +1,4 @@
+import { type Knex } from 'knex';
 import createKnex from 'knex';
 import { newDb } from 'pg-mem';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -29,7 +30,7 @@ describe('reliability candidate SQL', () => {
     try {
       const sql = reliabilityCandidateQuery(db, undefined).toSQL().sql;
       expect(sql).toContain('inner join "computed_reliability_issue" as "i"');
-      expect(sql).not.toMatch(/"[^"]+"\."[^\.]+\."computed_reliability_issue"/);
+      expect(sql).not.toMatch(/"[^"]+"\."[^.]+\."computed_reliability_issue"/);
     } finally {
       await db.destroy();
     }
@@ -39,7 +40,7 @@ describe('issue maintenance eligibility before limits', () => {
   it('finds allowed Base rows even behind a full page of disabled rows', async () => {
     const db = newDb().adapters.createKnex();
     try {
-      await db.schema.createTable('issues', (table) => {
+      await db.schema.createTable('issues', (table: Knex.CreateTableBuilder) => {
         table.integer('id');
         table.string('base_id');
       });
@@ -60,7 +61,7 @@ describe('issue maintenance eligibility before limits', () => {
   it('excludes migrated default rows and limits BYODB to current bindings', async () => {
     const db = newDb().adapters.createKnex();
     try {
-      await db.schema.createTable('issues', (table) => {
+      await db.schema.createTable('issues', (table: Knex.CreateTableBuilder) => {
         table.string('base_id');
       });
       await db('issues').insert([{ base_id: 'default' }, { base_id: 'moved' }]);

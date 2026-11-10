@@ -1,5 +1,6 @@
 import { IdPrefix, ViewType } from '@teable/core';
 import {
+  TablePermissionContext,
   useConnection,
   useIsReadOnlyPreview,
   usePersonalView,
@@ -8,7 +9,7 @@ import {
   useViews,
 } from '@teable/sdk';
 import { useTranslation } from 'next-i18next';
-import { useEffect } from 'react';
+import { useContext, useEffect } from 'react';
 import type { Query } from 'sharedb';
 import { useShareEffectiveEdit } from '@/features/app/context/ShareContext';
 import { tableConfig } from '@/features/i18n/table.config';
@@ -31,14 +32,14 @@ export const View = (props: IViewBaseProps) => {
   const isReadOnlyPreview = useIsReadOnlyPreview();
   const isShareEditor = useShareEffectiveEdit();
   const { openPersonalView, isPersonalView } = usePersonalView();
+  const { dataRestrictionsEnabled } = useContext(TablePermissionContext);
 
-  // Auto-open personal view for read-only contexts:
-  // template, can-view share, or anonymous on can-edit share (no real edit permissions).
+  // Restricted users query through a personal view; read-only previews use the same local controls.
   useEffect(() => {
-    if (isReadOnlyPreview && !isShareEditor && !isPersonalView) {
+    if ((dataRestrictionsEnabled || (isReadOnlyPreview && !isShareEditor)) && !isPersonalView) {
       openPersonalView?.();
     }
-  }, [isReadOnlyPreview, isShareEditor, openPersonalView, isPersonalView]);
+  }, [dataRestrictionsEnabled, isReadOnlyPreview, isShareEditor, openPersonalView, isPersonalView]);
 
   if (tableId && connection?.queries) {
     const query = Object.values(connection?.queries).find(

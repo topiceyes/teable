@@ -2,7 +2,15 @@
 /* eslint-disable sonarjs/no-duplicate-string */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import type { INestApplication } from '@nestjs/common';
-import { Colors, FieldKeyType, FieldType, NumberFormattingType, Relationship } from '@teable/core';
+import {
+  Colors,
+  FieldKeyType,
+  FieldType,
+  NumberFormattingType,
+  Relationship,
+  SortFunc,
+  ViewType,
+} from '@teable/core';
 import type { ITableFullVo } from '@teable/openapi';
 import {
   createField,
@@ -185,7 +193,7 @@ describe('Lookup of rollup table open (e2e) T6912', () => {
 
     const view = await createView(payrollTable.id, {
       name: 'Unpaid',
-      type: 'grid',
+      type: ViewType.Grid,
       filter: {
         conjunction: 'and',
         filterSet: [
@@ -197,7 +205,7 @@ describe('Lookup of rollup table open (e2e) T6912', () => {
         ],
       },
       sort: {
-        sortObjs: [{ fieldId: payrollCompanyLookupFieldId, order: 'asc' }],
+        sortObjs: [{ fieldId: payrollCompanyLookupFieldId, order: SortFunc.Asc }],
         manualSort: false,
       },
     });

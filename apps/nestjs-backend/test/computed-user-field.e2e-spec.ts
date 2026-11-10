@@ -47,6 +47,9 @@ import {
   permanentDeleteTable,
 } from './utils/init-app';
 
+const userCellTitle = (value: unknown) =>
+  value && typeof value === 'object' && 'title' in value ? value.title : undefined;
+
 describe('Computed user field (e2e)', () => {
   let app: INestApplication;
   let v2ContainerService: V2ContainerService;
@@ -1267,7 +1270,7 @@ describe('Computed user field (e2e)', () => {
               await getRecord(sourceTable.id, sourceRecordId, { fieldKeyType: FieldKeyType.Id })
             ).data;
 
-            if (latestSourceRecord.fields[ownerField.id]?.title === expectedName) {
+            if (userCellTitle(latestSourceRecord.fields[ownerField.id]) === expectedName) {
               return latestSourceRecord;
             }
 
@@ -1307,9 +1310,9 @@ describe('Computed user field (e2e)', () => {
             ).data;
 
             if (
-              latestSourceRecord.fields[ownerField.id]?.title === expectedName &&
+              userCellTitle(latestSourceRecord.fields[ownerField.id]) === expectedName &&
               latestSourceRecord.fields[ownerFormulaField.id] === expectedName &&
-              latestHostRecord.fields[lookupOwnerField.id]?.title === expectedName &&
+              userCellTitle(latestHostRecord.fields[lookupOwnerField.id]) === expectedName &&
               String(latestHostRecord.fields[lookupOwnerFormulaField.id] ?? '').includes(
                 expectedName
               ) &&

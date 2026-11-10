@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/naming-convention */
 declare module 'redlock' {
   export class ExecutionError extends Error {
+    constructor(message: string, attempts: ReadonlyArray<Promise<unknown>>);
     attempts: any[];
   }
 

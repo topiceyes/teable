@@ -954,9 +954,11 @@ describe('TableOpenApiService.updateDbTableName', () => {
 
 describe('TableOpenApiService.getPermission', () => {
   const createService = (permissionService: Record<string, unknown>) => {
+    const findFirst = vi.fn().mockResolvedValue({ id: 'tblA' });
+    const prisma = { txClient: () => ({ tableMeta: { findFirst } }) };
     const cls = { get: vi.fn().mockReturnValue(undefined) };
     const service = new TableOpenApiService(
-      {} as never,
+      prisma as never,
       {} as never,
       {} as never,
       {} as never,
@@ -977,55 +979,50 @@ describe('TableOpenApiService.getPermission', () => {
       {} as never,
       {} as never
     );
-    const getPermissionByRole = vi
-      .spyOn(service, 'getPermissionByRole')
-      .mockResolvedValue({} as never);
-    return { service, getPermissionByRole };
+    return { service, findFirst };
   };
 
-  it('uses the higher space role when a department grants a lower base role', async () => {
-    const { service, getPermissionByRole } = createService({
-      getUpperIdByBaseId: vi.fn().mockResolvedValue({ spaceId: 'spcA' }),
-      getRoleByBaseId: vi.fn().mockResolvedValue('viewer'),
-      getRoleBySpaceId: vi.fn().mockResolvedValue('owner'),
-    });
-
-    await service.getPermission('bseA', 'tblA');
-
-    expect(getPermissionByRole).toHaveBeenCalledWith('tblA', 'owner');
+  it('uses the effective authorization path for inherited and matrix grants', async () => {
+    const getPermissions = vi
+      .fn()
+      .mockResolvedValue(['table|read', 'record|read', 'record|update']);
+    const { service } = createService({ getPermissions });
+    const result = await service.getPermission('bseA', 'tblA');
+    expect(getPermissions).toHaveBeenCalledWith('tblA', undefined);
+    expect(result.record['record|update']).toBe(true);
+    expect(result.record['record|delete']).toBe(false);
+    expect(result.field['field|create']).toBe(false);
   });
 
-  it('keeps the base role when it is higher than the space role', async () => {
-    const { service, getPermissionByRole } = createService({
-      getUpperIdByBaseId: vi.fn().mockResolvedValue({ spaceId: 'spcA' }),
-      getRoleByBaseId: vi.fn().mockResolvedValue('editor'),
-      getRoleBySpaceId: vi.fn().mockResolvedValue('viewer'),
-    });
-
-    await service.getPermission('bseA', 'tblA');
-
-    expect(getPermissionByRole).toHaveBeenCalledWith('tblA', 'editor');
-  });
-
-  it('falls back to the space role for a user without a base collaborator', async () => {
-    const { service, getPermissionByRole } = createService({
-      getUpperIdByBaseId: vi.fn().mockResolvedValue({ spaceId: 'spcA' }),
-      getRoleByBaseId: vi.fn().mockResolvedValue(null),
-      getRoleBySpaceId: vi.fn().mockResolvedValue('creator'),
-    });
-
-    await service.getPermission('bseA', 'tblA');
-
-    expect(getPermissionByRole).toHaveBeenCalledWith('tblA', 'creator');
-  });
-
-  it('rejects a user with neither a base nor a space role', async () => {
+  it('retains broad independent manual permissions returned by authorization', async () => {
     const { service } = createService({
-      getUpperIdByBaseId: vi.fn().mockResolvedValue({ spaceId: 'spcA' }),
-      getRoleByBaseId: vi.fn().mockResolvedValue(null),
-      getRoleBySpaceId: vi.fn().mockResolvedValue(null),
+      getPermissions: vi.fn().mockResolvedValue(['table|read', 'field|create', 'record|delete']),
     });
+    const result = await service.getPermission('bseA', 'tblA');
+    expect(result.field['field|create']).toBe(true);
+    expect(result.record['record|delete']).toBe(true);
+  });
 
-    await expect(service.getPermission('bseA', 'tblA')).rejects.toThrow('Role not found');
+  it('does not expose grants outside the token scope', async () => {
+    const { service } = createService({
+      getPermissions: vi.fn().mockResolvedValue(['table|read', 'record|read']),
+    });
+    const result = await service.getPermission('bseA', 'tblA');
+    expect(result.record['record|update']).toBe(false);
+  });
+
+  it('propagates denied base membership instead of returning a permission DTO', async () => {
+    const { service } = createService({
+      getPermissions: vi.fn().mockRejectedValue(new Error('base access denied')),
+    });
+    await expect(service.getPermission('bseA', 'tblA')).rejects.toThrow('base access denied');
+  });
+
+  it('rejects a table ID belonging to another base', async () => {
+    const getPermissions = vi.fn();
+    const { service, findFirst } = createService({ getPermissions });
+    findFirst.mockResolvedValue(null);
+    await expect(service.getPermission('bseA', 'tblForeign')).rejects.toThrow('Table not found');
+    expect(getPermissions).not.toHaveBeenCalled();
   });
 });

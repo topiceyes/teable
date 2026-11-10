@@ -220,7 +220,7 @@ describe('V2 attachment stale pre-read events (real HTTP/PostgreSQL e2e)', () =>
       const table = await createTable(base.id, {
         name: 'T8242 attachment stale pre-read',
         fields: [
-          { name: 'Name', type: FieldType.SingleLineText, isPrimary: true },
+          { name: 'Name', type: FieldType.SingleLineText },
           { name: 'Marker', type: FieldType.SingleLineText },
           { name: 'Files', type: FieldType.Attachment },
         ],
@@ -416,7 +416,7 @@ describe('V2 attachment stale pre-read events (real HTTP/PostgreSQL e2e)', () =>
       const table = await createTable(base.id, {
         name: 'T8242 mixed attachment no-op',
         fields: [
-          { name: 'Name', type: FieldType.SingleLineText, isPrimary: true },
+          { name: 'Name', type: FieldType.SingleLineText },
           { name: 'Marker', type: FieldType.SingleLineText },
           { name: 'Files', type: FieldType.Attachment },
         ],

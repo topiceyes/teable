@@ -22,6 +22,7 @@ import type ShareDBClass from 'sharedb';
 import type { PermissionService } from '../features/auth/permission.service';
 import type { SessionHandleService } from '../features/auth/session/session-handle.service';
 import type { IClsStore } from '../types/cls';
+import { registerDocumentAuthorization } from './document-authorization';
 
 const NOTIFICATION_CHANNEL_PREFIX = getUserNotificationChannel('');
 // getCommentChannel(tableId, recordId) => `__record_comment_${tableId}_${recordId}`.
@@ -35,6 +36,17 @@ const PRESENCE_SUBSCRIBE = 'ps';
 const PRESENCE_REQUEST = 'pr';
 
 export interface IAuthMiddlewareDeps {
+  authorizePresenceData?: (
+    userId: string | undefined,
+    tableId: string | undefined,
+    baseId: string
+  ) => Promise<void>;
+  sanitizeDocument?: (
+    userId: string | undefined,
+    type: string,
+    parentId: string,
+    message: Record<string, unknown>
+  ) => Promise<void>;
   sessionHandleService?: SessionHandleService;
   // Presence authorization needs these; when absent (bare test harnesses) every
   // non-notification presence channel is denied, which is the safe default.
@@ -131,7 +143,7 @@ const DENIED = new Error('Presence channel access denied');
  * fake presence.
  */
 const createPresenceAuthorizer = (deps: IAuthMiddlewareDeps) => {
-  const { permissionService, clsService, prismaService: prisma } = deps;
+  const { permissionService, clsService, prismaService: prisma, sessionHandleService } = deps;
 
   const tableToBaseId = async (tableId: string): Promise<string | undefined> =>
     (
@@ -171,50 +183,39 @@ const createPresenceAuthorizer = (deps: IAuthMiddlewareDeps) => {
     return baseId ? { tableId, baseId } : undefined;
   };
 
-  const userCanRead = async (userId: string, baseId: string): Promise<boolean> => {
+  const userCanRead = async (
+    userId: string,
+    resource: { baseId: string; tableId?: string }
+  ): Promise<boolean> => {
     try {
-      // Throws when the user has no role on the base (or its space); reuse the same
-      // resolution the HTTP layer uses so cross-tenant users are rejected identically.
-      await clsService!.runWith({ user: { id: userId } } as IClsStore, () =>
-        permissionService!.getPermissionByBaseId(baseId)
+      // Use the actual table when present, matching the HTTP authorization target.
+      const permissions = await clsService!.runWith({ user: { id: userId } } as IClsStore, () =>
+        permissionService!.getPermissionsByResourceId(resource.tableId || resource.baseId)
       );
-      return true;
+      return permissions.includes(resource.tableId ? 'table|read' : 'base|read');
     } catch {
       return false;
     }
   };
 
-  // Per-connection, edition-agnostic share-scope lookups (base/table/view metadata rows carry
-  // the same share ids in v1 and v2, so no useV2 resolution is needed here).
+  // Share state is mutable. Never retain a successful authorization for the socket lifetime.
   const viewShareScope = async (
-    agent: any,
     shareId: string
   ): Promise<{ tableId: string; baseId: string } | undefined> => {
-    const cache = (agent.custom.__viewShareScope ??= new Map<string, any>());
-    if (!cache.has(shareId)) {
-      const view = await prisma!.view.findFirst({
-        where: { shareId, enableShare: true, deletedTime: null },
-        select: { tableId: true },
-      });
-      const baseId = view ? await tableToBaseId(view.tableId) : undefined;
-      cache.set(shareId, view && baseId ? { tableId: view.tableId, baseId } : undefined);
-    }
-    return cache.get(shareId);
+    const view = await prisma!.view.findFirst({
+      where: { shareId, enableShare: true, deletedTime: null },
+      select: { tableId: true },
+    });
+    const baseId = view ? await tableToBaseId(view.tableId) : undefined;
+    return view && baseId ? { tableId: view.tableId, baseId } : undefined;
   };
 
-  const baseShareScope = async (
-    agent: any,
-    baseShareId: string
-  ): Promise<{ baseId: string } | undefined> => {
-    const cache = (agent.custom.__baseShareScope ??= new Map<string, any>());
-    if (!cache.has(baseShareId)) {
-      const share = await prisma!.baseShare.findUnique({
-        where: { shareId: baseShareId },
-        select: { baseId: true, enabled: true },
-      });
-      cache.set(baseShareId, share?.enabled ? { baseId: share.baseId } : undefined);
-    }
-    return cache.get(baseShareId);
+  const baseShareScope = async (baseShareId: string): Promise<{ baseId: string } | undefined> => {
+    const share = await prisma!.baseShare.findUnique({
+      where: { shareId: baseShareId },
+      select: { baseId: true, enabled: true },
+    });
+    return share?.enabled ? { baseId: share.baseId } : undefined;
   };
 
   const shareAllows = async (
@@ -225,13 +226,13 @@ const createPresenceAuthorizer = (deps: IAuthMiddlewareDeps) => {
     const { shareId, baseShareId } = agent.custom ?? {};
     // Whole-base share: any table/base inside the shared base is in scope.
     if (baseShareId && (spec.share === 'base' || spec.share === 'both')) {
-      const scope = await baseShareScope(agent, baseShareId);
+      const scope = await baseShareScope(baseShareId);
       if (scope && scope.baseId === resource.baseId) return true;
     }
     // Single-view share: only the one shared table (base-level channels are 'base' scope only,
     // so they never reach here with a shareId).
     if (shareId && (spec.share === 'view' || spec.share === 'both')) {
-      const scope = await viewShareScope(agent, shareId);
+      const scope = await viewShareScope(shareId);
       if (scope && resource.tableId && scope.tableId === resource.tableId) return true;
     }
     return false;
@@ -254,7 +255,8 @@ const createPresenceAuthorizer = (deps: IAuthMiddlewareDeps) => {
     if (!resource) return undefined;
 
     const userId: string | undefined = agent.custom?.userId;
-    if (userId && (await userCanRead(userId, resource.baseId))) return undefined;
+    await deps.authorizePresenceData?.(userId, resource.tableId, resource.baseId);
+    if (userId && (await userCanRead(userId, resource))) return undefined;
     if (await shareAllows(agent, spec, resource)) return undefined;
     return DENIED;
   };
@@ -267,16 +269,29 @@ const createPresenceAuthorizer = (deps: IAuthMiddlewareDeps) => {
     if (typeof ch !== 'string') return;
     if (a !== PRESENCE_SUBMIT && a !== PRESENCE_SUBSCRIBE && a !== PRESENCE_REQUEST) return;
     if (agent.stream?.isServer) return;
+    // A socket may outlive signout, account deactivation or session expiry.
+    // Re-read the original server-verified session and account before every decision.
+    if (sessionHandleService) {
+      const sessionId = agent.custom?.sessionId;
+      const sessionUserId = sessionId ? await sessionHandleService.getUserId(sessionId) : undefined;
+      const user =
+        sessionUserId && prisma
+          ? await prisma.user.findFirst({
+              where: {
+                id: sessionUserId,
+                deletedTime: null,
+                deactivatedTime: null,
+                permanentDeletedTime: null,
+                OR: [{ isSystem: false }, { isSystem: null }],
+              },
+              select: { id: true },
+            })
+          : undefined;
+      agent.custom.userId = user?.id;
+    }
     if (ch.startsWith(NOTIFICATION_CHANNEL_PREFIX))
       return checkNotificationPresence(agent, message);
-
-    // One authorization per channel per connection; presence re-sends ('pr') and publishes ('p')
-    // reuse the subscribe verdict.
-    const cache: Map<string, Error | undefined> = (agent.custom.__presenceAuth ??= new Map());
-    if (cache.has(ch)) return cache.get(ch);
-    const verdict = await authorizeChannel(agent, ch);
-    cache.set(ch, verdict);
-    return verdict;
+    return authorizeChannel(agent, ch);
   };
 };
 
@@ -333,6 +348,7 @@ export const authMiddleware = (shareDB: ShareDBClass, deps: IAuthMiddlewareDeps 
           url: context.req.url,
         } as any);
         if (sessionId) {
+          context.agent.custom.sessionId = sessionId;
           const userId = await sessionHandleService.getUserId(sessionId);
           context.agent.custom.userId = userId;
         }
@@ -353,4 +369,14 @@ export const authMiddleware = (shareDB: ShareDBClass, deps: IAuthMiddlewareDeps 
       () => callback(DENIED)
     );
   });
+
+  // Existing subscribers must be checked too: blocking only new subscribes leaves
+  // a previously authorized socket receiving later presence broadcasts indefinitely.
+  shareDB.use('sendPresence', (context, callback) => {
+    authorizePresence(context.agent, { a: PRESENCE_SUBSCRIBE, ch: context.presence.ch }).then(
+      (error) => callback(error),
+      () => callback(DENIED)
+    );
+  });
+  registerDocumentAuthorization(shareDB, deps);
 };

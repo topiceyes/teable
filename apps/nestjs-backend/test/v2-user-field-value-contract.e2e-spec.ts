@@ -120,7 +120,7 @@ describe('V2 user field value contract (e2e)', () => {
         name: `T7809 ${getRandomString(6)}`,
         records: [],
         fields: [
-          { name: 'title', type: FieldType.SingleLineText, isPrimary: true },
+          { name: 'title', type: FieldType.SingleLineText },
           {
             name: '负责人',
             type: FieldType.User,
@@ -186,7 +186,7 @@ describe('V2 user field value contract (e2e)', () => {
         name: `T7810 ${getRandomString(6)}`,
         records: [],
         fields: [
-          { name: 'title', type: FieldType.SingleLineText, isPrimary: true },
+          { name: 'title', type: FieldType.SingleLineText },
           {
             name: '负责人',
             type: FieldType.User,

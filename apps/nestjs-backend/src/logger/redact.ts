@@ -83,6 +83,7 @@ const SENSITIVE_FIELDS = [
   'refreshToken',
   'secret',
   'clientSecret',
+  'appSecret',
   'apiKey',
   'authorization',
   'cookie',

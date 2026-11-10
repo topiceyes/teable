@@ -10,8 +10,9 @@ import {
   NumberFormattingType,
   Relationship,
   TimeFormatting,
+  type IFilter,
 } from '@teable/core';
-import type { IFilter, ISearchIndexByQueryRo, ITableFullVo } from '@teable/openapi';
+import type { ISearchIndexByQueryRo, ITableFullVo } from '@teable/openapi';
 import {
   getSearchCellCount,
   getSearchCount,
@@ -776,7 +777,7 @@ describe.skipIf(globalThis.testConfig.driver !== DriverClient.Pg)(
       ) {
         if (args[0] === 'V2_TABLE_QUERY_OPS_ENABLED') return 'false';
         if (args[0] === 'V2_TABLE_QUERY_OPS_SEARCH_ACCESS_PATH_RUNTIME') return runtimeMode;
-        return getConfig.apply(this, args);
+        return Reflect.apply(getConfig, this, args);
       });
       restoreRuntimeConfig = () => configOverride.mockRestore();
       const appContext = await initApp();
@@ -914,7 +915,7 @@ describe.skipIf(globalThis.testConfig.driver !== DriverClient.Pg)(
             search: [searchValue, '', true],
           });
           expect(
-            [...new Set(hits.data.map((hit) => hit.recordId))].sort(
+            [...new Set(hits.data?.map((hit) => hit.recordId))].sort(
               (a, b) => Number(a > b) - Number(a < b)
             )
           ).toEqual(expectedIds);
@@ -926,9 +927,12 @@ describe.skipIf(globalThis.testConfig.driver !== DriverClient.Pg)(
             })
           );
         }
-        const requestSql = queries.mock.calls.map(([query]) =>
-          typeof query === 'string' ? query : query.text
-        );
+        const queryText = (query: unknown): string => {
+          if (typeof query === 'string') return query;
+          if (query && typeof query === 'object' && 'text' in query) return String(query.text);
+          return '';
+        };
+        const requestSql = queries.mock.calls.map(([query]) => queryText(query));
         expect(requestSql.join('\n')).not.toMatch(
           /table_query_search_vector_config|pg_index|pg_attribute|\bEXPLAIN\b/i
         );

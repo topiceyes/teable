@@ -1,3 +1,4 @@
+import { TablePermissionContext } from '@teable/sdk/context';
 import { useTablePermission, usePersonalView, useView } from '@teable/sdk/hooks';
 import { ConfirmDialog } from '@teable/ui-lib/base';
 import {
@@ -9,7 +10,7 @@ import {
   TooltipTrigger,
 } from '@teable/ui-lib/shadcn';
 import { useTranslation } from 'next-i18next';
-import { Fragment, useState } from 'react';
+import { Fragment, useContext, useState } from 'react';
 import { tableConfig } from '@/features/i18n/table.config';
 
 interface IPersonalViewSwitchProps {
@@ -18,9 +19,10 @@ interface IPersonalViewSwitchProps {
 }
 
 export const PersonalViewSwitch = (props: IPersonalViewSwitchProps) => {
-  const { textClassName, buttonClassName } = props;
+  const { buttonClassName } = props;
   const view = useView();
   const permission = useTablePermission();
+  const { dataRestrictionsEnabled } = useContext(TablePermissionContext);
   const { t } = useTranslation(tableConfig.i18nNamespaces);
   const { isPersonalView, openPersonalView, closePersonalView, syncViewProperties } =
     usePersonalView();
@@ -51,6 +53,7 @@ export const PersonalViewSwitch = (props: IPersonalViewSwitchProps) => {
               <span>{t('table:toolbar.others.personalView.personal')}</span>
               <Switch
                 id="personal-view-switch"
+                disabled={dataRestrictionsEnabled}
                 checked={Boolean(isPersonalView)}
                 onCheckedChange={onSwitchChange}
               />
@@ -58,7 +61,11 @@ export const PersonalViewSwitch = (props: IPersonalViewSwitchProps) => {
           </TooltipTrigger>
           <TooltipPortal>
             <TooltipContent>
-              {<span>{t('table:toolbar.others.personalView.tip')}</span>}
+              <span>
+                {dataRestrictionsEnabled
+                  ? t('common:admin.matrix.personalViewRequired')
+                  : t('table:toolbar.others.personalView.tip')}
+              </span>
             </TooltipContent>
           </TooltipPortal>
         </Tooltip>

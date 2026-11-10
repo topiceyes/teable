@@ -8,6 +8,7 @@
     "experimentalDecorators": true,
     "isolatedModules": false,
     "target": "es2022",
+    "lib": ["ES2024", "DOM", "DOM.Iterable", "ESNext.Disposable"],
     "noEmit": false,
     "sourceMap": true,
     "allowJs": false,

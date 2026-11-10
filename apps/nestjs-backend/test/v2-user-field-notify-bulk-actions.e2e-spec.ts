@@ -128,7 +128,7 @@ describe('V2 user field notification on bulk actions (e2e)', () => {
     const table = await createTable(baseId, {
       name,
       fields: [
-        { name: 'Title', type: FieldType.SingleLineText, isPrimary: true },
+        { name: 'Title', type: FieldType.SingleLineText },
         {
           name: 'Assignee',
           type: FieldType.User,
@@ -304,7 +304,7 @@ describe('V2 user field notification on bulk actions (e2e)', () => {
     // record path that publishes full RecordsBatchCreated field values.
     const foreignTable = await createTable(baseId, {
       name: 'v2 bulk notify duplicate foreign',
-      fields: [{ name: 'Name', type: FieldType.SingleLineText, isPrimary: true }],
+      fields: [{ name: 'Name', type: FieldType.SingleLineText }],
     });
 
     let duplicatedTableId: string | undefined;

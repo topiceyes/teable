@@ -312,7 +312,7 @@ describeV2('V2 duplicate link storage matrix (e2e)', () => {
         const createdTable = await createTable(baseId, {
           name: `T8231 matrix created ${fixtureSuffix}`,
           fields: [
-            { name: 'Created title', type: FieldType.SingleLineText, isPrimary: true },
+            { name: 'Created title', type: FieldType.SingleLineText },
             { name: 'Marker', type: FieldType.SingleLineText },
           ],
           records: [],
@@ -322,7 +322,7 @@ describeV2('V2 duplicate link storage matrix (e2e)', () => {
         const foreignTable = await createTable(baseId, {
           name: `T8231 matrix foreign ${fixtureSuffix}`,
           fields: [
-            { name: 'Foreign title', type: FieldType.SingleLineText, isPrimary: true },
+            { name: 'Foreign title', type: FieldType.SingleLineText },
             { name: 'Marker', type: FieldType.SingleLineText },
           ],
           records: [],

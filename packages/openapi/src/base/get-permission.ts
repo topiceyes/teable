@@ -12,17 +12,19 @@ import { z } from '../zod';
 
 export const GET_BASE_PERMISSION = '/base/{baseId}/permission';
 
-export const GetBasePermissionVoSchema = z.record(
-  z.custom<
-    | TableAction
-    | BaseAction
-    | AutomationAction
-    | RoutineAction
-    | AppAction
-    | TableRecordHistoryAction
-  >(),
-  z.boolean()
-);
+export const GetBasePermissionVoSchema = z
+  .record(
+    z.custom<
+      | TableAction
+      | BaseAction
+      | AutomationAction
+      | RoutineAction
+      | AppAction
+      | TableRecordHistoryAction
+    >(),
+    z.boolean()
+  )
+  .and(z.object({ realtimeEnabled: z.boolean().optional() }));
 
 export type IGetBasePermissionVo = z.infer<typeof GetBasePermissionVoSchema>;
 

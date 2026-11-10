@@ -190,7 +190,6 @@ describe('DomainEventOutboxRelayService resource ownership', () => {
                 { pool: lease.pool }
               );
               const handler: IDurableProjectionHandler<ProjectionMessageJson> = {
-                consumerId,
                 handle: async (context) => {
                   handlerStarted();
                   await held;

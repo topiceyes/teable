@@ -46,12 +46,15 @@ const createDeps = (): IAuthMiddlewareDeps => {
     get: () => undefined,
   };
   const permissionService = {
-    getPermissionByBaseId: vi.fn(async (baseId: string) => {
-      if (currentUserId && userBaseAccess[currentUserId]?.has(baseId)) return ['base|read'];
+    getPermissionsByResourceId: vi.fn(async (resourceId: string) => {
+      const baseId = tableBase[resourceId] || resourceId;
+      if (currentUserId && userBaseAccess[currentUserId]?.has(baseId))
+        return ['base|read', 'table|read'];
       throw new Error('no permission');
     }),
   };
   const prismaService = {
+    user: { findFirst: vi.fn(async ({ where }: { where: { id: string } }) => ({ id: where.id })) },
     tableMeta: {
       findFirst: async ({ where: { id } }: { where: { id: string } }) =>
         tableBase[id] ? { baseId: tableBase[id] } : null,
@@ -79,12 +82,12 @@ const createDeps = (): IAuthMiddlewareDeps => {
   };
 };
 
-const createBackend = () => {
+const createBackend = (deps = createDeps()) => {
   const backend = new ShareDBClass({
     presence: true,
     doNotForwardSendPresenceErrorsToClient: true,
   });
-  authMiddleware(backend, createDeps());
+  authMiddleware(backend, deps);
   return backend;
 };
 
@@ -308,5 +311,170 @@ describe('workflow-test presence requires a signed-in user', () => {
     await expect(
       subscribe(connectBrowser(backend, { userId: 'usrMe' }), getWorkflowTestChannel('wflX'))
     ).resolves.toBeDefined();
+  });
+});
+
+describe('presence authorization is rechecked on an existing connection', () => {
+  it('checks table permission rather than treating database membership as table access', async () => {
+    const deps = createDeps();
+    const getPermissions = vi.mocked(deps.permissionService!.getPermissionsByResourceId);
+    getPermissions.mockResolvedValue(['base|read']);
+    const backend = createBackend(deps);
+    await expect(
+      subscribe(connectBrowser(backend, { userId: 'usrMe' }), getCollaboratorsChannel('tblMine'))
+    ).rejects.toBeDefined();
+    expect(getPermissions).toHaveBeenCalledWith('tblMine');
+  });
+
+  it('rejects the next publish after resource access is revoked', async () => {
+    const deps = createDeps();
+    const backend = createBackend(deps);
+    const connection = connectBrowser(backend, { userId: 'usrMe' });
+    const channel = getCollaboratorsChannel('tblMine');
+    await subscribe(connection, channel);
+    vi.mocked(deps.permissionService!.getPermissionsByResourceId).mockRejectedValue(
+      new Error('revoked')
+    );
+    await expect(submit(connection, channel, 'me', { name: 'old member' })).rejects.toBeDefined();
+  });
+
+  it('allows a previously denied channel after a new live authorization', async () => {
+    const deps = createDeps();
+    const backend = createBackend(deps);
+    const connection = connectBrowser(backend, { userId: 'usrMe' });
+    const channel = getCollaboratorsChannel('tblOther');
+    await expect(
+      submit(connection, channel, 'me', { name: 'not yet allowed' })
+    ).rejects.toBeDefined();
+    vi.mocked(deps.permissionService!.getPermissionsByResourceId).mockResolvedValue(['table|read']);
+    await expect(
+      submit(connection, channel, 'me', { name: 'now allowed' })
+    ).resolves.toBeUndefined();
+  });
+
+  it('rejects old-session activity after signout and after account deactivation', async () => {
+    for (const invalidate of ['session', 'account'] as const) {
+      const deps = createDeps();
+      const backend = createBackend(deps);
+      const connection = connectBrowser(backend, { userId: 'usrMe' });
+      const channel = getCollaboratorsChannel('tblMine');
+      await subscribe(connection, channel);
+      if (invalidate === 'session') {
+        deps.sessionHandleService!.getUserId = vi.fn().mockResolvedValue(undefined);
+      } else {
+        deps.prismaService!.user.findFirst = vi.fn().mockResolvedValue(null);
+      }
+      await expect(submit(connection, channel, 'me', { name: 'inactive' })).rejects.toBeDefined();
+    }
+  });
+
+  it('does not retain a disabled base share or view share scope', async () => {
+    for (const share of ['base', 'view'] as const) {
+      const deps = createDeps();
+      const backend = createBackend(deps);
+      const connection = connectBrowser(
+        backend,
+        share === 'base' ? { baseShareId: 'shrBase' } : { shareId: 'shrView' }
+      );
+      const channel = getActionTriggerChannel('tblShared');
+      await subscribe(connection, channel);
+      if (share === 'base') {
+        deps.prismaService!.baseShare.findUnique = vi
+          .fn()
+          .mockResolvedValue({ baseId: 'bseShared', enabled: false });
+      } else {
+        deps.prismaService!.view.findFirst = vi.fn().mockResolvedValue(null);
+      }
+      await expect(
+        submit(connection, channel, 'me', { name: 'share disabled' })
+      ).rejects.toBeDefined();
+    }
+  });
+
+  it('continues delivering table presence while live access remains valid', async () => {
+    const deps = createDeps();
+    const backend = createBackend(deps);
+    const channel = getCollaboratorsChannel('tblMine');
+    const presence = await subscribe(connectBrowser(backend, { userId: 'usrMe' }), channel);
+    const received = new Promise((resolve) =>
+      presence.on('receive', (_id, value) => resolve(value))
+    );
+    await submit(backend.connect(), channel, 'server', { name: 'authorized update' });
+    await expect(received).resolves.toEqual({ name: 'authorized update' });
+    expect(deps.permissionService!.getPermissionsByResourceId).toHaveBeenCalledWith('tblMine');
+    expect(deps.prismaService!.user.findFirst).toHaveBeenCalledWith({
+      where: {
+        id: 'usrMe',
+        deletedTime: null,
+        deactivatedTime: null,
+        permanentDeletedTime: null,
+        OR: [{ isSystem: false }, { isSystem: null }],
+      },
+      select: { id: true },
+    });
+  });
+
+  it('drops broadcasts after a public share is disabled on an already open subscription', async () => {
+    const deps = createDeps();
+    const backend = createBackend(deps);
+    const channel = getActionTriggerChannel('tblShared');
+    const presence = await subscribe(connectBrowser(backend, { baseShareId: 'shrBase' }), channel);
+    const received = vi.fn();
+    presence.on('receive', received);
+    deps.prismaService!.baseShare.findUnique = vi
+      .fn()
+      .mockResolvedValue({ baseId: 'bseShared', enabled: false });
+    const blocked = new Promise<unknown>((resolve) => {
+      backend.errorHandler = (error) => resolve(error);
+    });
+    await submit(backend.connect(), channel, 'server', { name: 'share disabled' });
+    await expect(blocked).resolves.toMatchObject({ message: 'Presence channel access denied' });
+    expect(received).not.toHaveBeenCalled();
+  });
+
+  it('drops server broadcasts to an already subscribed user after access is revoked', async () => {
+    const deps = createDeps();
+    const backend = createBackend(deps);
+    const channel = getCollaboratorsChannel('tblMine');
+    const presence = await subscribe(connectBrowser(backend, { userId: 'usrMe' }), channel);
+    const received = vi.fn();
+    presence.on('receive', received);
+    vi.mocked(deps.permissionService!.getPermissionsByResourceId).mockRejectedValue(
+      new Error('revoked')
+    );
+    const blocked = new Promise<unknown>((resolve) => {
+      backend.errorHandler = (error) => resolve(error);
+    });
+    await submit(backend.connect(), channel, 'server', { name: 'must not arrive' });
+    await expect(blocked).resolves.toMatchObject({ message: 'Presence channel access denied' });
+    expect(received).not.toHaveBeenCalled();
+  });
+
+  it('drops notification delivery when the original session has expired', async () => {
+    const deps = createDeps();
+    const backend = createBackend(deps);
+    const channel = getUserNotificationChannel('usrMe');
+    const presence = await subscribe(connectBrowser(backend, { userId: 'usrMe' }), channel);
+    const received = vi.fn();
+    presence.on('receive', received);
+    deps.sessionHandleService!.getUserId = vi.fn().mockResolvedValue(undefined);
+    const blocked = new Promise<unknown>((resolve) => {
+      backend.errorHandler = (error) => resolve(error);
+    });
+    await submit(backend.connect(), channel, 'notification', { message: 'private' });
+    await expect(blocked).resolves.toMatchObject({
+      message: expect.stringContaining('own user only'),
+    });
+    expect(received).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when permission or session storage becomes unavailable', async () => {
+    const deps = createDeps();
+    const backend = createBackend(deps);
+    const connection = connectBrowser(backend, { userId: 'usrMe' });
+    const channel = getCollaboratorsChannel('tblMine');
+    await subscribe(connection, channel);
+    deps.sessionHandleService!.getUserId = vi.fn().mockRejectedValue(new Error('storage down'));
+    await expect(submit(connection, channel, 'me', { name: 'offline' })).rejects.toBeDefined();
   });
 });

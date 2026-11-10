@@ -311,7 +311,10 @@ describe('OpenAPI Record-Search-Query (e2e)', async () => {
           projection: projectionFieldIds,
           ignoreViewQuery: true,
         };
-        const res = await axios.post<{ ids: string[]; extra?: IExtraResult }>(
+        const res = await axios.post<{
+          ids: string[];
+          extra?: IExtraResult & { searchHitIndex?: { fieldId: string }[] };
+        }>(
           urlBuilder('/table/{tableId}/record/socket/doc-ids', {
             tableId: table.id,
           }),

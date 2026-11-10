@@ -885,7 +885,9 @@ describe('DataDbClientManager', () => {
             'seed_record_ids'
           );
         expect(restoredRows).toHaveLength(taskCount - 1);
-        expect(new Set(restoredRows.map((row) => row.run_id)).size).toBe(taskCount - 1);
+        expect(new Set(restoredRows.map((row: Record<'run_id', string>) => row.run_id)).size).toBe(
+          taskCount - 1
+        );
         for (const row of restoredRows) {
           expect(row.origin_run_ids).toEqual([row.run_id]);
           expect(row.dead_letter_restore_version).toBe(1);
@@ -900,7 +902,9 @@ describe('DataDbClientManager', () => {
           'record_id'
         );
         expect(restoredSeeds).toHaveLength(taskCount - 1);
-        expect(new Set(restoredSeeds.map((row) => row.task_id)).size).toBe(taskCount - 1);
+        expect(
+          new Set(restoredSeeds.map((row: Record<'task_id', string>) => row.task_id)).size
+        ).toBe(taskCount - 1);
         const replayPlanHashes = await db('computed_update_outbox')
           .whereNot({ id: 'cuo-live' })
           .pluck('plan_hash');

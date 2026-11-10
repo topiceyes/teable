@@ -322,7 +322,7 @@ describe('Computed Orchestrator (e2e)', () => {
           { oldValue: unknown; newValue: unknown }
         >;
         // Formula F1 should move from 1 -> 2
-        const f1Change = assertChange(changes[f1.id]);
+        const f1Change = assertChange(changes?.[f1.id]);
         expectNoOldValue(f1Change);
         expect(f1Change.newValue).toEqual(2);
       }
@@ -1017,7 +1017,7 @@ IF(
       // Event payload verification only in v1 mode
       if (!isV2Mode) {
         const changes = findLatestRecordChangeMap(events, t2.id, t2.records[0].id);
-        const lkpChange = assertChange(changes[lkp.id]);
+        const lkpChange = assertChange(changes?.[lkp.id]);
         expectNoOldValue(lkpChange);
         expect(lkpChange.newValue).toEqual(456);
       }
@@ -1146,7 +1146,7 @@ IF(
       // Event payload verification only in v1 mode
       if (!isV2Mode) {
         const changes = findLatestRecordChangeMap(events, t1.id, t1.records[0].id);
-        const lkpChange = assertChange(changes[lkp.id]);
+        const lkpChange = assertChange(changes?.[lkp.id]);
         expectNoOldValue(lkpChange);
         expect(lkpChange.newValue).toEqual([123]);
       }
@@ -1201,7 +1201,7 @@ IF(
       // Event payload verification only in v1 mode
       if (!isV2Mode) {
         const changes = findLatestRecordChangeMap(events, t1.id, t1.records[0].id);
-        const lkpChange = assertChange(changes[lkp.id]);
+        const lkpChange = assertChange(changes?.[lkp.id]);
         expectNoOldValue(lkpChange);
         expect(lkpChange.newValue).toBeNull();
       }
@@ -1329,7 +1329,7 @@ IF(
           string,
           { oldValue: unknown; newValue: unknown }
         >;
-        const lkpChange = assertChange(changes[lkp2.id]);
+        const lkpChange = assertChange(changes?.[lkp2.id]);
         expectNoOldValue(lkpChange);
         expect(lkpChange.newValue).toEqual([20]);
       }
@@ -1394,7 +1394,7 @@ IF(
           .reverse()
           .find((event) => event.payload.tableId === t2.id && toChangeMap(event)[roll2.id])!;
         const changes = toChangeMap(t2Event);
-        const rollChange = assertChange(changes[roll2.id]);
+        const rollChange = assertChange(changes?.[roll2.id]);
         expectNoOldValue(rollChange);
         expect(rollChange.newValue).toEqual(11);
       }
@@ -2939,7 +2939,7 @@ IF(
           ? event.payload.record[0]
           : event.payload.record;
         const changes = rec.fields as FieldChangeMap;
-        const formulaChange = assertChange(changes[f.id]);
+        const formulaChange = assertChange(changes?.[f.id]);
         expectNoOldValue(formulaChange);
         expect(formulaChange.newValue).toBeNull();
       }
@@ -2993,10 +2993,10 @@ IF(
         const changes = rec.fields as FieldChangeMap;
 
         // A: 2; B: 3; C: 6 -> null after delete
-        const bChange = assertChange(changes[b.id]);
+        const bChange = assertChange(changes?.[b.id]);
         expectNoOldValue(bChange);
         expect(bChange.newValue).toBeNull();
-        const cChange = assertChange(changes[c.id]);
+        const cChange = assertChange(changes?.[c.id]);
         expectNoOldValue(cChange);
         expect(cChange.newValue).toBeNull();
       }
@@ -3153,7 +3153,7 @@ IF(
         const changes = (
           Array.isArray(t2Event.payload.record) ? t2Event.payload.record[0] : t2Event.payload.record
         ).fields as FieldChangeMap;
-        const lkpChange = assertChange(changes[lkp.id]);
+        const lkpChange = assertChange(changes?.[lkp.id]);
         expectNoOldValue(lkpChange);
         expect(lkpChange.newValue).toBeNull();
       }
@@ -3215,7 +3215,7 @@ IF(
       const changes = (
         Array.isArray(t2Event.payload.record) ? t2Event.payload.record[0] : t2Event.payload.record
       ).fields as FieldChangeMap;
-      const rollChange = assertChange(changes[roll.id]);
+      const rollChange = assertChange(changes?.[roll.id]);
       expectNoOldValue(rollChange);
       expect(rollChange.newValue).toBeNull();
 
@@ -3503,7 +3503,7 @@ IF(
         // Find T2 event
         const t2Event = (payloads as any[]).find((e) => e.payload.tableId === t2.id)!;
         const changes = t2Event.payload.record.fields as FieldChangeMap;
-        const linkChange = assertChange(changes[link2.id]);
+        const linkChange = assertChange(changes?.[link2.id]);
         expectNoOldValue(linkChange);
         expect([linkChange.newValue]?.flat()?.[0]?.title).toEqual('Bar');
       }

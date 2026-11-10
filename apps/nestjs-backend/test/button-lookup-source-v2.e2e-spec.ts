@@ -1,5 +1,5 @@
 import type { INestApplication } from '@nestjs/common';
-import { FieldType, Relationship } from '@teable/core';
+import { FieldType, Relationship, Colors } from '@teable/core';
 import { axios } from '@teable/openapi';
 import { createTable, initApp, permanentDeleteTable } from './utils/init-app';
 
@@ -39,7 +39,7 @@ describe('V2 button lookup source eligibility (e2e)', () => {
         fields: [
           { name: 'Name', type: FieldType.SingleLineText },
           { name: 'Amount', type: FieldType.Number },
-          { name: 'Action', type: FieldType.Button, options: { label: 'Run', color: 'blue' } },
+          { name: 'Action', type: FieldType.Button, options: { label: 'Run', color: Colors.Blue } },
         ],
         records: [{ fields: { Name: 'Item', Amount: 10 } }],
       });

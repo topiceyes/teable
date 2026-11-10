@@ -24,7 +24,7 @@ vi.mock('./v2-view-compat.service', () => ({
   V2ViewCompatService: class V2ViewCompatService {},
 }));
 
-import { v2CoreTokens } from '@teable/v2-core';
+import { v2CoreTokens, type Table } from '@teable/v2-core';
 import {
   V2FieldDeleteCompatCompletion,
   V2FieldDeleteSnapshotSink,
@@ -184,12 +184,12 @@ const createConditionalLookupTableMapper = () => ({
 });
 
 const createSnapshotItem = (fieldId: string, table: unknown = { kind: 'domainTable' }) => ({
-  table,
+  table: table as Table,
   snapshot: {
     field: {
       id: fieldId,
       name: fieldId === 'fldCompatA00000001' ? 'Text Field' : 'Number Field',
-      type: fieldId === 'fldCompatA00000001' ? 'singleLineText' : 'number',
+      type: fieldId === 'fldCompatA00000001' ? ('singleLineText' as const) : ('number' as const),
       isPrimary: fieldId === 'fldCompatA00000001',
     },
     views: [
