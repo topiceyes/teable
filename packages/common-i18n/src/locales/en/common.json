@@ -1350,7 +1350,11 @@
       "connectionEncryptionFailed": "Credential encryption is unavailable. Check the server encryption key configuration.",
       "connectionSaveFailed": "Could not save. Check the entered values and server status.",
       "connectionTestFailed": "Connection test failed. Check credentials, department read permissions, directory scope and network access.",
-      "environmentManaged": "This connection is managed by server environment variables. Ask the deployment administrator to update its credentials."
+      "environmentManaged": "This connection is managed by server environment variables. Ask the deployment administrator to update its credentials.",
+      "loginEnabled": "Enable DingTalk QR sign-in",
+      "autoProvision": "Create and link a regular account on first sign-in",
+      "loginSetupHelp": "Register the exact callback in DingTalk Login and Sharing and grant Contact.User.Read. Only active synchronized employees can sign in. Existing email accounts require authenticated linking. Enterprise provisioning is explicitly controlled here and grants no collaborator or administrator privileges.",
+      "loginCallback": "Sign-in callback URL"
     },
     "matrix": {
       "title": "Permission matrix",
@@ -2238,5 +2242,19 @@
         "description": "Help us measure how well our ads and promotions work."
       }
     }
+  },
+  "dingtalkLogin": {
+    "loginButton": "Sign in with DingTalk · {{name}}",
+    "loginHelp": "Scan with your enterprise DingTalk account to link your organization identity.",
+    "bindTitle": "Link DingTalk account",
+    "bindHelp": "Scan to link DingTalk to your signed-in account. Existing bindings cannot be overwritten.",
+    "bindButton": "Link this account · {{name}}",
+    "bindRequired": "Sign in to your existing account, then link DingTalk in Personal settings → Account, or ask your administrator to bind the employee.",
+    "bindingConflict": "This employee or account is already linked. Contact your administrator.",
+    "employeeUnavailable": "This employee is not active in the synchronized enterprise directory.",
+    "accountUnavailable": "The linked account is unavailable. Contact your administrator.",
+    "expired": "The login request expired or your browser session changed. Scan again.",
+    "unavailable": "Enterprise DingTalk sign-in is not enabled.",
+    "failed": "DingTalk sign-in did not complete. Retry or ask your administrator to check the callback and API permissions."
   }
 }

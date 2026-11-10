@@ -1,5 +1,6 @@
 const path = require('path');
 const { rspack } = require('@rspack/core');
+const nodeExternals = require('webpack-node-externals');
 const ForkTsCheckerWebpackPlugin = require('fork-ts-checker-webpack-plugin');
 const {
   collectWorkerEntries,
@@ -22,6 +23,8 @@ module.exports = function (options) {
       filename: '[name].js',
     },
     module: withLenientExportsPresence(options.module),
+    // Keep workspace DI symbols on one module graph, matching the development bundle.
+    externals: [nodeExternals({ allowlist: [/^@teable\//] })],
     plugins: [
       createImportMetaShim(rspack),
       // Keep Nest's defaults (IgnorePlugin for optional peers) but give the type checker the

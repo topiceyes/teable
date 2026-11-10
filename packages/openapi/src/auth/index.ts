@@ -17,3 +17,4 @@ export * from './delete';
 export * from './waitlist';
 export * from './mobile-auth';
 export * from './types';
+export * from './dingtalk';

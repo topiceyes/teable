@@ -10,7 +10,7 @@ describe('redactUrl', () => {
 
   it('redacts sensitive query values and keeps everything else', () => {
     expect(redactUrl('/api/auth/google/callback?code=4%2F0Abc&state=xyz&scope=email+profile')).toBe(
-      `/api/auth/google/callback?code=${REDACTED}&state=xyz&scope=email+profile`
+      `/api/auth/google/callback?code=${REDACTED}&state=${REDACTED}&scope=email+profile`
     );
     expect(
       redactUrl(
@@ -92,5 +92,13 @@ describe('LOG_REDACT_PATHS', () => {
     expect(log.body).toEqual({ token: REDACTED, appSecret: REDACTED, name: 'n' });
     expect(log.err.config.headers.Authorization).toBe(REDACTED);
     expect(log.req.url).toBe('/x');
+  });
+});
+
+describe('DingTalk callback secrets', () => {
+  it('redacts DingTalk authorization codes and browser state', () => {
+    expect(redactUrl('/api/auth/dingtalk/callback?authCode=private-code&state=private-state')).toBe(
+      `/api/auth/dingtalk/callback?authCode=${REDACTED}&state=${REDACTED}`
+    );
   });
 });

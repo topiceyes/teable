@@ -20,7 +20,7 @@ import { OrganizationService } from './organization.service';
     DirectoryMemberController,
     DirectoryRoleController,
   ],
-  exports: [DirectoryRoleService],
+  exports: [DirectoryRoleService, DirectoryConnectionService],
   providers: [
     DingtalkDirectoryConfig,
     DirectoryConnectionService,

@@ -56,7 +56,7 @@ RUN set -ex; \
         if [ -n "$INTEGRATION_TEST" ]; then \
               pnpm -F "./packages/**" run build; \
         else \
-              NEST_BUILD_TYPE_CHECK=0 NODE_OPTIONS=--max-old-space-size=8192 pnpm -r run build; \
+              CIRCLE_NODE_TOTAL=3 NEST_BUILD_TYPE_CHECK=0 NODE_OPTIONS=--max-old-space-size=4096 pnpm --workspace-concurrency=1 -r run build; \
         fi
 
 
@@ -96,6 +96,7 @@ RUN set -ex; \
 FROM tianon/gosu:1.19 AS gosu
 
 FROM node:${NODE_VERSION}-bookworm-slim AS runner
+ARG BUILD_VERSION
 
 ENV TZ=UTC \
     NODE_ENV=production \
@@ -164,5 +165,7 @@ COPY --chown=1001:1001 scripts/wait-for ./scripts/wait-for
 ENV BUILD_VERSION=$BUILD_VERSION
 
 EXPOSE ${PORT}
+
+USER 1001:1001
 
 ENTRYPOINT ["scripts/start.sh"]

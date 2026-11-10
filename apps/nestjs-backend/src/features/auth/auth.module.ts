@@ -7,6 +7,7 @@ import { DeleteUserModule } from '../user/delete-user/delete-user.module';
 import { UserModule } from '../user/user.module';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
+import { DingtalkLoginModule } from './dingtalk/dingtalk-login.module';
 import { AuthGuard } from './guard/auth.guard';
 import { LocalAuthModule } from './local-auth/local-auth.module';
 import { MobileAuthModule } from './mobile-auth/mobile-auth.module';
@@ -37,6 +38,7 @@ const CONDITIONAL_MODULE_TIMEOUT = process.env.CI ? 30000 : 5000;
       { timeout: CONDITIONAL_MODULE_TIMEOUT }
     ),
     SocialModule,
+    DingtalkLoginModule,
     MobileAuthModule,
     PermissionModule,
     TurnstileModule,

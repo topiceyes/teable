@@ -19,6 +19,7 @@ export type ISessionLoginMethod =
   | 'oidc'
   | 'apple'
   | 'sso'
+  | 'dingtalk'
   | 'mobile'
   | 'mobile_webview';
 

@@ -135,6 +135,8 @@ describe('directory admin workflow', () => {
         appKey: 'key',
         appSecret: 'test-secret',
         expectedVersion: 0,
+        loginEnabled: false,
+        autoProvision: false,
       })
     );
     expect(mocks.syncDirectory).not.toHaveBeenCalled();
@@ -164,6 +166,8 @@ describe('directory admin workflow', () => {
         name: 'Company',
         appKey: 'key',
         expectedVersion: 3,
+        loginEnabled: false,
+        autoProvision: false,
       })
     );
   });

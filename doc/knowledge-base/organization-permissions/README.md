@@ -38,3 +38,5 @@
 第 19 期：[GitHub Fork 与首版版本约定](19-github-and-version-management.md)。定制首版为 1.0.0，正式发布待验收；本地未提交改动尚未上传。
 
 第 20 期：[1.0.0 首次源码发布](20-first-source-release.md)。发布代码与本地验收记录，生产镜像和服务器上线分别推进。
+
+第 22 期：[钉钉扫码登录与员工自动绑定](22-dingtalk-qr-login.md)。

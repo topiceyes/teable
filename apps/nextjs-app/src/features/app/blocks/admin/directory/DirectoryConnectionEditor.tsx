@@ -3,6 +3,7 @@ import type { IDirectoryConnectionVo, IDirectorySaveConnectionRo } from '@teable
 import { saveDirectoryConnection, testDirectoryConnection } from '@teable/openapi';
 import {
   Button,
+  Checkbox,
   Dialog,
   DialogContent,
   DialogHeader,
@@ -11,6 +12,7 @@ import {
 } from '@teable/ui-lib/shadcn';
 import { useTranslation } from 'next-i18next';
 import { useState } from 'react';
+import { useEnv } from '@/features/app/hooks/useEnv';
 
 function connectionErrorKey(error: unknown, saving: boolean) {
   const status = (error as { response?: { status?: number } } | null)?.response?.status;
@@ -33,6 +35,9 @@ export function DirectoryConnectionEditor({
   const [name, setName] = useState(connection?.name || '');
   const [appKey, setAppKey] = useState(connection?.appKey || '');
   const [appSecret, setAppSecret] = useState('');
+  const [loginEnabled, setLoginEnabled] = useState(connection?.loginEnabled ?? false);
+  const [autoProvision, setAutoProvision] = useState(connection?.autoProvision ?? false);
+  const { publicOrigin } = useEnv();
   const [testResult, setTestResult] = useState<string>();
   const payload = (): IDirectorySaveConnectionRo => ({
     corpId: corpId.trim(),
@@ -40,6 +45,8 @@ export function DirectoryConnectionEditor({
     appKey: appKey.trim(),
     ...(appSecret.trim() ? { appSecret: appSecret.trim() } : {}),
     expectedVersion: connection?.version ?? 0,
+    loginEnabled,
+    autoProvision,
   });
   const save = useMutation({
     gcTime: 0,
@@ -144,6 +151,36 @@ export function DirectoryConnectionEditor({
               }}
             />
           </label>
+          <div className="space-y-3 rounded-md border p-3">
+            <label className="flex items-center gap-2 text-sm">
+              <Checkbox
+                checked={loginEnabled}
+                disabled={busy}
+                onCheckedChange={(checked) => {
+                  setLoginEnabled(checked === true);
+                  changed();
+                }}
+              />
+              <span>{t('loginEnabled')}</span>
+            </label>
+            <label className="flex items-center gap-2 text-sm">
+              <Checkbox
+                checked={autoProvision}
+                disabled={busy || !loginEnabled}
+                onCheckedChange={(checked) => {
+                  setAutoProvision(checked === true);
+                  changed();
+                }}
+              />
+              <span>{t('autoProvision')}</span>
+            </label>
+            <p className="text-xs text-muted-foreground">{t('loginSetupHelp')}</p>
+            {publicOrigin && (
+              <p className="break-all text-xs">
+                {t('loginCallback')}: {publicOrigin}/api/auth/dingtalk/callback
+              </p>
+            )}
+          </div>
           <p className="text-xs text-muted-foreground">{t('secretStorageHelp')}</p>
           <p className="text-xs text-muted-foreground">{t('connectionTestScope')}</p>
           {testResult && (
