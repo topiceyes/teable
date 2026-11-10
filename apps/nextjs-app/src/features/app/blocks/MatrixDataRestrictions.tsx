@@ -106,6 +106,9 @@ export function MatrixDataRestrictions({
               </select>
             </label>
             <p className="text-xs text-muted-foreground">{t('rowScopeHelp')}</p>
+            {table && !table.fields?.some((field) => field.type === 'createdBy') && (
+              <p className="text-sm text-muted-foreground">{t('creatorFieldRequired')}</p>
+            )}
             <table className="w-full text-start text-sm">
               <thead>
                 <tr>

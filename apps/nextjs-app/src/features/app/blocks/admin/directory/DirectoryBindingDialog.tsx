@@ -24,7 +24,8 @@ export function DirectoryBindingDialog({
   onChanged: () => void;
 }) {
   const { t } = useTranslation('common', { keyPrefix: 'admin.directory' });
-  const [search, setSearch] = useState('');
+  const suggestedSearch = (member.email || member.name).trim().slice(0, 200);
+  const [search, setSearch] = useState(suggestedSearch);
   const [submittedSearch, setSubmittedSearch] = useState('');
   const [userId, setUserId] = useState<string>();
   const accounts = useQuery({
@@ -92,13 +93,13 @@ export function DirectoryBindingDialog({
             </form>
             {accounts.isFetching && <p role="status">{t('loading')}</p>}
             {accounts.isError && (
-              <p role="alert" className="text-destructive text-sm">
+              <p role="alert" className="text-sm text-destructive">
                 {t('loadFailed')}
               </p>
             )}
             {accounts.data && !accounts.isFetching && (
               <fieldset className="max-h-60 space-y-2 overflow-auto">
-                <legend className="text-muted-foreground text-sm">{t('chooseAccount')}</legend>
+                <legend className="text-sm text-muted-foreground">{t('chooseAccount')}</legend>
                 {accounts.data.length === 0 && <p className="text-sm">{t('noAccounts')}</p>}
                 {accounts.data.map((account) => (
                   <label
@@ -115,17 +116,17 @@ export function DirectoryBindingDialog({
                     />
                     <span className="min-w-0 text-sm">
                       <span className="block font-medium">{account.name}</span>
-                      <span className="text-muted-foreground break-all">{account.email}</span>
+                      <span className="break-all text-muted-foreground">{account.email}</span>
                     </span>
                   </label>
                 ))}
               </fieldset>
             )}
-            <p className="text-muted-foreground text-xs">{t('bindingDescription')}</p>
+            <p className="text-xs text-muted-foreground">{t('bindingDescription')}</p>
           </>
         )}
         {mutation.isError && (
-          <p role="alert" className="text-destructive text-sm">
+          <p role="alert" className="text-sm text-destructive">
             {t('bindingFailed')}
           </p>
         )}

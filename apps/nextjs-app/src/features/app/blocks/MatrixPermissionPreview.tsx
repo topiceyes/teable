@@ -15,9 +15,11 @@ const actionNames: Record<string, 'table' | 'read' | 'create' | 'update' | 'dele
 export function MatrixPermissionPreview({
   baseId,
   tables,
+  unsaved = false,
 }: {
   baseId: string;
   tables: { id: string; name: string }[];
+  unsaved?: boolean;
 }) {
   const { t } = useTranslation('common', { keyPrefix: 'admin.matrix' });
   const [email, setEmail] = useState('');
@@ -30,6 +32,7 @@ export function MatrixPermissionPreview({
     <section aria-label={t('previewTitle')} className="space-y-3 rounded border p-4">
       <h2 className="font-semibold">{t('previewTitle')}</h2>
       <p className="text-sm text-muted-foreground">{t('previewHelp')}</p>
+      {unsaved && <p className="text-sm font-medium">{t('previewSavedOnly')}</p>}
       <div className="flex flex-wrap gap-2">
         <Input
           type="email"

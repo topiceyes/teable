@@ -39,6 +39,7 @@ export class TableAuthorityService {
         select: {
           id: true,
           name: true,
+          tenantId: true,
           businessRoles: {
             where: { enabled: true },
             orderBy: { name: 'asc' },
@@ -61,8 +62,9 @@ export class TableAuthorityService {
       }),
     ]);
     return {
-      connections: connections.map(({ businessRoles, ...connection }) => ({
+      connections: connections.map(({ businessRoles, tenantId, ...connection }) => ({
         ...connection,
+        corpId: tenantId,
         roles: businessRoles,
       })),
       tables,
