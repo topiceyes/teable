@@ -1,4 +1,5 @@
 import { plainToInstance } from 'class-transformer';
+import { TableDomain } from '../../table/table-domain';
 import { Colors } from '../colors';
 import { DbFieldType, FieldType, CellValueType } from '../constant';
 import { DateFormattingPreset, NumberFormattingType, TimeFormatting } from '../formatting';
@@ -39,7 +40,11 @@ describe('FormulaFieldCore', () => {
     options: {
       expression: '{fld123} + 2',
       formatting: { type: NumberFormattingType.Decimal, precision: 2 },
+      timeZone: 'Asia/Shanghai',
       showAs: singleNumberShowAsProps,
+    },
+    meta: {
+      persistedAsGeneratedColumn: true,
     },
     cellValueType: CellValueType.Number,
     isComputed: true,
@@ -233,6 +238,19 @@ describe('FormulaFieldCore', () => {
       expect(converted).toBe('{fld123} + 1');
     });
 
+    it('should convert localized BLANK comparisons with spaced function calls', () => {
+      const dependFieldMap = {
+        fldWeight: { name: '入职体重(kg)' },
+      };
+
+      expect(
+        FormulaFieldCore.convertExpressionNameToId('{入职体重(kg)} !=BLANK()', dependFieldMap)
+      ).toBe('{fldWeight} !=BLANK()');
+      expect(
+        FormulaFieldCore.convertExpressionNameToId('{入职体重(kg)} != BLANK()', dependFieldMap)
+      ).toBe('{fldWeight} != BLANK()');
+    });
+
     it('should return current typed value with field context', () => {
       expect(FormulaFieldCore.getParsedValueType('2 + 2', {})).toEqual({
         cellValueType: CellValueType.Number,
@@ -255,6 +273,12 @@ describe('FormulaFieldCore', () => {
       });
     });
 
+    it('should reject LAST_MODIFIED_TIME with non-field parameters during parsing', () => {
+      expect(() => FormulaFieldCore.getParsedValueType('LAST_MODIFIED_TIME("oops")', {})).toThrow(
+        'LAST_MODIFIED_TIME parameter must be a field reference'
+      );
+    });
+
     it('should return current fieldIds by getReferenceFieldIds', () => {
       expect(numberFormulaField.getReferenceFieldIds()).toEqual(['fld123']);
     });
@@ -275,6 +299,76 @@ describe('FormulaFieldCore', () => {
           )
           .toPlain()
       ).toEqual(3);
+    });
+  });
+
+  describe('reference resolution', () => {
+    it('should detect missing references recursively', () => {
+      // f1 references missing fld999
+      const f1 = plainToInstance(FormulaFieldCore, {
+        id: 'fldF1',
+        name: 'F1',
+        type: FieldType.Formula,
+        dbFieldType: DbFieldType.Real,
+        options: { expression: '{fld999} * 2' },
+        cellValueType: CellValueType.Number,
+        isComputed: true,
+      });
+
+      // f2 references f1
+      const f2 = plainToInstance(FormulaFieldCore, {
+        id: 'fldF2',
+        name: 'F2',
+        type: FieldType.Formula,
+        dbFieldType: DbFieldType.Real,
+        options: { expression: '{fldF1} * 2' },
+        cellValueType: CellValueType.Number,
+        isComputed: true,
+      });
+
+      const table = new TableDomain({
+        id: 'tbl',
+        name: 'tbl',
+        dbTableName: 'tbl',
+        lastModifiedTime: new Date().toISOString(),
+        fields: [f1, f2],
+      });
+
+      expect(f1.hasUnresolvedReferences(table)).toBe(true);
+      expect(f2.hasUnresolvedReferences(table)).toBe(true);
+    });
+
+    it('should return false when all references exist', () => {
+      const num = numberField; // fld123 exists
+      const f1 = plainToInstance(FormulaFieldCore, {
+        id: 'fldF1',
+        name: 'F1',
+        type: FieldType.Formula,
+        dbFieldType: DbFieldType.Real,
+        options: { expression: '{fld123} * 2' },
+        cellValueType: CellValueType.Number,
+        isComputed: true,
+      });
+      const f2 = plainToInstance(FormulaFieldCore, {
+        id: 'fldF2',
+        name: 'F2',
+        type: FieldType.Formula,
+        dbFieldType: DbFieldType.Real,
+        options: { expression: '{fldF1} * 2' },
+        cellValueType: CellValueType.Number,
+        isComputed: true,
+      });
+
+      const table = new TableDomain({
+        id: 'tbl',
+        name: 'tbl',
+        dbTableName: 'tbl',
+        lastModifiedTime: new Date().toISOString(),
+        fields: [num, f1, f2],
+      });
+
+      expect(f1.hasUnresolvedReferences(table)).toBe(false);
+      expect(f2.hasUnresolvedReferences(table)).toBe(false);
     });
   });
 
@@ -351,13 +445,50 @@ describe('FormulaFieldCore', () => {
     });
 
     it('should get default options', () => {
-      expect(FormulaFieldCore.defaultOptions(CellValueType.Number)).toEqual({
+      expect(FormulaFieldCore.defaultOptions(CellValueType.Number)).toMatchObject({
         expression: '',
         formatting: {
           type: NumberFormattingType.Decimal,
           precision: 2,
         },
       });
+    });
+  });
+
+  describe('meta field', () => {
+    it('should support meta field with persistedAsGeneratedColumn', () => {
+      const formulaWithMeta = plainToInstance(FormulaFieldCore, {
+        ...numberFormulaJson,
+        meta: {
+          persistedAsGeneratedColumn: true,
+        },
+      });
+
+      expect(formulaWithMeta.meta).toEqual({
+        persistedAsGeneratedColumn: true,
+      });
+    });
+
+    it('should support meta field with default value', () => {
+      const formulaWithMeta = plainToInstance(FormulaFieldCore, {
+        ...numberFormulaJson,
+        meta: {
+          persistedAsGeneratedColumn: false,
+        },
+      });
+
+      expect(formulaWithMeta.meta).toEqual({
+        persistedAsGeneratedColumn: false,
+      });
+    });
+
+    it('should work without meta field', () => {
+      const formulaWithoutMeta = plainToInstance(FormulaFieldCore, {
+        ...numberFormulaJson,
+        meta: undefined,
+      });
+
+      expect(formulaWithoutMeta.meta).toBeUndefined();
     });
   });
 });

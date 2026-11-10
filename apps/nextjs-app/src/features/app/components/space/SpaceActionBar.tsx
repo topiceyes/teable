@@ -1,54 +1,154 @@
+import { useMutation } from '@tanstack/react-query';
 import { hasPermission } from '@teable/core';
-import { MoreHorizontal, UserPlus } from '@teable/icons';
-import type { IGetSpaceVo } from '@teable/openapi';
+import { Import, MoreHorizontal, Plus, UserPlus } from '@teable/icons';
+import { createBase, type IGetSpaceVo } from '@teable/openapi';
+import { useIsMobile } from '@teable/sdk/hooks';
 import type { ButtonProps } from '@teable/ui-lib';
-import { Button } from '@teable/ui-lib';
+import { Button, cn } from '@teable/ui-lib';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@teable/ui-lib/shadcn/ui/tooltip';
+import { useRouter } from 'next/router';
 import { useTranslation } from 'next-i18next';
 import React from 'react';
 import { GUIDE_CREATE_BASE } from '@/components/Guide';
 import { spaceConfig } from '@/features/i18n/space.config';
 import { SpaceActionTrigger } from '../../blocks/space/component/SpaceActionTrigger';
-import { SpaceCollaboratorModalTrigger } from '../collaborator-manage/space/SpaceCollaboratorModalTrigger';
-import { CreateBaseModalTrigger } from './CreateBaseModal';
+import { ImportBaseDialog } from '../../blocks/space/component/upload-panel';
+import { InviteSpacePopover } from '../collaborator/space/InviteSpacePopover';
+import { CreateBaseDialog, useCreateBaseChooserEnabled } from './create-base';
 
 interface ActionBarProps {
   space: IGetSpaceVo;
   invQueryFilters: string[];
   className?: string;
   buttonSize?: ButtonProps['size'];
+  disallowSpaceInvitation?: boolean | null;
+  /**
+   * `projects`: creating and importing projects only, as two buttons, for a page about the
+   * space's projects rather than the space itself (no invite, no space menu).
+   */
+  variant?: 'space' | 'projects';
   onRename?: () => void;
   onDelete?: () => void;
+  onPermanentDelete?: () => void;
 }
 
 export const SpaceActionBar: React.FC<ActionBarProps> = (props) => {
-  const { space, className, buttonSize = 'default', onRename, onDelete } = props;
+  const {
+    space,
+    className,
+    buttonSize = 'default',
+    disallowSpaceInvitation,
+    variant = 'space',
+    onRename,
+    onDelete,
+    onPermanentDelete,
+  } = props;
+  const [importBaseOpen, setImportBaseOpen] = React.useState(false);
+  const [createBaseOpen, setCreateBaseOpen] = React.useState(false);
+
   const { t } = useTranslation(spaceConfig.i18nNamespaces);
+  const isMobile = useIsMobile();
+  const router = useRouter();
+  const chooserEnabled = useCreateBaseChooserEnabled();
+
+  const { mutate: createBaseMutator, isPending: createBaseLoading } = useMutation({
+    mutationFn: createBase,
+    onSuccess: ({ data }) => {
+      router.push({
+        pathname: '/base/[baseId]',
+        query: { baseId: data.id },
+      });
+    },
+  });
+
+  const handleCreateBase = () => {
+    if (chooserEnabled) {
+      setCreateBaseOpen(true);
+      return;
+    }
+    createBaseMutator({ spaceId: space.id });
+  };
+
+  const canCreateBase = hasPermission(space.role, 'base|create');
 
   return (
-    <div className={className}>
-      {hasPermission(space.role, 'base|create') && (
-        <CreateBaseModalTrigger spaceId={space.id}>
-          <Button className={GUIDE_CREATE_BASE} size={buttonSize}>
-            {t('space:action.createBase')}
-          </Button>
-        </CreateBaseModalTrigger>
+    <div className={cn('flex shrink-0 items-center gap-2', className)}>
+      <TooltipProvider>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            {isMobile ? (
+              <Button
+                variant={'outline'}
+                size="icon"
+                className="size-7"
+                onClick={handleCreateBase}
+                disabled={!canCreateBase || createBaseLoading}
+              >
+                <Plus className="size-4" />
+              </Button>
+            ) : (
+              <Button
+                className={GUIDE_CREATE_BASE}
+                size={buttonSize}
+                onClick={handleCreateBase}
+                disabled={!canCreateBase || createBaseLoading}
+              >
+                <Plus className="size-4" />
+                {t('space:action.createBase')}
+              </Button>
+            )}
+          </TooltipTrigger>
+          {!canCreateBase && (
+            <TooltipContent>{t('space:tooltip.noPermissionToCreateBase')}</TooltipContent>
+          )}
+        </Tooltip>
+      </TooltipProvider>
+      {variant === 'projects' && canCreateBase && (
+        <Button variant={'outline'} size={buttonSize} onClick={() => setImportBaseOpen(true)}>
+          <Import className="size-4" />
+          {t('space:spaceSetting.importBase')}
+        </Button>
       )}
-      <SpaceCollaboratorModalTrigger space={space}>
-        <Button variant={'outline'} size={buttonSize}>
-          <UserPlus className="size-4" /> {t('space:action.invite')}
-        </Button>
-      </SpaceCollaboratorModalTrigger>
-      <SpaceActionTrigger
-        space={space}
-        showRename={hasPermission(space.role, 'space|update')}
-        showDelete={hasPermission(space.role, 'space|delete')}
-        onDelete={onDelete}
-        onRename={onRename}
-      >
-        <Button variant={'outline'} size={buttonSize}>
-          <MoreHorizontal />
-        </Button>
-      </SpaceActionTrigger>
+      {variant === 'space' && !disallowSpaceInvitation && (
+        <InviteSpacePopover space={space}>
+          {isMobile ? (
+            <Button variant="outline" size="icon-xs">
+              <UserPlus className="size-4" />
+            </Button>
+          ) : (
+            <Button variant={'outline'} size={buttonSize}>
+              <UserPlus className="size-4" /> {t('space:action.invite')}
+            </Button>
+          )}
+        </InviteSpacePopover>
+      )}
+
+      {variant === 'space' && (
+        <SpaceActionTrigger
+          space={space}
+          showRename={false}
+          showSettings={hasPermission(space.role, 'space|update')}
+          showDelete={hasPermission(space.role, 'space|delete')}
+          showImportBase={hasPermission(space.role, 'base|create')}
+          onDelete={onDelete}
+          onPermanentDelete={onPermanentDelete}
+          onRename={onRename}
+          onImportBase={() => setImportBaseOpen(true)}
+        >
+          <Button variant={'outline'} size={buttonSize} className="p-[5px]">
+            <MoreHorizontal className="size-4" />
+          </Button>
+        </SpaceActionTrigger>
+      )}
+
+      <ImportBaseDialog spaceId={space.id} open={importBaseOpen} onOpenChange={setImportBaseOpen} />
+
+      <CreateBaseDialog spaceId={space.id} open={createBaseOpen} onOpenChange={setCreateBaseOpen} />
     </div>
   );
 };

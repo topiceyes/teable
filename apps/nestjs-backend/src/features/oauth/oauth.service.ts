@@ -1,0 +1,542 @@
+import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { SYSTEM_USER_ID, generateClientId, nullsToUndefined } from '@teable/core';
+import { Prisma, PrismaService } from '@teable/db-main-prisma';
+import type {
+  AuthorizedVo,
+  GenerateOAuthSecretVo,
+  OAuthCreateRo,
+  OAuthCreateVo,
+  OAuthGetListVo,
+  OAuthGetVo,
+  OAuthUpdateVo,
+} from '@teable/openapi';
+import { isEqual, pick } from 'lodash';
+import { ClsService } from 'nestjs-cls';
+import { PerformanceCacheService } from '../../performance-cache';
+import { generateAccessTokenCacheKey } from '../../performance-cache/generate-keys';
+import type { IClsStore } from '../../types/cls';
+import { AuditScope } from '../audit/audit-scope';
+import { UserService } from '../user/user.service';
+import { createOAuthSecret } from './oauth-secret';
+
+// App settings an update can change; the audit row records each one that did, before and after.
+const auditedAppSettings = [
+  'name',
+  'description',
+  'scopes',
+  'homepage',
+  'logo',
+  'redirectUris',
+  'allowDeviceFlow',
+] as const;
+
+type IAuditedAppRow = Record<(typeof auditedAppSettings)[number], unknown> & {
+  name: string;
+  scopes: string | null;
+  redirectUris: string | null;
+};
+
+const auditedAppSnapshot = (app: IAuditedAppRow): Record<string, unknown> => ({
+  ...pick(app, auditedAppSettings),
+  scopes: app.scopes ? JSON.parse(app.scopes) : null,
+  redirectUris: app.redirectUris ? JSON.parse(app.redirectUris) : null,
+});
+
+@Injectable()
+export class OAuthService {
+  constructor(
+    private readonly prismaService: PrismaService,
+    private readonly cls: ClsService<IClsStore>,
+    private readonly performanceCacheService: PerformanceCacheService,
+    private readonly audit: AuditScope,
+    private readonly userService: UserService
+  ) {}
+
+  private convertToVo<T extends { scopes?: string | null; redirectUris?: string | null }>(ro: T) {
+    return nullsToUndefined({
+      ...ro,
+      scopes: ro.scopes ? JSON.parse(ro.scopes) : undefined,
+      redirectUris: ro.redirectUris ? JSON.parse(ro.redirectUris) : undefined,
+    });
+  }
+
+  async createOAuth(ro: OAuthCreateRo): Promise<OAuthCreateVo> {
+    const userId = this.cls.get('user.id');
+    const { redirectUris, name, description, scopes, homepage, logo, allowDeviceFlow } = ro;
+    const res = await this.prismaService.oAuthApp.create({
+      data: {
+        name,
+        description,
+        scopes: scopes ? JSON.stringify(scopes) : null,
+        homepage,
+        logo,
+        redirectUris: redirectUris ? JSON.stringify(redirectUris) : null,
+        allowDeviceFlow,
+        createdBy: userId,
+        clientId: generateClientId(),
+      },
+    });
+    await this.audit.emitAtomic({
+      action: 'oauth-app.create',
+      resourceId: res.clientId,
+      params: {
+        clientId: res.clientId,
+        name,
+        scopes,
+        redirectUris,
+        homepage,
+        allowDeviceFlow: res.allowDeviceFlow,
+      },
+    });
+    return this.convertToVo(
+      pick(res, [
+        'id',
+        'name',
+        'description',
+        'scopes',
+        'homepage',
+        'logo',
+        'redirectUris',
+        'allowDeviceFlow',
+        'clientId',
+      ])
+    );
+  }
+
+  private readonly getSecrets = async (clientId: string) => {
+    const secrets = await this.prismaService.oAuthAppSecret.findMany({
+      where: {
+        clientId,
+      },
+      orderBy: {
+        createdTime: 'desc',
+      },
+    });
+    if (!secrets.length) {
+      return;
+    }
+    return secrets.map((s) => ({
+      id: s.id,
+      secret: s.maskedSecret,
+      lastUsedTime: s.lastUsedTime?.toISOString(),
+    }));
+  };
+
+  async getOAuth(clientId: string): Promise<OAuthGetVo> {
+    await this.validateOwnership(clientId);
+    const res = await this.prismaService.oAuthApp.findUnique({
+      where: {
+        clientId,
+      },
+    });
+    if (!res) {
+      throw new NotFoundException('OAuth client not found');
+    }
+    const secrets = await this.getSecrets(clientId);
+    return this.convertToVo(
+      pick(
+        {
+          ...res,
+          secrets,
+        },
+        [
+          'id',
+          'name',
+          'description',
+          'scopes',
+          'homepage',
+          'logo',
+          'redirectUris',
+          'allowDeviceFlow',
+          'clientId',
+          'secrets',
+        ]
+      )
+    );
+  }
+
+  async updateOAuth(clientId: string, ro: OAuthCreateRo): Promise<OAuthUpdateVo> {
+    await this.validateOwnership(clientId);
+    const previous = await this.prismaService.oAuthApp.findUnique({ where: { clientId } });
+    const { redirectUris, name, description, scopes, homepage, logo, allowDeviceFlow } = ro;
+    const res = await this.prismaService.oAuthApp.update({
+      where: {
+        clientId,
+      },
+      data: {
+        name,
+        description,
+        scopes: scopes ? JSON.stringify(scopes) : null,
+        homepage,
+        logo,
+        redirectUris: redirectUris ? JSON.stringify(redirectUris) : null,
+        // undefined leaves the stored value untouched (Prisma skips it).
+        allowDeviceFlow,
+      },
+    });
+
+    await this.auditOAuthUpdate(clientId, previous, res);
+
+    const secrets = await this.getSecrets(clientId);
+
+    return this.convertToVo(
+      pick({ ...res, secrets }, [
+        'id',
+        'name',
+        'description',
+        'scopes',
+        'homepage',
+        'logo',
+        'redirectUris',
+        'allowDeviceFlow',
+        'clientId',
+      ])
+    );
+  }
+
+  /** One row per update that changed a setting, with each changed setting before and after. */
+  private async auditOAuthUpdate(
+    clientId: string,
+    previous: IAuditedAppRow | null,
+    updated: IAuditedAppRow
+  ) {
+    const before = previous ? auditedAppSnapshot(previous) : undefined;
+    const after = auditedAppSnapshot(updated);
+    const changes: Record<string, { before: unknown; after: unknown }> = {};
+    for (const key of auditedAppSettings) {
+      const from = before?.[key] ?? null;
+      const to = after[key] ?? null;
+      if (!isEqual(from, to)) changes[key] = { before: from, after: to };
+    }
+    if (Object.keys(changes).length === 0) return;
+    await this.audit.emitAtomic({
+      action: 'oauth-app.update',
+      resourceId: clientId,
+      params: { clientId, name: updated.name, changes },
+    });
+  }
+
+  private readonly validateOwnership = async (clientId: string) => {
+    const app = await this.prismaService.oAuthApp.findUnique({
+      where: {
+        clientId,
+      },
+      select: { createdBy: true },
+    });
+    if (!app) {
+      throw new NotFoundException('OAuth client not found');
+    }
+    const user = this.cls.get('user');
+    if (user.isAdmin && SYSTEM_USER_ID === app.createdBy) {
+      return;
+    }
+    if (app.createdBy !== user.id) {
+      throw new ForbiddenException('No permission to operate on this OAuth client');
+    }
+  };
+
+  private async deleteAccessTokens(
+    tx: Prisma.TransactionClient,
+    where: Prisma.AccessTokenWhereInput
+  ) {
+    const accessTokens = await tx.accessToken.findMany({
+      where,
+      select: { id: true },
+    });
+    await tx.accessToken.deleteMany({ where });
+    return accessTokens.map(({ id }) => id);
+  }
+
+  private async invalidateAccessTokenCache(accessTokenIds: string[]) {
+    await Promise.all(
+      [...new Set(accessTokenIds)].map((id) =>
+        this.performanceCacheService.del(generateAccessTokenCacheKey(id))
+      )
+    );
+  }
+
+  async deleteOAuth(clientId: string): Promise<void> {
+    await this.validateOwnership(clientId);
+    const { name, accessTokenIds } = await this.prismaService.$tx(async (prisma) => {
+      const accessTokens = await prisma.accessToken.findMany({
+        where: { clientId },
+        select: { id: true },
+      });
+      const app = await prisma.oAuthApp.delete({
+        where: {
+          clientId,
+        },
+      });
+      await prisma.accessToken.deleteMany({
+        where: {
+          clientId,
+        },
+      });
+      return { name: app.name, accessTokenIds: accessTokens.map(({ id }) => id) };
+    });
+    await this.invalidateAccessTokenCache(accessTokenIds);
+    await this.audit.emitAtomic({
+      action: 'oauth-app.delete',
+      resourceId: clientId,
+      params: { clientId, name, revokedTokenCount: accessTokenIds.length },
+    });
+  }
+
+  async getOAuthList(): Promise<OAuthGetListVo> {
+    const userId = this.cls.get('user.id');
+    const isAdmin = this.cls.get('user.isAdmin');
+    // Dynamically registered clients have no developer to manage them here.
+    const where: Prisma.OAuthAppWhereInput = isAdmin
+      ? {
+          OR: [{ createdBy: userId }, { createdBy: SYSTEM_USER_ID }],
+          dynamicRegistration: false,
+        }
+      : {
+          createdBy: userId,
+          dynamicRegistration: false,
+        };
+    const res = await this.prismaService.oAuthApp.findMany({
+      where,
+      select: {
+        clientId: true,
+        name: true,
+        logo: true,
+        homepage: true,
+        description: true,
+      },
+    });
+    return nullsToUndefined(res);
+  }
+
+  async generateSecret(clientId: string): Promise<GenerateOAuthSecretVo> {
+    await this.validateOwnership(clientId);
+    const { secret, hashedSecret, maskedSecret } = await createOAuthSecret();
+
+    const res = await this.prismaService.oAuthAppSecret.create({
+      data: {
+        clientId,
+        secret: hashedSecret,
+        maskedSecret,
+        createdBy: this.cls.get('user.id'),
+      },
+    });
+    // The secret id only: neither the secret nor its masked form goes into the audit log.
+    await this.audit.emitAtomic({
+      action: 'oauth-app.secret.create',
+      resourceId: clientId,
+      params: { clientId, secretId: res.id },
+    });
+
+    return {
+      secret,
+      maskedSecret,
+      id: res.id,
+      lastUsedTime: res.lastUsedTime?.toISOString(),
+    };
+  }
+
+  async deleteSecret(clientId: string, secretId: string): Promise<void> {
+    await this.validateOwnership(clientId);
+    await this.prismaService.oAuthAppSecret.delete({
+      where: {
+        id: secretId,
+        clientId,
+      },
+    });
+    await this.audit.emitAtomic({
+      action: 'oauth-app.secret.delete',
+      resourceId: clientId,
+      params: { clientId, secretId },
+    });
+  }
+
+  /** The app's owner revokes every user's grant and token at once. */
+  async revokeAccess(clientId: string) {
+    await this.validateOwnership(clientId);
+    const { revokedUserCount, accessTokenIds } = await this.prismaService.$tx(async (prisma) => {
+      const authorized = await prisma.oAuthAppAuthorized.deleteMany({
+        where: { clientId },
+      });
+      await prisma.oAuthAppToken.deleteMany({
+        where: {
+          clientId,
+        },
+      });
+      return {
+        revokedUserCount: authorized.count,
+        accessTokenIds: await this.deleteAccessTokens(prisma, { clientId }),
+      };
+    });
+    await this.invalidateAccessTokenCache(accessTokenIds);
+    await this.audit.emitAtomic({
+      action: 'oauth-app.access.revoke',
+      resourceId: clientId,
+      params: { clientId, revokedUserCount, revokedTokenCount: accessTokenIds.length },
+    });
+  }
+
+  /**
+   * The signed-in user withdraws their own grant: from the authorized-apps settings (POST), or
+   * the app itself on the user's behalf with its access token (GET).
+   */
+  async revokeToken(clientId: string) {
+    const userId = this.cls.get('user.id');
+    const accessTokenIds = await this.prismaService.$tx(async (prisma) => {
+      await prisma.oAuthAppAuthorized.delete({
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        where: { clientId_userId: { clientId, userId } },
+      });
+
+      await prisma.oAuthAppToken.deleteMany({
+        where: {
+          createdBy: userId,
+          clientId,
+        },
+      });
+
+      return await this.deleteAccessTokens(prisma, { clientId, userId });
+    });
+    await this.invalidateAccessTokenCache(accessTokenIds);
+    await this.audit.emitAtomic({
+      action: 'oauth-app.token.revoke',
+      resourceId: clientId,
+      params: {
+        clientId,
+        revokedTokenCount: accessTokenIds.length,
+        // Set when the app revoked the grant with its own token rather than the user in settings.
+        byApp: Boolean(this.cls.get('accessTokenId')),
+      },
+    });
+  }
+
+  /** Turn the notifications an app the current user authorized sends them off or back on. */
+  async updateAuthorizedNotifications(clientId: string, muted: boolean): Promise<void> {
+    const userId = this.cls.get('user.id');
+    const authorized = await this.prismaService.oAuthAppAuthorized.findUnique({
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      where: { clientId_userId: { clientId, userId } },
+      select: { id: true },
+    });
+    if (!authorized) {
+      throw new NotFoundException('This app is not authorized');
+    }
+    // kept with the user's other notification settings
+    await this.userService.setAppNotificationsMuted(userId, clientId, muted);
+  }
+
+  async getAuthorizedList(): Promise<AuthorizedVo[]> {
+    const userId = this.cls.get('user.id');
+    const authorized = await this.prismaService.oAuthAppAuthorized.findMany({
+      where: {
+        userId,
+      },
+      select: {
+        clientId: true,
+        authorizedTime: true,
+      },
+    });
+    if (authorized.length === 0) {
+      return [];
+    }
+    const clientIds = authorized.map((a) => a.clientId);
+    const authorizedTimeMap = Object.fromEntries(
+      authorized.map((a) => [a.clientId, a.authorizedTime.toISOString()])
+    );
+    const mutedClientIds = new Set((await this.userService.getNotifyMeta(userId)).mutedApps);
+    const client = await this.prismaService.oAuthApp.findMany({
+      where: {
+        clientId: { in: clientIds },
+      },
+    });
+    if (client.length === 0) {
+      return [];
+    }
+    // user map
+    const users = await this.prismaService.user.findMany({
+      where: {
+        id: { in: client.map((c) => c.createdBy) },
+      },
+      select: {
+        id: true,
+        email: true,
+        name: true,
+      },
+    });
+    const userMap = users.reduce(
+      (acc, u) => {
+        acc[u.id] = {
+          email: u.email,
+          name: u.name,
+        };
+        return acc;
+      },
+      {} as Record<string, { email: string; name: string }>
+    );
+
+    // last used time
+    const lastUsedTime = await this.prismaService.$queryRaw<
+      {
+        clientId: string;
+        lastUsedTime: string;
+      }[]
+    >(Prisma.sql`
+      WITH ranked_clients AS (
+          SELECT
+              client_id,
+              last_used_time,
+              ROW_NUMBER() OVER (PARTITION BY client_id ORDER BY last_used_time DESC) AS rn
+          FROM oauth_app_secret
+          WHERE client_id IN (${Prisma.join(clientIds)})
+      )
+      SELECT client_id as clientId, last_used_time as lastUsedTime
+      FROM ranked_clients
+      WHERE rn = 1;
+    `);
+
+    const lastUsedTimeMap = lastUsedTime.reduce(
+      (acc, d) => {
+        acc[d.clientId] = d;
+        return acc;
+      },
+      {} as Record<string, { clientId: string; lastUsedTime: string }>
+    );
+    // The secret's last use only moves when a confidential client exchanges
+    // its secret; a public client (an MCP client) never does. The user's own
+    // access tokens record every call, so take the later of the two.
+    const tokenUsage = await this.prismaService.accessToken.groupBy({
+      by: ['clientId'],
+      where: { userId, clientId: { in: clientIds } },
+      _max: { lastUsedTime: true, createdTime: true },
+    });
+    const lastUsedByUser = (clientId: string): string | undefined => {
+      const usage = tokenUsage.find((u) => u.clientId === clientId);
+      const candidates = [
+        lastUsedTimeMap[clientId]?.lastUsedTime,
+        usage?._max.lastUsedTime ?? usage?._max.createdTime,
+      ]
+        .filter((d): d is string | Date => Boolean(d))
+        .map((d) => new Date(d).getTime());
+      return candidates.length ? new Date(Math.max(...candidates)).toISOString() : undefined;
+    };
+
+    return client.map((c) =>
+      this.convertToVo({
+        clientId: c.clientId,
+        name: c.name,
+        description: c.description,
+        logo: c.logo,
+        homepage: c.homepage,
+        scopes: c.scopes,
+        notificationsMuted: mutedClientIds.has(c.clientId),
+        dynamicRegistration: c.dynamicRegistration || undefined,
+        lastUsedTime: lastUsedByUser(c.clientId),
+        authorizedTime: authorizedTimeMap[c.clientId],
+        createdUser:
+          userMap[c.createdBy] ??
+          (c.createdBy === 'system'
+            ? { name: 'System', email: 'system@teable.ai' }
+            : { name: 'Unknown', email: '' }),
+      })
+    );
+  }
+}

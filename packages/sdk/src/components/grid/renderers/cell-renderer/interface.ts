@@ -1,4 +1,8 @@
+import type { IButtonFieldCellValue, IButtonFieldOptions } from '@teable/core';
 import type { CSSProperties, ForwardRefRenderFunction } from 'react';
+import type { IButtonClickStatusHook } from '../../../../hooks';
+import type { Record as IRecord } from '../../../../model';
+import type { IUrlMatch } from '../../../../utils/find-urls';
 import type { IEditorProps, IEditorRef } from '../../components';
 import type { IGridTheme } from '../../configs';
 import type { IActiveCellBound, ICellPosition, IRectangle } from '../../interface';
@@ -15,6 +19,7 @@ export enum CellType {
   User = 'User',
   Boolean = 'Boolean',
   Loading = 'Loading',
+  Button = 'Button',
 }
 
 export enum EditorType {
@@ -33,11 +38,14 @@ export interface IBaseCell {
   contentAlign?: 'left' | 'right' | 'center';
   lastUpdated?: string;
   customTheme?: Partial<IGridTheme>;
+  locked?: boolean;
+  hidden?: boolean;
 }
 
 export interface IEditableCell extends IBaseCell {
   editorWidth?: number;
   customEditor?: ICustomEditor;
+  readonlyCustomEditor?: boolean;
 }
 
 export interface ILoadingCell extends IBaseCell {
@@ -49,6 +57,9 @@ export interface ITextCell extends IEditableCell {
   data: string;
   displayData: string;
   isWrap?: boolean;
+  // URL ranges inside displayData, drawn and clickable as links
+  links?: IUrlMatch[];
+  onLinkClick?: (url: string) => void;
 }
 
 export interface ILinkCell extends IEditableCell {
@@ -105,24 +116,37 @@ export interface IRatingCell extends IEditableCell {
 }
 
 export interface ISelectChoice {
-  id?: string;
+  id: string;
   name: string;
-  bgColor?: string;
-  textColor?: string;
+  color?: string;
+  backgroundColor?: string;
+}
+
+export interface ISelectChoiceSorted {
+  id: string;
+  name: string;
+  [key: string]: unknown;
 }
 
 export interface ISelectCell extends IEditableCell {
   type: CellType.Select;
   data: (string | { title: string; id: string })[];
   displayData: string[];
-  choices?: ISelectChoice[];
+  choiceMap?: Record<string, ISelectChoice>;
+  choiceSorted?: ISelectChoiceSorted[];
   isMultiple?: boolean;
   isEditingOnClick?: boolean;
+  showAddButton?: boolean;
+  onPreview?: (activeId: string) => void;
 }
 
 export interface IImageData {
   id: string;
   url: string;
+  /** Drawn in place of `url` once loading it has failed. */
+  fallbackUrl?: string;
+  width?: number;
+  height?: number;
 }
 
 export interface IImageCell extends IEditableCell {
@@ -135,13 +159,26 @@ export interface IImageCell extends IEditableCell {
 export interface IUserData {
   id: string;
   name: string;
+  email?: string;
   avatarUrl?: string;
+  isSystem?: boolean;
 }
 
 export interface IUserCell extends IEditableCell {
   type: CellType.User;
   data: IUserData[];
   displayData?: string;
+}
+
+export interface IButtonCell extends IEditableCell {
+  type: CellType.Button;
+  data: {
+    cellValue: IButtonFieldCellValue;
+    fieldOptions: IButtonFieldOptions;
+    tableId: string;
+    statusHook?: IButtonClickStatusHook;
+    record?: IRecord;
+  };
 }
 
 export type IInnerCell =
@@ -153,7 +190,8 @@ export type IInnerCell =
   | IRatingCell
   | IBooleanCell
   | IChartCell
-  | IUserCell;
+  | IUserCell
+  | IButtonCell;
 
 export type ICell = IInnerCell | ILoadingCell;
 
@@ -196,6 +234,7 @@ export enum CellRegionType {
   Update = 'update',
   Preview = 'preview',
   ToggleEditing = 'toggleEditing',
+  Hover = 'hover',
 }
 
 export interface ICellRegionWithBlank {
@@ -203,7 +242,12 @@ export interface ICellRegionWithBlank {
 }
 
 export interface ICellRegionWithData {
-  type: CellRegionType.Update | CellRegionType.ToggleEditing | CellRegionType.Preview;
+  type:
+    | CellRegionType.Update
+    | CellRegionType.ToggleEditing
+    | CellRegionType.Preview
+    | CellRegionType.Blank
+    | CellRegionType.Hover;
   data: unknown;
 }
 
@@ -216,7 +260,9 @@ export interface IBaseCellRenderer<T extends ICell> {
   type: T['type'];
   draw: (cell: T, props: ICellRenderProps) => void;
   needsHover?: boolean;
-  needsHoverPosition?: boolean;
+  // A function lets a renderer opt in per cell, so only cells that have
+  // clickable parts pay for hover-position tracking
+  needsHoverPosition?: boolean | ((cell: T) => boolean);
   needsHoverWhenActive?: boolean;
   needsHoverPositionWhenActive?: boolean;
   measure?: (cell: T, props: ICellMeasureProps) => ICellMeasureResult;

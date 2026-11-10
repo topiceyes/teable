@@ -1,0 +1,122 @@
+import {
+  FieldCreatedRealtimeProjection,
+  FieldDeletedRealtimeProjection,
+  FieldUpdatedRealtimeProjection,
+  FieldOptionsAddedRealtimeProjection,
+  ComputedActivityRealtimeProjection,
+  TableCreatedRealtimeProjection,
+  TableDeletedRealtimeProjection,
+  TableProvisionReadyRealtimeProjection,
+  ViewColumnMetaUpdatedRealtimeProjection,
+  ViewDeletedRealtimeProjection,
+  ViewRenamedRealtimeProjection,
+  ViewDescriptionUpdatedRealtimeProjection,
+  ViewLockedUpdatedRealtimeProjection,
+  ViewOrderUpdatedRealtimeProjection,
+  RecordCreatedRealtimeProjection,
+  RecordUpdatedRealtimeProjection,
+  RecordReorderedRealtimeProjection,
+  RecordsBatchUpdatedRealtimeProjection,
+  RecordsBatchCreatedRealtimeProjection,
+  RecordsDeletedRealtimeProjection,
+  v2CoreTokens,
+} from '@teable/v2-core';
+import type { DependencyContainer } from '@teable/v2-di';
+import { Lifecycle, container } from '@teable/v2-di';
+
+import type { IComputeActivitySignalConfig } from '../ComputeActivitySignal';
+import type { IShareDbPresencePublisher } from '../ShareDbPresencePublisher';
+import type { IShareDbOpPublisher } from '../ShareDbPublisher';
+import { ShareDbRealtimeEngine } from '../ShareDbRealtimeEngine';
+import { v2ShareDbTokens } from './tokens';
+
+export interface IV2ShareDbRealtimeConfig {
+  publisher: IShareDbOpPublisher;
+  presence: IShareDbPresencePublisher;
+  computeActivitySignal: IComputeActivitySignalConfig;
+}
+
+export const registerV2ShareDbRealtime = (
+  c: DependencyContainer = container,
+  config: IV2ShareDbRealtimeConfig
+): DependencyContainer => {
+  if (!config.publisher || !config.presence || !config.computeActivitySignal) {
+    throw new Error('Invalid v2 ShareDB realtime config');
+  }
+
+  c.registerInstance(v2ShareDbTokens.publisher, config.publisher);
+  c.registerInstance(v2ShareDbTokens.presence, config.presence);
+  c.registerInstance(v2ShareDbTokens.computeActivitySignal, config.computeActivitySignal);
+  c.register(v2CoreTokens.realtimeEngine, ShareDbRealtimeEngine, {
+    lifecycle: Lifecycle.Singleton,
+  });
+  const hasTableDeps =
+    c.isRegistered(v2CoreTokens.tableRepository) && c.isRegistered(v2CoreTokens.tableMapper);
+  if (!hasTableDeps) {
+    throw new Error('ShareDB realtime requires tableRepository and tableMapper registrations');
+  }
+  c.register(TableCreatedRealtimeProjection, TableCreatedRealtimeProjection, {
+    lifecycle: Lifecycle.Singleton,
+  });
+  c.register(TableDeletedRealtimeProjection, TableDeletedRealtimeProjection, {
+    lifecycle: Lifecycle.Singleton,
+  });
+  c.register(TableProvisionReadyRealtimeProjection, TableProvisionReadyRealtimeProjection, {
+    lifecycle: Lifecycle.Singleton,
+  });
+  c.register(FieldCreatedRealtimeProjection, FieldCreatedRealtimeProjection, {
+    lifecycle: Lifecycle.Singleton,
+  });
+  c.register(FieldDeletedRealtimeProjection, FieldDeletedRealtimeProjection, {
+    lifecycle: Lifecycle.Singleton,
+  });
+  c.register(FieldUpdatedRealtimeProjection, FieldUpdatedRealtimeProjection, {
+    lifecycle: Lifecycle.Singleton,
+  });
+  c.register(ComputedActivityRealtimeProjection, ComputedActivityRealtimeProjection, {
+    lifecycle: Lifecycle.Singleton,
+  });
+  c.register(ViewColumnMetaUpdatedRealtimeProjection, ViewColumnMetaUpdatedRealtimeProjection, {
+    lifecycle: Lifecycle.Singleton,
+  });
+  c.register(ViewDeletedRealtimeProjection, ViewDeletedRealtimeProjection, {
+    lifecycle: Lifecycle.Singleton,
+  });
+  c.register(ViewRenamedRealtimeProjection, ViewRenamedRealtimeProjection, {
+    lifecycle: Lifecycle.Singleton,
+  });
+  c.register(ViewDescriptionUpdatedRealtimeProjection, ViewDescriptionUpdatedRealtimeProjection, {
+    lifecycle: Lifecycle.Singleton,
+  });
+  c.register(ViewLockedUpdatedRealtimeProjection, ViewLockedUpdatedRealtimeProjection, {
+    lifecycle: Lifecycle.Singleton,
+  });
+  c.register(ViewOrderUpdatedRealtimeProjection, ViewOrderUpdatedRealtimeProjection, {
+    lifecycle: Lifecycle.Singleton,
+  });
+  c.register(FieldOptionsAddedRealtimeProjection, FieldOptionsAddedRealtimeProjection, {
+    lifecycle: Lifecycle.Singleton,
+  });
+
+  // Record realtime projections
+  c.register(RecordCreatedRealtimeProjection, RecordCreatedRealtimeProjection, {
+    lifecycle: Lifecycle.Singleton,
+  });
+  c.register(RecordUpdatedRealtimeProjection, RecordUpdatedRealtimeProjection, {
+    lifecycle: Lifecycle.Singleton,
+  });
+  c.register(RecordReorderedRealtimeProjection, RecordReorderedRealtimeProjection, {
+    lifecycle: Lifecycle.Singleton,
+  });
+  c.register(RecordsBatchUpdatedRealtimeProjection, RecordsBatchUpdatedRealtimeProjection, {
+    lifecycle: Lifecycle.Singleton,
+  });
+  c.register(RecordsBatchCreatedRealtimeProjection, RecordsBatchCreatedRealtimeProjection, {
+    lifecycle: Lifecycle.Singleton,
+  });
+  c.register(RecordsDeletedRealtimeProjection, RecordsDeletedRealtimeProjection, {
+    lifecycle: Lifecycle.Singleton,
+  });
+
+  return c;
+};

@@ -1,0 +1,672 @@
+/* eslint-disable sonarjs/no-duplicate-string */
+/* eslint-disable @typescript-eslint/naming-convention */
+import { createHash } from 'node:crypto';
+import http from 'node:http';
+import https from 'node:https';
+import { join, resolve } from 'node:path';
+import type { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
+import {
+  DeleteObjectCommand,
+  DeleteObjectsCommand,
+  GetObjectCommand,
+  HeadObjectCommand,
+  ListObjectsV2Command,
+  PutObjectCommand,
+  S3Client,
+} from '@aws-sdk/client-s3';
+import { Upload } from '@aws-sdk/lib-storage';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { Injectable, Logger } from '@nestjs/common';
+import { NodeHttpHandler } from '@smithy/node-http-handler';
+import { getRandomString, HttpErrorCode, isImage } from '@teable/core';
+import * as fse from 'fs-extra';
+import ms from 'ms';
+import sharp from 'sharp';
+import { IStorageConfig, StorageConfig } from '../../../configs/storage';
+import { CustomHttpException } from '../../../custom.exception';
+import { normalizeImageDimensions } from '../../../utils/image-orientation';
+import { second } from '../../../utils/second';
+import { resolveThumbnailMimetype } from '../utils';
+import StorageAdapter from './adapter';
+import type {
+  IPresignParams,
+  IPresignRes,
+  IObjectMeta,
+  IRespHeaders,
+  IListObjectsOptions,
+  IListObjectsResult,
+} from './types';
+
+// The SDK adds CRC checksums to requests and presigned URLs by default (since 3.729), which many
+// S3-compatible services reject, so only send a checksum where the operation requires one.
+export const s3ChecksumConfig = {
+  requestChecksumCalculation: 'WHEN_REQUIRED',
+  responseChecksumValidation: 'WHEN_REQUIRED',
+} as const;
+
+// DeleteObjects always requires a checksum: the SDK now sends CRC32, while S3-compatible services
+// (e.g. OSS) still expect the Content-MD5 the SDK used to send. This follows AWS's MD5 fallback
+// guide, but is placed by step: its addRelativeTo(flexibleChecksumsMiddleware) makes every command
+// without that middleware (HeadObject, ListObjectsV2, ...) throw on a shared client.
+const sendContentMd5ForDeleteObjects = (client: S3Client) => {
+  client.middlewareStack.add(
+    (next, context) => async (args) => {
+      const request = args.request as { headers: Record<string, string>; body?: unknown };
+      if (context.commandName === 'DeleteObjectsCommand' && typeof request.body === 'string') {
+        for (const header of Object.keys(request.headers)) {
+          if (/^x-amz-(?:sdk-)?checksum-/i.test(header)) delete request.headers[header];
+        }
+        request.headers['Content-MD5'] = createHash('md5').update(request.body).digest('base64');
+      }
+      return next(args);
+    },
+    { step: 'build', priority: 'low', name: 'deleteObjectsContentMd5' }
+  );
+};
+
+@Injectable()
+export class S3Storage implements StorageAdapter {
+  private readonly s3Client: S3Client;
+  private readonly s3ClientPrivateNetwork: S3Client;
+  private readonly httpAgent: http.Agent;
+  private readonly httpsAgent: https.Agent;
+  private readonly s3ClientPreSigner: S3Client;
+  private readonly logger = new Logger(S3Storage.name);
+
+  constructor(@StorageConfig() readonly config: IStorageConfig) {
+    const {
+      endpoint,
+      region,
+      accessKey,
+      secretKey,
+      maxSockets,
+      internalEndpoint,
+      forcePathStyle,
+      internalForcePathStyle,
+    } = this.config.s3;
+    this.checkConfig();
+    this.httpAgent = new http.Agent({
+      maxSockets,
+      keepAlive: true,
+    });
+    this.httpsAgent = new https.Agent({
+      maxSockets,
+      keepAlive: true,
+    });
+    // Provide agents for both protocols: the internal endpoint may be plain
+    // HTTP, and without an explicit httpAgent the SDK falls back to its own
+    // default agent, escaping the maxSockets limit and the logging below.
+    const requestHandler = maxSockets
+      ? new NodeHttpHandler({
+          httpAgent: this.httpAgent,
+          httpsAgent: this.httpsAgent,
+        })
+      : undefined;
+    this.s3Client = new S3Client({
+      ...s3ChecksumConfig,
+      region,
+      endpoint,
+      forcePathStyle,
+      requestHandler,
+      credentials: {
+        accessKeyId: accessKey,
+        secretAccessKey: secretKey,
+      },
+    });
+    // Reuse the same requestHandler (shared http/https agents) so the
+    // maxSockets limit governs both public and internal endpoint traffic.
+    // Unset internal flag: inherit the public addressing style when sharing
+    // the public endpoint; keep the historical virtual-hosted default when a
+    // separate internal endpoint is configured. An explicit flag always wins.
+    const internalPathStyle = internalForcePathStyle ?? (internalEndpoint ? false : forcePathStyle);
+    // A dedicated internal client is needed when the endpoint differs, or when
+    // the two sides disagree on addressing style.
+    this.s3ClientPrivateNetwork =
+      internalEndpoint || internalPathStyle !== forcePathStyle
+        ? new S3Client({
+            ...s3ChecksumConfig,
+            region,
+            endpoint: internalEndpoint ?? endpoint,
+            forcePathStyle: internalPathStyle,
+            requestHandler,
+            credentials: {
+              accessKeyId: accessKey,
+              secretAccessKey: secretKey,
+            },
+          })
+        : this.s3Client;
+    sendContentMd5ForDeleteObjects(this.s3ClientPrivateNetwork);
+    fse.ensureDirSync(StorageAdapter.TEMPORARY_DIR);
+
+    this.s3ClientPreSigner = this.config.privateBucketEndpoint
+      ? new S3Client({
+          ...s3ChecksumConfig,
+          region,
+          endpoint,
+          bucketEndpoint: true,
+          requestHandler,
+          credentials: {
+            accessKeyId: accessKey,
+            secretAccessKey: secretKey,
+          },
+        })
+      : this.s3Client;
+
+    const logS3ConnectionsRate = Number(process.env.LOG_S3_CONNECTIONS_RATE);
+    if (Number.isNaN(logS3ConnectionsRate)) {
+      this.logger.log('LOG_S3_CONNECTIONS_RATE not set, skipping log');
+      return;
+    }
+    this.logger.log(`Logging S3 connections rate every ${logS3ConnectionsRate} milliseconds`);
+    setInterval(() => {
+      const countRecords: Record<
+        string,
+        { socketsCount: number; freeSocketsCount: number; requestsCount: number }
+      > = {};
+      for (const agent of [this.httpAgent, this.httpsAgent]) {
+        Object.entries(agent.sockets).forEach(([key, sockets]) => {
+          if (sockets) {
+            const currentCountRecord = countRecords[key] ?? {};
+            countRecords[key] = {
+              ...countRecords[key],
+              socketsCount: (currentCountRecord?.socketsCount ?? 0) + sockets.length,
+            };
+          }
+        });
+        Object.entries(agent.freeSockets).forEach(([key, sockets]) => {
+          if (sockets) {
+            const currentCountRecord = countRecords[key] ?? {};
+            countRecords[key] = {
+              ...countRecords[key],
+              freeSocketsCount: (currentCountRecord?.freeSocketsCount ?? 0) + sockets.length,
+            };
+          }
+        });
+        Object.entries(agent.requests).forEach(([key, requests]) => {
+          if (requests) {
+            const currentCountRecord = countRecords[key] ?? {};
+            countRecords[key] = {
+              ...countRecords[key],
+              requestsCount: (currentCountRecord?.requestsCount ?? 0) + requests.length,
+            };
+          }
+        });
+      }
+      this.logger.log(`S3 agent connections: ${JSON.stringify(countRecords, null, 2)}`);
+    }, logS3ConnectionsRate);
+  }
+
+  private checkConfig() {
+    const { tokenExpireIn } = this.config;
+    if (this.config.s3.forcePathStyle && this.config.privateBucketEndpoint) {
+      // privateBucketEndpoint presigns against a bucket-specific host
+      // (bucketEndpoint: true), which contradicts path-style addressing.
+      throw new CustomHttpException(
+        'BACKEND_STORAGE_S3_FORCE_PATH_STYLE cannot be combined with BACKEND_STORAGE_PRIVATE_BUCKET_ENDPOINT',
+        HttpErrorCode.VALIDATION_ERROR
+      );
+    }
+    if (ms(tokenExpireIn) >= ms('7d')) {
+      throw new CustomHttpException(
+        'Token expire in must be more than 7 days',
+        HttpErrorCode.VALIDATION_ERROR,
+        {
+          localization: {
+            i18nKey: 'httpErrors.attachment.tokenExpireInTooLong',
+          },
+        }
+      );
+    }
+    if (!this.config.s3.region) {
+      throw new CustomHttpException('S3 region is required', HttpErrorCode.VALIDATION_ERROR, {
+        localization: {
+          i18nKey: 'httpErrors.attachment.s3RegionRequired',
+        },
+      });
+    }
+    if (!this.config.s3.endpoint) {
+      throw new CustomHttpException('S3 endpoint is required', HttpErrorCode.VALIDATION_ERROR, {
+        localization: {
+          i18nKey: 'httpErrors.attachment.s3EndpointRequired',
+        },
+      });
+    }
+    if (!this.config.s3.accessKey) {
+      throw new CustomHttpException('S3 access key is required', HttpErrorCode.VALIDATION_ERROR, {
+        localization: {
+          i18nKey: 'httpErrors.attachment.s3AccessKeyRequired',
+        },
+      });
+    }
+    if (!this.config.s3.secretKey) {
+      throw new CustomHttpException('S3 secret key is required', HttpErrorCode.VALIDATION_ERROR, {
+        localization: {
+          i18nKey: 'httpErrors.attachment.s3SecretKeyRequired',
+        },
+      });
+    }
+    if (this.config.uploadMethod.toLocaleLowerCase() !== 'put') {
+      throw new CustomHttpException(
+        'S3 upload method must be put',
+        HttpErrorCode.VALIDATION_ERROR,
+        {
+          localization: {
+            i18nKey: 'httpErrors.attachment.s3UploadMethodMustBePut',
+          },
+        }
+      );
+    }
+  }
+
+  private replaceBucketEndpoint(bucket: string, internal?: boolean) {
+    const { privateBucketEndpoint, privateBucket } = this.config;
+    if (privateBucketEndpoint && bucket === privateBucket && !internal) {
+      return privateBucketEndpoint;
+    }
+    return bucket;
+  }
+
+  async presigned(bucket: string, dir: string, params: IPresignParams): Promise<IPresignRes> {
+    try {
+      const { tokenExpireIn, uploadMethod } = this.config;
+      const { expiresIn, contentLength, contentType, hash, internal, cacheControl } = params;
+
+      const token = getRandomString(12);
+      const filename = hash ?? token;
+      const path = join(dir, filename);
+
+      const command = new PutObjectCommand({
+        Bucket: bucket,
+        Key: path,
+        ContentType: contentType,
+        ContentLength: contentLength,
+        CacheControl: cacheControl,
+      });
+
+      const url = await getSignedUrl(
+        internal ? this.s3ClientPrivateNetwork : this.s3Client,
+        command,
+        {
+          expiresIn: expiresIn ?? second(tokenExpireIn),
+        }
+      );
+
+      // Cache-Control is NOT signature-enforced (SigV4 treats it as
+      // unsignable), so storing it relies on the client echoing
+      // requestHeaders on PUT — both first-party upload clients do. A client
+      // that omits or alters it only affects its own object's metadata.
+      const requestHeaders = {
+        'Content-Type': contentType,
+        'Content-Length': contentLength,
+        ...(cacheControl ? { 'Cache-Control': cacheControl } : {}),
+      };
+
+      return {
+        url,
+        path,
+        token,
+        uploadMethod,
+        requestHeaders,
+      };
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } catch (e: any) {
+      throw new CustomHttpException(
+        `S3 presigned error${e?.message ? `: ${e.message}` : ''}`,
+        HttpErrorCode.VALIDATION_ERROR,
+        {
+          localization: {
+            i18nKey: 'httpErrors.attachment.presignedError',
+          },
+        }
+      );
+    }
+  }
+  async getObjectMeta(bucket: string, path: string): Promise<IObjectMeta> {
+    const url = `/${bucket}/${path}`;
+    const command = new HeadObjectCommand({
+      Bucket: bucket,
+      Key: path,
+    });
+    const {
+      ContentLength: size,
+      ContentType: s3Mimetype = 'application/octet-stream',
+      ETag: hash,
+    } = await this.s3ClientPrivateNetwork.send(command);
+    const mimetype = s3Mimetype || 'application/octet-stream';
+    if (!size || !mimetype || !hash) {
+      throw new CustomHttpException('Invalid object meta', HttpErrorCode.VALIDATION_ERROR, {
+        localization: {
+          i18nKey: 'httpErrors.attachment.invalidObjectMeta',
+        },
+      });
+    }
+    if (!isImage(mimetype ?? '')) {
+      return {
+        hash,
+        size,
+        mimetype,
+        url,
+      };
+    }
+    const metaReader = sharp();
+    const getObjectCommand = new GetObjectCommand({
+      Bucket: bucket,
+      Key: path,
+    });
+    const { Body } = await this.s3ClientPrivateNetwork.send(getObjectCommand);
+    const stream = Body as Readable;
+    if (!stream) {
+      throw new CustomHttpException('Invalid image stream', HttpErrorCode.VALIDATION_ERROR, {
+        localization: {
+          i18nKey: 'httpErrors.attachment.invalidImageStream',
+        },
+      });
+    }
+    try {
+      const sharpReader = stream.pipe(metaReader);
+      const metadata = await sharpReader.metadata();
+      return {
+        hash,
+        url,
+        size,
+        mimetype,
+        ...normalizeImageDimensions(metadata),
+      };
+    } catch (error) {
+      // Dimensions are a nice-to-have (grid aspect ratio); an image sharp cannot
+      // parse, e.g. a HEIC libheif rejects, must still upload. Thumbnails are
+      // handled downstream by the crop job, which has its own decoders.
+      this.logger.warn(`Calculate image size failed for ${path}: ${(error as Error).message}`);
+      return { hash, url, size, mimetype };
+    } finally {
+      stream?.destroy();
+    }
+  }
+  async getPreviewUrl(
+    bucket: string,
+    path: string,
+    expiresIn: number = second(this.config.urlExpireIn),
+    respHeaders?: IRespHeaders
+  ): Promise<string> {
+    const command = new GetObjectCommand({
+      Bucket: this.replaceBucketEndpoint(bucket),
+      Key: path,
+      ResponseContentDisposition: respHeaders?.['Content-Disposition'],
+      // Objects uploaded via browser presigned PUT may carry an empty
+      // Content-Type; without an explicit override Safari content-sniffs the
+      // download and auto-extracts archive-like files (e.g. zip-based formats).
+      ResponseContentType: respHeaders?.['Content-Type'] || undefined,
+      ResponseCacheControl: StorageAdapter.isPublicBucket(bucket)
+        ? undefined
+        : StorageAdapter.PRIVATE_PREVIEW_CACHE_CONTROL,
+    });
+
+    return getSignedUrl(this.s3ClientPreSigner, command, {
+      expiresIn: expiresIn ?? second(this.config.tokenExpireIn),
+    });
+  }
+  uploadFileWidthPath(
+    bucket: string,
+    path: string,
+    filePath: string,
+    metadata: Record<string, unknown>
+  ) {
+    const readStream = fse.createReadStream(filePath);
+    const command = new PutObjectCommand({
+      Bucket: bucket,
+      Key: path,
+      Body: readStream,
+      ContentType: metadata['Content-Type'] as string,
+      ContentLength: metadata['Content-Length'] as number,
+      ContentDisposition: metadata['Content-Disposition'] as string,
+      ContentEncoding: metadata['Content-Encoding'] as string,
+      ContentLanguage: metadata['Content-Language'] as string,
+      ContentMD5: metadata['Content-MD5'] as string,
+      CacheControl: metadata['Cache-Control'] as string,
+    });
+    return this.s3ClientPrivateNetwork
+      .send(command)
+      .then((res) => ({
+        hash: res.ETag!,
+        path,
+      }))
+      .finally(() => {
+        readStream.removeAllListeners();
+        readStream.destroy();
+      });
+  }
+
+  uploadFile(
+    bucket: string,
+    path: string,
+    stream: Buffer | Readable,
+    metadata?: Record<string, unknown>
+  ) {
+    return this.uploadFileStream(bucket, path, stream, metadata);
+  }
+
+  async uploadFileStream(
+    bucket: string,
+    path: string,
+    stream: Buffer | Readable,
+    metadata?: Record<string, unknown>
+  ) {
+    const upload = new Upload({
+      client: this.s3ClientPrivateNetwork,
+      params: {
+        Bucket: bucket,
+        Key: path,
+        Body: stream,
+        ContentType: metadata?.['Content-Type'] as string,
+        ContentLength: metadata?.['Content-Length'] as number,
+        ContentDisposition: metadata?.['Content-Disposition'] as string,
+        ContentEncoding: metadata?.['Content-Encoding'] as string,
+        ContentLanguage: metadata?.['Content-Language'] as string,
+        ContentMD5: metadata?.['Content-MD5'] as string,
+        CacheControl: metadata?.['Cache-Control'] as string,
+      },
+    });
+
+    return upload
+      .done()
+      .then((res) => ({
+        hash: res.ETag!,
+        path,
+      }))
+      .catch((error) => {
+        if (stream && typeof stream !== 'string' && 'destroy' in stream) {
+          (stream as Readable)?.removeAllListeners?.();
+          (stream as Readable)?.destroy?.();
+        }
+        throw new CustomHttpException(
+          `S3 upload failed: ${error?.message || 'Unknown error'}`,
+          HttpErrorCode.VALIDATION_ERROR,
+          {
+            localization: {
+              i18nKey: 'httpErrors.attachment.uploadFailed',
+            },
+          }
+        );
+      })
+      .finally(() => {
+        if (stream && typeof stream !== 'string' && 'destroy' in stream) {
+          (stream as Readable)?.removeAllListeners?.();
+          (stream as Readable).destroy?.();
+        }
+      });
+  }
+
+  // s3 file exists
+  private async fileExists(bucket: string, path: string): Promise<boolean> {
+    try {
+      const command = new HeadObjectCommand({
+        Bucket: bucket,
+        Key: path,
+      });
+      await this.s3ClientPrivateNetwork.send(command);
+      return true;
+    } catch (error) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      if ((error as any).name === 'NotFound') {
+        return false;
+      }
+      throw error;
+    }
+  }
+
+  async cropImage(
+    bucket: string,
+    path: string,
+    width?: number,
+    height?: number,
+    _newPath?: string
+  ) {
+    const newPath = _newPath || `${path}_${width ?? 0}_${height ?? 0}`;
+    const resizedImagePath = resolve(
+      StorageAdapter.TEMPORARY_DIR,
+      `${encodeURIComponent(join(bucket, newPath))}_${getRandomString(8)}`
+    );
+    if (await this.fileExists(bucket, newPath)) {
+      return newPath;
+    }
+    const command = new GetObjectCommand({
+      Bucket: bucket,
+      Key: path,
+    });
+    const { Body: stream, ContentType: mimetype } = await this.s3ClientPrivateNetwork.send(command);
+    if (!isImage(mimetype ?? '')) {
+      (stream as Readable)?.destroy?.();
+      throw new CustomHttpException('Invalid image', HttpErrorCode.VALIDATION_ERROR, {
+        localization: {
+          i18nKey: 'httpErrors.attachment.invalidImage',
+        },
+      });
+    }
+    if (!stream) {
+      throw new CustomHttpException("can't get image stream", HttpErrorCode.VALIDATION_ERROR, {
+        localization: {
+          i18nKey: 'httpErrors.attachment.cantGetImageStream',
+        },
+      });
+    }
+    const sourceFilePath = resolve(
+      StorageAdapter.TEMPORARY_DIR,
+      `${encodeURIComponent(path)}_${getRandomString(8)}`
+    );
+    try {
+      await pipeline(stream as Readable, fse.createWriteStream(sourceFilePath));
+      const metaReader = sharp(sourceFilePath, { failOn: 'none', unlimited: true })
+        .rotate()
+        .resize(width, height);
+      await metaReader.toFile(resizedImagePath);
+      const upload = await this.uploadFileWidthPath(bucket, newPath, resizedImagePath, {
+        'Content-Type': resolveThumbnailMimetype(mimetype ?? ''),
+      });
+      return upload.path;
+    } finally {
+      fse.removeSync(sourceFilePath);
+      fse.removeSync(resizedImagePath);
+    }
+  }
+
+  async downloadFile(bucket: string, path: string): Promise<Readable> {
+    const command = new GetObjectCommand({
+      Bucket: bucket,
+      Key: path,
+    });
+    const { Body: stream } = await this.s3ClientPrivateNetwork.send(command);
+    return stream as Readable;
+  }
+
+  async deleteFile(bucket: string, path: string): Promise<void> {
+    await this.s3ClientPrivateNetwork.send(
+      new DeleteObjectCommand({
+        Bucket: bucket,
+        Key: path,
+      })
+    );
+  }
+
+  private collectListedPage(
+    page: {
+      Contents?: { Key?: string; Size?: number; ETag?: string; LastModified?: Date }[];
+      CommonPrefixes?: { Prefix?: string }[];
+    },
+    objects: IListObjectsResult['objects'],
+    prefixes: Set<string>
+  ) {
+    for (const obj of page.Contents ?? []) {
+      if (obj.Key) {
+        objects.push({
+          key: obj.Key,
+          size: obj.Size ?? 0,
+          etag: obj.ETag?.replaceAll('"', ''),
+          lastModified: obj.LastModified,
+        });
+      }
+    }
+    for (const common of page.CommonPrefixes ?? []) {
+      if (common.Prefix) {
+        prefixes.add(common.Prefix);
+      }
+    }
+  }
+
+  async listObjects(
+    bucket: string,
+    prefix: string,
+    options?: IListObjectsOptions
+  ): Promise<IListObjectsResult> {
+    const objects: IListObjectsResult['objects'] = [];
+    const prefixes = new Set<string>();
+    let continuationToken: string | undefined;
+    do {
+      const page = await this.s3ClientPrivateNetwork.send(
+        new ListObjectsV2Command({
+          Bucket: bucket,
+          Prefix: prefix,
+          Delimiter: options?.delimiter,
+          ContinuationToken: continuationToken,
+        })
+      );
+      this.collectListedPage(page, objects, prefixes);
+      continuationToken = page.IsTruncated ? page.NextContinuationToken : undefined;
+    } while (continuationToken);
+    return { objects, prefixes: [...prefixes] };
+  }
+
+  async deleteDir(bucket: string, path: string, throwError: boolean = true) {
+    const prefix = path.endsWith('/') ? path : `${path}/`;
+
+    try {
+      // paginate: ListObjectsV2 and DeleteObjects both cap at 1000 keys per call
+      for (;;) {
+        const { Contents } = await this.s3ClientPrivateNetwork.send(
+          new ListObjectsV2Command({
+            Bucket: bucket,
+            Prefix: prefix,
+          })
+        );
+
+        if (!Contents || Contents.length === 0) return;
+
+        await this.s3ClientPrivateNetwork.send(
+          new DeleteObjectsCommand({
+            Bucket: bucket,
+            Delete: {
+              Objects: Contents.map((obj) => ({ Key: obj.Key! })),
+            },
+          })
+        );
+
+        if (Contents.length < 1000) return;
+      }
+    } catch (error) {
+      if (!throwError) {
+        return;
+      }
+      throw error;
+    }
+  }
+}

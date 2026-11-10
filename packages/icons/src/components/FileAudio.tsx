@@ -2,24 +2,25 @@ import * as React from 'react';
 import type { SVGProps } from 'react';
 const FileAudio = (props: SVGProps<SVGSVGElement>) => (
   <svg
-    xmlns="http://www.w3.org/2000/svg"
-    width="1em"
-    height="1em"
+    width="120"
+    height="120"
+    viewBox="0 0 120 120"
     fill="none"
-    viewBox="0 0 24 24"
+    xmlns="http://www.w3.org/2000/svg"
     {...props}
   >
-    <g clipPath="url(#prefix__a)">
-      <path
-        fill="#00BECA"
-        fillRule="evenodd"
-        d="M2.88 0A2.88 2.88 0 0 0 0 2.88v18.24A2.88 2.88 0 0 0 2.88 24h18.24A2.88 2.88 0 0 0 24 21.12V2.88A2.88 2.88 0 0 0 21.12 0zm14.037 6.01a.8.8 0 0 1 .67.21c.178.17.268.412.25.655l-.732 7.75-.002.022q-.011.142-.018.283a2.008 2.008 0 1 1-1.416-2.039l.351-3.824-5.194.763-.552 5.98q-.014.147-.02.292a2.008 2.008 0 1 1-1.431-2.034l.582-6.334a.8.8 0 0 1 .683-.72z"
-        clipRule="evenodd"
-      />
+    <rect width="120" height="120" fill="#FCE7F3" />
+    <g clipPath="url(#clip0_221_32614)">
+      <circle cx="60" cy="60" r="36" fill="#EC4899" />
+      <rect x="57.5" y="42" width="5" height="36" rx="2.5" fill="white" />
+      <rect x="67.5" y="48" width="5" height="24" rx="2.5" fill="#FBCFE8" />
+      <rect x="48" y="53" width="5" height="14" rx="2.5" fill="#FBCFE8" />
+      <rect x="77.5" y="54" width="5" height="12" rx="2.5" fill="#F9A8D4" />
+      <rect x="38" y="50" width="5" height="20" rx="2.5" fill="#F9A8D4" />
     </g>
     <defs>
-      <clipPath id="prefix__a">
-        <path fill="#fff" d="M0 0h24v24H0z" />
+      <clipPath id="clip0_221_32614">
+        <rect width="72" height="72" fill="white" transform="translate(24 24)" />
       </clipPath>
     </defs>
   </svg>

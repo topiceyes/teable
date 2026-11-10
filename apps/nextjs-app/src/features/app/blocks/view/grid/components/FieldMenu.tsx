@@ -1,57 +1,208 @@
 /* eslint-disable jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions */
-import { Trash, Edit, EyeOff, ArrowLeft, ArrowRight, FreezeColumn } from '@teable/icons';
-import type { GridView } from '@teable/sdk';
-import { useFields, useIsTouchDevice, useTablePermission, useView } from '@teable/sdk';
-import { insertSingle } from '@teable/sdk/utils';
+import { useMutation } from '@tanstack/react-query';
+import type { IFilter, IGroup, ISort } from '@teable/core';
+import { FieldType, getValidFilterOperators, isAiActionWritableField } from '@teable/core';
 import {
+  EyeOff,
+  ArrowLeft,
+  ArrowRight,
+  FreezeColumn,
+  Filter,
+  LayoutList,
+  ArrowUpDown,
+  Edit,
+  MagicAi,
+  Download,
+  MessageSquareDot,
+} from '@teable/icons';
+import type { IDuplicateFieldRo } from '@teable/openapi';
+import { duplicateField, duplicateFieldCheck } from '@teable/openapi';
+import type { GridView } from '@teable/sdk';
+import {
+  useBaseId,
+  useFieldPermission,
+  useFields,
+  useGridViewStore,
+  useIsTouchDevice,
+  usePersonalView,
+  useSearch,
+  useTableId,
+  useTablePermission,
+  useView,
+} from '@teable/sdk';
+import { ConfirmDialog } from '@teable/ui-lib/base';
+import {
+  cn,
   Command,
   CommandGroup,
   CommandItem,
   CommandList,
   CommandSeparator,
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
   Sheet,
   SheetContent,
   SheetHeader,
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
 } from '@teable/ui-lib/shadcn';
-import classNames from 'classnames';
+import { toast } from '@teable/ui-lib/shadcn/ui/sonner';
+import { CopyPlus, Trash } from 'lucide-react';
+import { useRouter } from 'next/router';
 import { useTranslation } from 'next-i18next';
-import { Fragment, useRef } from 'react';
+import type { ReactNode } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import { useClickAway } from 'react-use';
+import { useColumnDownloadDialogStore } from '@/features/app/components/download-attachments';
+import { FieldDeleteConfirmDialog } from '@/features/app/components/field-setting/field-delete-confirm-dialog/FieldDeleteConfirmDialog';
 import { FieldOperator } from '@/features/app/components/field-setting/type';
+import { useAI } from '@/features/app/hooks/useAI';
+import { useBaseUsage } from '@/features/app/hooks/useBaseUsage';
 import { tableConfig } from '@/features/i18n/table.config';
 import { useFieldSettingStore } from '../../field/useFieldSettingStore';
-import { useGridViewStore } from '../store/gridView';
+import { useToolBarStore } from '../../tool-bar/components/useToolBarStore';
+import { useViewConfigurable } from '../../tool-bar/hook/useViewConfigurable';
+import { getInsertFieldOrder } from './insertFieldOrder';
 import type { IMenuItemProps } from './RecordMenu';
 
 enum MenuItemType {
   Edit = 'Edit',
+  AutoFill = 'AutoFill',
   Freeze = 'Freeze',
   Hidden = 'Hidden',
   Delete = 'Delete',
   InsertLeft = 'InsertLeft',
   InsertRight = 'InsertRight',
+  Sort = 'Sort',
+  Filter = 'Filter',
+  Group = 'Group',
+  Duplicate = 'Duplicate',
+  DownloadAllAttachments = 'DownloadAllAttachments',
+  AddToChat = 'AddToChat',
 }
 
-const iconClassName = 'mr-2 h-4 w-4';
+const iconClassName = 'me-2 h-4 w-4';
+const disabledTooltipMaxWidth = 300;
 
+interface IFieldMenuItem extends Omit<IMenuItemProps<MenuItemType>, 'onClick'> {
+  disabledTooltip?: string;
+  onClick: () => void | Promise<void>;
+}
+
+const DisabledTooltipMenuItem = ({
+  children,
+  content,
+}: {
+  children: ReactNode;
+  content: string;
+}) => {
+  const triggerRef = useRef<HTMLDivElement>(null);
+  const [side, setSide] = useState<'left' | 'right'>('right');
+
+  const updateSide = () => {
+    const triggerRect = triggerRef.current?.getBoundingClientRect();
+    if (!triggerRect) return;
+    const leftSpace = triggerRect.left;
+    const rightSpace = window.innerWidth - triggerRect.right;
+    setSide(rightSpace >= disabledTooltipMaxWidth || rightSpace >= leftSpace ? 'right' : 'left');
+  };
+
+  return (
+    <TooltipProvider>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <div ref={triggerRef} onMouseEnter={updateSide} onFocus={updateSide}>
+            {children}
+          </div>
+        </TooltipTrigger>
+        <TooltipContent
+          side={side}
+          className="max-w-[300px] whitespace-normal break-words text-start"
+        >
+          {content}
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  );
+};
+
+// eslint-disable-next-line sonarjs/cognitive-complexity
 export const FieldMenu = () => {
   const isTouchDevice = useIsTouchDevice();
+  const router = useRouter();
   const view = useView() as GridView | undefined;
+  const { filter, sort, group } = view || {};
+  const tableId = useTableId();
+  const baseId = useBaseId();
+  const shareId = router.query.shareId as string | undefined;
   const { headerMenu, closeHeaderMenu } = useGridViewStore();
+  const { isViewConfigurable } = useViewConfigurable();
   const { openSetting } = useFieldSettingStore();
   const permission = useTablePermission();
+  const menuFieldPermission = useFieldPermission();
   const { t } = useTranslation(tableConfig.i18nNamespaces);
-  const allFields = useFields({ withHidden: true });
+  const allFields = useFields({ withHidden: true, withDenied: true });
   const fieldSettingRef = useRef<HTMLDivElement>(null);
-  const fields = headerMenu?.fields;
+  const { fields, aiEnable, onSelectionClear, onAutoFill, addToChat } = headerMenu ?? {};
+  const { filterRef, sortRef, groupRef } = useToolBarStore();
+  const { enable: baseAiEnable } = useAI();
+  const usage = useBaseUsage();
+  const chatEnabled = Boolean(baseAiEnable && usage?.limit?.chatAIEnable);
+  const { personalViewCommonQuery, isPersonalView } = usePersonalView();
+  const { searchQuery } = useSearch();
+  const isViewLocked = Boolean(view?.isLocked && !isPersonalView);
+  const emptyFieldMenu = !view || !fields?.length || !allFields.length;
+  const [deleteFieldDialog, setDeleteFieldDialog] = useState<{
+    open: boolean;
+    tableId?: string;
+    fieldIds?: string[];
+  }>({
+    open: false,
+  });
+  const [crossSpaceFieldDup, setCrossSpaceFieldDup] = useState<{
+    open: boolean;
+    tableId?: string;
+    fieldId?: string;
+    name?: string;
+    viewId?: string;
+  }>({ open: false });
+  const { openDialog: openDownloadDialog } = useColumnDownloadDialogStore();
+
+  const { mutateAsync: duplicateFieldFn } = useMutation({
+    mutationFn: ({
+      tableId,
+      fieldId,
+      duplicateFieldRo,
+    }: {
+      tableId: string;
+      fieldId: string;
+      duplicateFieldRo: IDuplicateFieldRo;
+    }) => duplicateField(tableId, fieldId, duplicateFieldRo),
+  });
 
   useClickAway(fieldSettingRef, () => {
     closeHeaderMenu();
   });
 
-  if (!view || !fields?.length || !allFields.length) return null;
+  useEffect(() => {
+    if (emptyFieldMenu) {
+      setDeleteFieldDialog({ open: false });
+    }
+  }, [emptyFieldMenu]);
+
+  if (emptyFieldMenu) {
+    return null;
+  }
 
   const fieldIds = fields.map((f) => f.id);
+  const { freezeColumnIndex, maxFreezeColumnCount } = headerMenu ?? {};
+  const canFreezeToMenuField =
+    freezeColumnIndex == null ||
+    maxFreezeColumnCount == null ||
+    freezeColumnIndex + 1 <= maxFreezeColumnCount;
 
   const visible = Boolean(headerMenu);
   const position = headerMenu?.position;
@@ -63,19 +214,9 @@ export const FieldMenu = () => {
     : {};
 
   const insertField = async (isInsertAfter: boolean = true) => {
-    const fieldId = fieldIds[0];
-    const index = allFields.findIndex((f) => f.id === fieldId);
+    const newOrder = getInsertFieldOrder(allFields, view.columnMeta, fieldIds[0], isInsertAfter);
 
-    if (index === -1) return;
-
-    const newOrder = insertSingle(
-      index,
-      allFields.length,
-      (index: number) => {
-        return view.columnMeta[allFields[index].id].order;
-      },
-      isInsertAfter
-    );
+    if (newOrder == null) return;
 
     return openSetting({
       order: newOrder,
@@ -85,25 +226,122 @@ export const FieldMenu = () => {
 
   const freezeField = async () => {
     const fieldId = fieldIds[0];
-    const index = allFields.findIndex((f) => f.id === fieldId);
-
-    if (index === -1) return;
-
-    view?.updateFrozenColumnCount(index + 1);
+    if (!fieldId) return;
+    await view?.updateOption({ frozenFieldId: fieldId });
   };
 
-  const menuGroups: IMenuItemProps<MenuItemType>[][] = [
+  const handleDownloadAllAttachments = () => {
+    if (!tableId || !fields?.length) return;
+    const field = fields[0];
+
+    // For share view: use view's filter/sort/group directly (no personal view in share view)
+    // For normal view: use personalViewCommonQuery
+    const baseQuery = shareId
+      ? view?.filter || view?.sort || view?.group
+        ? {
+            filter: view?.filter ?? undefined,
+            orderBy: view?.sort?.sortObjs ?? undefined,
+            groupBy: view?.group ?? undefined,
+          }
+        : undefined
+      : personalViewCommonQuery;
+
+    const downloadQuery =
+      searchQuery || baseQuery ? { ...baseQuery, search: searchQuery } : undefined;
+
+    openDownloadDialog({
+      tableId,
+      fieldId: field.id,
+      fieldName: field.name,
+      viewId: view?.id,
+      shareId,
+      personalViewCommonQuery: downloadQuery,
+    });
+  };
+
+  const rawMenuGroups: IFieldMenuItem[][] = [
     [
       {
         type: MenuItemType.Edit,
         name: t('table:menu.editField'),
         icon: <Edit className={iconClassName} />,
-        hidden: fieldIds.length !== 1 || !permission['field|update'],
+        hidden: fieldIds.length !== 1 || !menuFieldPermission['field|update'],
         onClick: async () => {
           openSetting({
             fieldId: fieldIds[0],
             operator: FieldOperator.Edit,
           });
+        },
+      },
+      {
+        type: MenuItemType.Duplicate,
+        name: t('table:menu.duplicateField'),
+        icon: <CopyPlus className={iconClassName} />,
+        hidden: fieldIds.length !== 1 || !menuFieldPermission['field|update'],
+        onClick: async () => {
+          if (!tableId || !baseId) return;
+          const fieldId = fieldIds[0];
+          const field = allFields.find((f) => f.id === fieldId);
+          const newName = `${field?.name} ${t('common:noun.copy')}`;
+          const toastId = toast.loading(t('table:import.menu.duplicating'));
+          try {
+            const previewRes = await duplicateFieldCheck(baseId, tableId, fieldId);
+            const affected = previewRes.data.affectedFields;
+            if (affected.length > 0) {
+              toast.dismiss(toastId);
+              setCrossSpaceFieldDup({
+                open: true,
+                tableId,
+                fieldId,
+                name: newName,
+                viewId: view.id,
+              });
+              return;
+            }
+            await duplicateFieldFn({
+              tableId,
+              fieldId,
+              duplicateFieldRo: { name: newName, viewId: view.id },
+            });
+            toast.success(t('table:import.menu.duplicateSuccess'), { id: toastId });
+            onSelectionClear?.();
+            closeHeaderMenu();
+          } catch {
+            toast.error(t('table:import.menu.duplicateFailed'), { id: toastId });
+            onSelectionClear?.();
+            closeHeaderMenu();
+          }
+        },
+      },
+    ],
+    [
+      {
+        type: MenuItemType.AutoFill,
+        name: t('table:menu.autoFill'),
+        icon: <MagicAi className={iconClassName} />,
+        hidden:
+          !aiEnable ||
+          !isAiActionWritableField(fields[0]) ||
+          fieldIds.length !== 1 ||
+          !permission['record|update'],
+        onClick: async () => {
+          onAutoFill?.(fieldIds[0]);
+        },
+      },
+      {
+        type: MenuItemType.DownloadAllAttachments,
+        name: t('table:menu.downloadAllAttachments'),
+        icon: <Download className={iconClassName} />,
+        hidden: fieldIds.length !== 1 || fields[0]?.type !== FieldType.Attachment,
+        onClick: handleDownloadAllAttachments,
+      },
+      {
+        type: MenuItemType.AddToChat,
+        name: t('table:menu.addToChat'),
+        icon: <MessageSquareDot className={iconClassName} />,
+        hidden: !chatEnabled || !addToChat,
+        onClick: () => {
+          addToChat?.();
         },
       },
     ],
@@ -125,10 +363,122 @@ export const FieldMenu = () => {
     ],
     [
       {
+        type: MenuItemType.Filter,
+        name: t('table:menu.filterField'),
+        icon: <Filter className={iconClassName} />,
+        hidden: fieldIds.length !== 1 || !isViewConfigurable,
+        disabled: isViewLocked,
+        onClick: async () => {
+          if (!headerMenu) {
+            return;
+          }
+          const { fields } = headerMenu;
+          const field = fields.at(0);
+          if (!field) {
+            return;
+          }
+          const { id: fieldId } = field;
+          const newItem = {
+            fieldId,
+            operator: getValidFilterOperators(field)?.[0] || null,
+            value: null,
+          };
+          let newFilter = {
+            conjunction: 'and',
+            filterSet: [newItem],
+          } as IFilter;
+          if (filter) {
+            newFilter = {
+              ...filter,
+              filterSet: [...filter.filterSet, newItem],
+            };
+          }
+          await view.updateFilter(newFilter);
+          filterRef?.current?.click();
+        },
+      },
+      {
+        type: MenuItemType.Sort,
+        name: t('table:menu.sortField'),
+        icon: <ArrowUpDown className={iconClassName} />,
+        hidden: fieldIds.length !== 1 || !isViewConfigurable,
+        disabled: isViewLocked,
+        onClick: async () => {
+          if (!headerMenu) {
+            return;
+          }
+          const { fields } = headerMenu;
+          const field = fields.at(0);
+          if (!field) {
+            return;
+          }
+          const { id: fieldId } = field;
+          const newSortItem = {
+            fieldId,
+            order: 'asc',
+          };
+          let newSort = {
+            sortObjs: [newSortItem],
+          };
+          let shouldUpdate = true;
+          if (sort) {
+            const index = sort.sortObjs.findIndex((f) => f.fieldId === fieldId);
+            if (index > -1) {
+              shouldUpdate = false;
+            }
+            newSort = {
+              ...sort,
+              sortObjs: [...sort.sortObjs, newSortItem],
+            };
+          }
+          shouldUpdate && (await view?.updateSort(newSort as ISort));
+          sortRef?.current?.click();
+        },
+      },
+      {
+        type: MenuItemType.Group,
+        name: t('table:menu.groupField'),
+        icon: <LayoutList className={iconClassName} />,
+        hidden: fieldIds.length !== 1 || !isViewConfigurable,
+        disabled: isViewLocked,
+        onClick: async () => {
+          if (!headerMenu) {
+            return;
+          }
+          const { fields } = headerMenu;
+          const field = fields.at(0);
+          if (!field) {
+            return;
+          }
+          const { id: fieldId } = field;
+          const newGroupItem = {
+            fieldId,
+            order: 'asc',
+          };
+          let newGroup = [newGroupItem];
+          let shouldUpdate = true;
+          if (group) {
+            const index = group.findIndex((f) => f.fieldId === fieldId);
+            if (index > -1) {
+              shouldUpdate = false;
+            }
+            newGroup = [...group, newGroupItem];
+          }
+          shouldUpdate && (await view.updateGroup(newGroup as IGroup));
+          groupRef?.current?.click();
+        },
+      },
+    ],
+    [
+      {
         type: MenuItemType.Freeze,
         name: t('table:menu.freezeUpField'),
         icon: <FreezeColumn className={iconClassName} />,
-        hidden: fieldIds.length !== 1 || !permission['view|update'],
+        hidden: fieldIds.length !== 1 || !isViewConfigurable,
+        disabled: isViewLocked || !canFreezeToMenuField,
+        disabledTooltip: !canFreezeToMenuField
+          ? t('table:menu.freezeFieldWindowTooNarrow')
+          : undefined,
         onClick: async () => await freezeField(),
       },
     ],
@@ -137,8 +487,8 @@ export const FieldMenu = () => {
         type: MenuItemType.Hidden,
         name: t('table:menu.hideField'),
         icon: <EyeOff className={iconClassName} />,
-        hidden: !permission['view|update'],
-        disabled: fields.some((f) => f.isPrimary),
+        hidden: !isViewConfigurable,
+        disabled: fields.some((f) => f.isPrimary) || isViewLocked,
         onClick: async () => {
           const fieldIdsSet = new Set(fieldIds);
           const filteredFields = allFields.filter((f) => fieldIdsSet.has(f.id)).filter(Boolean);
@@ -155,21 +505,32 @@ export const FieldMenu = () => {
             ? t('table:menu.deleteAllSelectedFields')
             : t('table:menu.deleteField'),
         icon: <Trash className={iconClassName} />,
-        hidden: !permission['field|delete'],
+        hidden: !menuFieldPermission['field|delete'],
         disabled: fields.some((f) => f.isPrimary),
         className: 'text-red-500 aria-selected:text-red-500',
         onClick: async () => {
+          if (!tableId) return;
           const fieldIdsSet = new Set(fieldIds);
           const filteredFields = allFields.filter((f) => fieldIdsSet.has(f.id)).filter(Boolean);
           if (filteredFields.length === 0) return;
-          for (const field of filteredFields) {
-            await field.delete();
-          }
+
+          setDeleteFieldDialog({
+            open: true,
+            tableId,
+            fieldIds: filteredFields.map((f) => f.id),
+          });
         },
       },
     ],
-  ].map((items) => items.filter(({ hidden }) => !hidden));
+  ];
 
+  const menuGroups = rawMenuGroups
+    .map((items) => items.filter(({ hidden }) => !hidden))
+    .filter((items) => items.length);
+
+  if (menuGroups.length === 0) {
+    return;
+  }
   return (
     <>
       {isTouchDevice ? (
@@ -181,17 +542,22 @@ export const FieldMenu = () => {
             {menuGroups.flat().map(({ type, name, icon, disabled, className, onClick }) => {
               return (
                 <div
-                  className={classNames('flex w-full items-center border-b py-3', className, {
+                  className={cn('flex w-full items-center border-b py-3', className, {
                     'cursor-not-allowed': disabled,
                     'opacity-50': disabled,
                   })}
                   key={type}
-                  onSelect={async () => {
-                    if (disabled) {
-                      return;
-                    }
+                  onClick={async () => {
+                    if (disabled) return;
+
                     await onClick();
-                    closeHeaderMenu();
+                    // Don't auto-close for actions that own their own follow-up
+                    // dialog; those handle closing the menu after the dialog
+                    // resolves.
+                    if (type !== MenuItemType.Delete && type !== MenuItemType.Duplicate) {
+                      onSelectionClear?.();
+                      closeHeaderMenu();
+                    }
                   }}
                 >
                   {icon}
@@ -202,49 +568,130 @@ export const FieldMenu = () => {
           </SheetContent>
         </Sheet>
       ) : (
-        <Command
-          ref={fieldSettingRef}
-          className={classNames('absolute rounded-lg shadow-sm w-60 h-auto border', {
-            hidden: !visible,
-          })}
-          style={style}
-        >
-          <CommandList>
-            {menuGroups.map((items, index) => {
-              const nextItems = menuGroups[index + 1] ?? [];
-              if (!items.length) return null;
+        <Popover open={visible}>
+          <PopoverTrigger asChild style={style} className="absolute">
+            <div className="size-0 opacity-0" />
+          </PopoverTrigger>
+          <PopoverContent className="h-auto w-60 rounded-md p-0" align="start">
+            <Command
+              ref={fieldSettingRef}
+              className="rounded-md border-none shadow-none"
+              style={style}
+            >
+              <CommandList className="max-h-[calc(100vh-260px)]">
+                {menuGroups.map((items, index) => {
+                  const nextItems = menuGroups[index + 1] ?? [];
+                  if (!items.length) return null;
 
-              return (
-                <Fragment key={index}>
-                  <CommandGroup aria-valuetext="name">
-                    {items.map(({ type, name, icon, disabled, className, onClick }) => (
-                      <CommandItem
-                        className={classNames('px-4 py-2', className, {
-                          'cursor-not-allowed': disabled,
-                          'opacity-50': disabled,
-                        })}
-                        key={type}
-                        value={name}
-                        onSelect={async () => {
-                          if (disabled) {
-                            return;
+                  return (
+                    <Fragment key={index}>
+                      <CommandGroup aria-valuetext="name">
+                        {items.map(
+                          ({ type, name, icon, disabled, disabledTooltip, className, onClick }) => {
+                            const item = (
+                              <CommandItem
+                                className={cn('px-4 py-2', className, {
+                                  'cursor-not-allowed': disabled,
+                                  'opacity-50': disabled,
+                                })}
+                                key={type}
+                                value={name}
+                                onSelect={async () => {
+                                  if (disabled) {
+                                    return;
+                                  }
+                                  await onClick();
+                                  // Don't auto-close for actions that own their own
+                                  // follow-up dialog; those handle closing the menu
+                                  // after the dialog resolves.
+                                  if (
+                                    type !== MenuItemType.Delete &&
+                                    type !== MenuItemType.Duplicate
+                                  ) {
+                                    onSelectionClear?.();
+                                    closeHeaderMenu();
+                                  }
+                                }}
+                              >
+                                {icon}
+                                {name}
+                              </CommandItem>
+                            );
+
+                            if (!disabledTooltip) {
+                              return item;
+                            }
+
+                            return (
+                              <DisabledTooltipMenuItem key={type} content={disabledTooltip}>
+                                {item}
+                              </DisabledTooltipMenuItem>
+                            );
                           }
-                          await onClick();
-                          closeHeaderMenu();
-                        }}
-                      >
-                        {icon}
-                        {name}
-                      </CommandItem>
-                    ))}
-                  </CommandGroup>
-                  {nextItems.length > 0 && <CommandSeparator />}
-                </Fragment>
-              );
-            })}
-          </CommandList>
-        </Command>
+                        )}
+                      </CommandGroup>
+                      {nextItems.length > 0 && <CommandSeparator />}
+                    </Fragment>
+                  );
+                })}
+              </CommandList>
+            </Command>
+          </PopoverContent>
+        </Popover>
       )}
+
+      <FieldDeleteConfirmDialog
+        tableId={deleteFieldDialog.tableId ?? ''}
+        fieldIds={deleteFieldDialog.fieldIds ?? []}
+        open={deleteFieldDialog.open}
+        onClose={() => {
+          setDeleteFieldDialog({ open: false });
+          onSelectionClear?.();
+          closeHeaderMenu();
+        }}
+      />
+
+      <ConfirmDialog
+        open={crossSpaceFieldDup.open}
+        onOpenChange={(open) => {
+          if (!open) {
+            setCrossSpaceFieldDup({ open: false });
+            onSelectionClear?.();
+            closeHeaderMenu();
+          }
+        }}
+        title={t('table:crossSpace.duplicateFieldTitle')}
+        cancelText={t('common:actions.cancel')}
+        confirmText={t('table:crossSpace.convertAndDuplicate')}
+        onCancel={() => {
+          setCrossSpaceFieldDup({ open: false });
+          onSelectionClear?.();
+          closeHeaderMenu();
+        }}
+        onConfirm={async () => {
+          const { tableId: tId, fieldId, name, viewId } = crossSpaceFieldDup;
+          if (!tId || !fieldId || !name) return;
+          const toastId = toast.loading(t('table:import.menu.duplicating'));
+          try {
+            await duplicateFieldFn({
+              tableId: tId,
+              fieldId,
+              duplicateFieldRo: {
+                name,
+                viewId,
+              },
+            });
+            toast.success(t('table:import.menu.duplicateSuccess'), { id: toastId });
+          } catch {
+            toast.error(t('table:import.menu.duplicateFailed'), { id: toastId });
+          } finally {
+            setCrossSpaceFieldDup({ open: false });
+            onSelectionClear?.();
+            closeHeaderMenu();
+          }
+        }}
+        content={<p className="text-sm">{t('table:crossSpace.duplicateFieldDescription')}</p>}
+      />
     </>
   );
 };

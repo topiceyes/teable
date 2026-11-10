@@ -1,12 +1,12 @@
 import { ViewType } from '@teable/core';
 import { useTable, useViews } from '@teable/sdk/hooks';
-import { useRouter } from 'next/router';
 import { useCallback } from 'react';
+import { useNavigateToView } from '@/features/app/hooks/useResourceNavigation';
 
 export function useAddView() {
   const table = useTable();
   const views = useViews();
-  const router = useRouter();
+  const navigateToView = useNavigateToView();
   const viewName = views?.[views.length - 1]?.name + ' ' + views?.length;
 
   return useCallback(
@@ -21,17 +21,8 @@ export function useAddView() {
           type,
         })
       ).data;
-      const viewId = viewDoc.id;
-      const { baseId } = router.query;
-      router.push(
-        {
-          pathname: '/base/[baseId]/[tableId]/[viewId]',
-          query: { baseId, tableId: table.id, viewId },
-        },
-        undefined,
-        { shallow: Boolean(router.query.viewId) }
-      );
+      navigateToView(table.id, viewDoc.id);
     },
-    [router, table, viewName]
+    [navigateToView, table, viewName]
   );
 }

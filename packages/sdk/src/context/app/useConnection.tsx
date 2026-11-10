@@ -1,79 +1,90 @@
-import { HttpError, HttpErrorCode } from '@teable/core';
-import { toast } from '@teable/ui-lib';
 import { useEffect, useMemo, useState } from 'react';
-import ReconnectingWebSocket from 'reconnecting-websocket';
 import { Connection } from 'sharedb/lib/client';
 import type { ConnectionReceiveRequest, Socket } from 'sharedb/lib/sharedb';
+import { ReconnectingSockJS } from '../../utils/reconnectingSockJS';
+import { addQueryParamsToWebSocketUrl } from '../../utils/urlParams';
+import { useTranslation } from './i18n';
+import { installPresenceErrorHandling } from './presenceErrorHandling';
+import { handleShareDbReceive, handleShareDbError } from './shareDbErrorHandler';
+import { isConnected, useConnectionAutoManage } from './useConnectionAutoManage';
 
 export function getWsPath() {
-  const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return `${wsProtocol}//${window.location.host}/socket`;
+  // SockJS uses HTTP/HTTPS protocol for initial handshake
+  return `${window.location.origin}/socket`;
 }
 
-const shareDbErrorHandler = (error: unknown) => {
-  const httpError = new HttpError(error as string, 500);
-  const { code, message } = httpError;
-  if (code === HttpErrorCode.UNAUTHORIZED) {
-    window.location.href = `/auth/login?redirect=${encodeURIComponent(window.location.href)}`;
-    return;
-  }
-  if (code === HttpErrorCode.UNAUTHORIZED_SHARE) {
-    window.location.reload();
-    return;
-  }
-  toast({ title: 'Socket Error', description: `${code}: ${message}` });
-};
-
 export const useConnection = (path?: string) => {
-  const [connection, setConnection] = useState(() => {
-    if (typeof window === 'object') {
-      const socket = new ReconnectingWebSocket(path || getWsPath());
-      return new Connection(socket as Socket);
-    }
-  });
+  const { t, lang } = useTranslation();
   const [connected, setConnected] = useState(false);
+  const [connection, setConnection] = useState<Connection>();
+  const [socket, setSocket] = useState<ReconnectingSockJS | null>(null);
+  useEffect(() => {
+    // The server localizes ShareDB errors in this language, since ShareDB
+    // replies carry only code/message and the SDK cannot translate them.
+    const url = path || getWsPath();
+    const newSocket = new ReconnectingSockJS(
+      lang ? addQueryParamsToWebSocketUrl(url, { lang }) : url
+    );
+    setSocket(newSocket);
+
+    return () => {
+      // Cleanup socket on unmount or path change
+      newSocket.destroy();
+    };
+  }, [path, lang]);
+
+  useConnectionAutoManage(socket, undefined, {
+    // 10 minutes, it will be closed when the user is leave the page for 10 minutes
+    inactiveTimeout: 10 * 60 * 1000,
+    // reconnect when the browser is back for 2 seconds
+    reconnectDelay: 2000,
+  });
 
   useEffect(() => {
-    if (!connection) {
-      const socket = new ReconnectingWebSocket(path || getWsPath());
-      setConnection(new Connection(socket as Socket));
-    }
-  }, [connection, path]);
-
-  useEffect(() => {
-    if (!connection) {
+    if (!socket) {
       return;
     }
+    if (!isConnected(socket)) {
+      socket.reconnect();
+    }
+    const connection = new Connection(socket as Socket);
+    installPresenceErrorHandling(connection);
+    setConnection(connection);
 
     let pingInterval: ReturnType<typeof setInterval>;
     const onConnected = () => {
       setConnected(true);
-      pingInterval = setInterval(() => connection.ping(), 1000 * 30);
+      pingInterval = setInterval(() => connection.ping(), 1000 * 10);
     };
     const onDisconnected = () => {
       setConnected(false);
       pingInterval && clearInterval(pingInterval);
     };
+    const onShareDbError = (error: unknown) => handleShareDbError(error, t);
     const onReceive = (request: ConnectionReceiveRequest) => {
-      if (request.data.error) {
-        shareDbErrorHandler(request.data.error);
-      }
+      handleShareDbReceive(request, t);
     };
 
     connection.on('connected', onConnected);
     connection.on('disconnected', onDisconnected);
     connection.on('closed', onDisconnected);
-    connection.on('error', shareDbErrorHandler);
+    connection.on('error', onShareDbError);
     connection.on('receive', onReceive);
+
     return () => {
       pingInterval && clearInterval(pingInterval);
       connection.removeListener('connected', onConnected);
       connection.removeListener('disconnected', onDisconnected);
       connection.removeListener('closed', onDisconnected);
-      connection.removeListener('error', shareDbErrorHandler);
+      connection.removeListener('error', onShareDbError);
       connection.removeListener('receive', onReceive);
+      if (connection) {
+        isConnected(socket) && connection.close();
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (connection as any).bindToSocket({});
+      }
     };
-  }, [connection]);
+  }, [path, socket, t]);
 
   return useMemo(() => {
     return { connection, connected };

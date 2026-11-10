@@ -1,32 +1,25 @@
 import { Module } from '@nestjs/common';
-import { AuthModule } from '../features/auth/auth.module';
 import { SessionHandleModule } from '../features/auth/session/session-handle.module';
-import { CalculationModule } from '../features/calculation/calculation.module';
-import { ShareAuthModule } from '../features/share/share-auth.module';
+import { FieldModule } from '../features/field/field.module';
+import { TableAuthorityModule } from '../features/organization/authority-matrix/table-authority.module';
 import { TableModule } from '../features/table/table.module';
-import { UserModule } from '../features/user/user.module';
-import { ShareDbPermissionService } from './share-db-permission.service';
+import { RealtimeMetricsModule } from './metrics/realtime-metrics.module';
+import { ReadonlyModule } from './readonly/readonly.module';
+import { RepairAttachmentOpModule } from './repair-attachment-op/repair-attachment-op.module';
 import { ShareDbAdapter } from './share-db.adapter';
 import { ShareDbService } from './share-db.service';
-import { WsAuthService } from './ws-auth.service';
-import { WsDerivateService } from './ws-derivate.service';
 
 @Module({
   imports: [
     TableModule,
-    CalculationModule,
-    AuthModule,
-    UserModule,
-    ShareAuthModule,
+    TableAuthorityModule,
+    FieldModule,
+    ReadonlyModule,
+    RepairAttachmentOpModule,
+    RealtimeMetricsModule,
     SessionHandleModule,
   ],
-  providers: [
-    ShareDbService,
-    ShareDbAdapter,
-    WsDerivateService,
-    WsAuthService,
-    ShareDbPermissionService,
-  ],
-  exports: [ShareDbService, WsAuthService],
+  providers: [ShareDbService, ShareDbAdapter],
+  exports: [ShareDbService, RealtimeMetricsModule],
 })
 export class ShareDbModule {}

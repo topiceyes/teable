@@ -1,69 +1,96 @@
 import { IdPrefix } from '../../../utils';
 import { z } from '../../../zod';
-import type { FieldType, CellValueType } from '../constant';
-import { Relationship } from '../constant';
+import type { TableDomain } from '../../table/table-domain';
+import type { IFilter } from '../../view/filter/filter';
+import { type CellValueType, FieldType, Relationship } from '../constant';
 import { FieldCore } from '../field';
+import type { IFieldVisitor } from '../field-visitor.interface';
+import {
+  linkFieldOptionsSchema,
+  type ILinkFieldOptions,
+  type ILinkFieldMeta,
+} from './link-option.schema';
 
-export const linkFieldOptionsSchema = z
+export const linkCellValueSchema = z
   .object({
-    relationship: z.nativeEnum(Relationship).openapi({
-      description: 'describe the relationship from this table to the foreign table',
-    }),
-    foreignTableId: z.string().openapi({
-      description: 'the table this field is linked to',
-    }),
-    lookupFieldId: z.string().openapi({
-      description: 'the field in the foreign table that will be displayed as the current field',
-    }),
-    isOneWay: z.boolean().optional().openapi({
-      description:
-        'whether the field is a one-way link, when true, it will not generate a symmetric field, it is generally has better performance',
-    }),
-    fkHostTableName: z.string().openapi({
-      description:
-        'the table name for storing keys, in many-to-many relationships, keys are stored in a separate intermediate table; in other relationships, keys are stored on one side as needed',
-    }),
-    selfKeyName: z.string().openapi({
-      description: 'the name of the field that stores the current table primary key',
-    }),
-    foreignKeyName: z.string().openapi({
-      description: 'The name of the field that stores the foreign table primary key',
-    }),
-    symmetricFieldId: z.string().optional().openapi({
-      description: 'the symmetric field in the foreign table, empty if the field is a one-way link',
-    }),
+    id: z.string().startsWith(IdPrefix.Record),
+    // Persisted empty-primary links may carry title:null; accept and strip.
+    title: z.string().nullish(),
   })
-  .strip();
-
-export type ILinkFieldOptions = z.infer<typeof linkFieldOptionsSchema>;
-
-export const linkFieldOptionsRoSchema = linkFieldOptionsSchema.pick({
-  relationship: true,
-  foreignTableId: true,
-  isOneWay: true,
-});
-
-export type ILinkFieldOptionsRo = z.infer<typeof linkFieldOptionsRoSchema>;
-
-export const linkCellValueSchema = z.object({
-  id: z.string().startsWith(IdPrefix.Record),
-  title: z.string().optional(),
-});
+  .transform(({ id, title }) => (title == null ? { id } : { id, title }));
 
 export type ILinkCellValue = z.infer<typeof linkCellValueSchema>;
+
+const singleLinkCellValueSchema = z
+  .union([linkCellValueSchema.nullable(), z.array(linkCellValueSchema).nonempty()])
+  .transform((value) => (Array.isArray(value) ? value[0] : value));
+
+const multipleLinkCellValueSchema = z
+  .union([z.array(linkCellValueSchema).nonempty().nullable(), linkCellValueSchema])
+  .transform((value) => {
+    if (value == null) {
+      return null;
+    }
+    return Array.isArray(value) ? value : [value];
+  });
 
 export class LinkFieldCore extends FieldCore {
   static defaultOptions(): Partial<ILinkFieldOptions> {
     return {};
   }
 
+  override get isStructuredCellValue() {
+    return true;
+  }
+
   type!: FieldType.Link;
 
   options!: ILinkFieldOptions;
 
+  declare meta?: ILinkFieldMeta;
+
   cellValueType!: CellValueType.String;
 
-  declare isMultipleCellValue?: boolean | undefined;
+  declare isMultipleCellValue?: boolean;
+
+  getHasOrderColumn(): boolean {
+    return !!this.meta?.hasOrderColumn;
+  }
+
+  /**
+   * Get the order column name for this link field based on its relationship type
+   * @returns The order column name to use in database queries and operations
+   */
+  getOrderColumnName(): string {
+    const relationship = this.options.relationship;
+
+    switch (relationship) {
+      case Relationship.ManyMany:
+        // ManyMany relationships use a simple __order column in the junction table
+        return '__order';
+
+      case Relationship.OneMany:
+        // One-way OneMany may reuse legacy ManyMany junction storage where order column is "__order".
+        if (this.options.isOneWay && this.getHasOrderColumn()) {
+          return '__order';
+        }
+        // Other OneMany relationships use selfKeyName + _order.
+        return `${this.options.selfKeyName}_order`;
+
+      case Relationship.ManyOne:
+      case Relationship.OneOne:
+        // ManyOne and OneOne relationships use the foreignKeyName (foreign key in current table) + _order
+        return `${this.options.foreignKeyName}_order`;
+
+      default:
+        throw new Error(`Unsupported relationship type: ${relationship}`);
+    }
+  }
+
+  getIsMultiValue() {
+    const relationship = this.options.relationship;
+    return relationship === Relationship.ManyMany || relationship === Relationship.OneMany;
+  }
 
   cellValue2String(cellValue?: unknown) {
     if (Array.isArray(cellValue)) {
@@ -81,8 +108,9 @@ export class LinkFieldCore extends FieldCore {
       return null;
     }
 
-    if (this.validateCellValue(value).success) {
-      return value;
+    const validatedValue = this.validateCellValue(value);
+    if (validatedValue.success) {
+      return validatedValue.data;
     }
     return null;
   }
@@ -93,10 +121,14 @@ export class LinkFieldCore extends FieldCore {
 
   validateCellValue(value: unknown) {
     if (this.isMultipleCellValue) {
-      return z.array(linkCellValueSchema).nonempty().nullable().safeParse(value);
+      // Realtime convert can briefly deliver the previous single-value shape
+      // before records finish re-querying into the new multi-value shape.
+      return multipleLinkCellValueSchema.safeParse(value);
     }
 
-    return linkCellValueSchema.nullable().safeParse(value);
+    // Realtime convert can briefly deliver the previous multi-value shape
+    // before records finish re-querying into the new single-value shape.
+    return singleLinkCellValueSchema.safeParse(value);
   }
 
   item2String(value: unknown) {
@@ -104,5 +136,74 @@ export class LinkFieldCore extends FieldCore {
       return '';
     }
     return (value as { title?: string }).title || '';
+  }
+
+  accept<T>(visitor: IFieldVisitor<T>): T {
+    return visitor.visitLinkField(this);
+  }
+
+  /**
+   * Get the foreign table ID that this link field references
+   */
+  getForeignTableId(): string | undefined {
+    return this.options.foreignTableId;
+  }
+
+  /**
+   * Get the lookup field from the foreign table
+   * @param foreignTable - The table domain to search for the lookup field
+   * @override
+   * @returns The lookup field instance if found and table IDs match
+   */
+  override getForeignLookupField(foreignTable: TableDomain): FieldCore | undefined {
+    if (this.isLookup) {
+      return super.getForeignLookupField(foreignTable);
+    }
+
+    // Ensure the foreign table ID matches the provided table domain ID
+    if (this.options.foreignTableId !== foreignTable.id) {
+      return undefined;
+    }
+
+    // Get the lookup field ID from options
+    const lookupFieldId = this.options.lookupFieldId;
+    if (!lookupFieldId) {
+      return undefined;
+    }
+
+    // Get the lookup field instance from the table domain
+    return foreignTable.getField(lookupFieldId);
+  }
+
+  mustGetForeignLookupField(tableDomain: TableDomain): FieldCore {
+    const field = this.getForeignLookupField(tableDomain);
+    if (!field) {
+      throw new Error(`Lookup field ${this.options.lookupFieldId} not found`);
+    }
+    return field;
+  }
+
+  getLookupFields(tableDomain: TableDomain) {
+    return tableDomain.filterFields(
+      (field) =>
+        !!field.isLookup &&
+        !!field.lookupOptions &&
+        'linkFieldId' in field.lookupOptions &&
+        field.lookupOptions.linkFieldId === this.id
+    );
+  }
+
+  getRollupFields(tableDomain: TableDomain) {
+    return tableDomain.filterFields(
+      (field) =>
+        field.type === FieldType.Rollup &&
+        !!field.lookupOptions &&
+        'linkFieldId' in field.lookupOptions &&
+        field.lookupOptions.linkFieldId === this.id
+    );
+  }
+
+  override getFilter(): IFilter | undefined {
+    return this.options?.filter ?? undefined;
   }
 }

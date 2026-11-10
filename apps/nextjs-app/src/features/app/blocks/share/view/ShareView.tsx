@@ -1,11 +1,17 @@
 import { ViewType } from '@teable/core';
+import { ShareViewContext } from '@teable/sdk/context';
 import { useContext } from 'react';
-import { FormView } from './component/FormView';
+import { DownloadAllAttachmentsDialog } from '@/features/app/components/download-attachments';
+import { CalendarView } from './component/calendar/CalendarView';
+import { FormView } from './component/form/FormView';
+import { GalleryView } from './component/gallery/GalleryView';
 import { GridView } from './component/grid/GridView';
-import { ShareViewPageContext } from './ShareViewPageContext';
+import { KanbanView } from './component/kanban/KanbanView';
+import { PluginView } from './component/plugin/SharePluginView';
+import { ShareViewMobileSignIn } from './ShareSignInButton';
 
 export const ShareView = () => {
-  const { view } = useContext(ShareViewPageContext);
+  const { view, shareId, extra } = useContext(ShareViewContext);
   const viewType = view?.type;
 
   const getViewComponent = () => {
@@ -15,10 +21,24 @@ export const ShareView = () => {
         return <FormView />;
       case ViewType.Grid:
         return <GridView />;
+      case ViewType.Kanban:
+        return <KanbanView />;
+      case ViewType.Gallery:
+        return <GalleryView />;
+      case ViewType.Calendar:
+        return <CalendarView />;
+      case ViewType.Plugin:
+        return <PluginView shareId={shareId} plugin={extra?.plugin} />;
       default:
         return null;
     }
   };
 
-  return <div className="h-screen w-full">{getViewComponent()}</div>;
+  return (
+    <div className="flex h-screen w-full flex-col">
+      <div className="min-h-0 w-full flex-1">{getViewComponent()}</div>
+      <ShareViewMobileSignIn />
+      <DownloadAllAttachmentsDialog />
+    </div>
+  );
 };

@@ -1,7 +1,8 @@
-import { z } from 'zod';
-import { IdPrefix } from '../../../utils';
-import type { CellValueType, FieldType } from '../constant';
-import { FieldCore } from '../field';
+import type { FieldType } from '../constant';
+import type { IFieldVisitor } from '../field-visitor.interface';
+import type { IUserCellValue } from './abstract/user.field.abstract';
+import { UserAbstractCore } from './abstract/user.field.abstract';
+import { userFieldOptionsSchema, type IUserFieldOptions } from './user-option.schema';
 
 interface IUser {
   id: string;
@@ -13,57 +14,21 @@ interface IContext {
   userSets?: IUser[];
 }
 
-export const userFieldOptionsSchema = z.object({
-  isMultiple: z.boolean().openapi({
-    description: 'Allow adding multiple users',
-  }),
-  shouldNotify: z.boolean().openapi({
-    description: 'Notify users when their name is added to a cell',
-  }),
-});
-
-export type IUserFieldOptions = z.infer<typeof userFieldOptionsSchema>;
-
-export const userCellValueSchema = z.object({
-  id: z.string().startsWith(IdPrefix.User),
-  title: z.string().optional(),
-  avatarUrl: z.string().optional().nullable(),
-});
-
-export type IUserCellValue = z.infer<typeof userCellValueSchema>;
-
 export const defaultUserFieldOptions: IUserFieldOptions = {
   isMultiple: false,
   shouldNotify: true,
 };
 
-export class UserFieldCore extends FieldCore {
+export class UserFieldCore extends UserAbstractCore {
   type!: FieldType.User;
   options!: IUserFieldOptions;
-  cellValueType!: CellValueType.String;
 
   static defaultOptions() {
     return defaultUserFieldOptions;
   }
 
-  item2String(value: unknown) {
-    if (value == null) {
-      return '';
-    }
-
-    const { title } = value as IUserCellValue;
-
-    if (this.isMultipleCellValue && title?.includes(',')) {
-      return `"${title}"`;
-    }
-    return title || '';
-  }
-
-  cellValue2String(cellValue?: unknown) {
-    if (Array.isArray(cellValue)) {
-      return cellValue.map((v) => this.item2String(v)).join(', ');
-    }
-    return this.item2String(cellValue);
+  override get isStructuredCellValue() {
+    return true;
   }
 
   /*
@@ -77,34 +42,24 @@ export class UserFieldCore extends FieldCore {
     if (this.isLookup || !value) {
       return null;
     }
-
+    const cellValue = value.split(',').map((s) => s.trim());
     if (this.isMultipleCellValue) {
-      const cellValue = value.split(/[\n\r,]\s?(?=(?:[^"]*"[^"]*")*[^"]*$)/).map((item) => {
-        return item.includes(',') ? item.slice(1, -1) : item;
-      });
-
-      return cellValue
+      const cvArray = cellValue
         .map((v) => {
           return this.matchUser(v, ctx?.userSets);
         })
         .filter(Boolean) as IUserCellValue[];
+      return cvArray.length ? cvArray : null;
     }
-    return this.matchUser(value, ctx?.userSets);
+    return this.matchUser(cellValue[0], ctx?.userSets);
   }
 
   private matchUser(value: string, userSets: IUser[] = []) {
-    let foundUser: IUser | null = null;
-    for (const user of userSets) {
-      const { name, email } = user;
-      if (value === name || value === email) {
-        if (foundUser) {
-          // Multiple collaborators are matched and the cell is cleared
-          return null;
-        }
-        foundUser = user;
-      }
-    }
-    return foundUser ? { id: foundUser.id, title: foundUser.name } : null;
+    const foundUser = userSets.find((user) => {
+      const { id, name, email } = user;
+      return value === id || value === name || value === email;
+    });
+    return foundUser ? { id: foundUser.id, title: foundUser.name, email: foundUser.email } : null;
   }
 
   repair(value: unknown) {
@@ -115,17 +70,25 @@ export class UserFieldCore extends FieldCore {
     if (this.validateCellValue(value).success) {
       return value;
     }
-    return null;
+
+    // An isMultiple toggle leaves record docs holding the previous shape until the
+    // next fetch. Mirror the storage migration (single → [single], array → first)
+    // so display paths keep the value instead of blanking it.
+    if (this.isMultipleCellValue) {
+      const wrapped = this.validateCellValue(Array.isArray(value) ? value : [value]);
+      return wrapped.success ? wrapped.data : null;
+    }
+
+    const first = Array.isArray(value) ? value[0] : null;
+    const unwrapped = this.validateCellValue(first);
+    return unwrapped.success ? unwrapped.data : null;
   }
 
   validateOptions() {
     return userFieldOptionsSchema.safeParse(this.options);
   }
 
-  validateCellValue(cellValue: unknown) {
-    if (this.isMultipleCellValue) {
-      return z.array(userCellValueSchema).nonempty().nullable().safeParse(cellValue);
-    }
-    return userCellValueSchema.nullable().safeParse(cellValue);
+  accept<T>(visitor: IFieldVisitor<T>): T {
+    return visitor.visitUserField(this);
   }
 }

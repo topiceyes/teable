@@ -1,4 +1,6 @@
 import type { INumberShowAs, INumberFormatting, INumberFieldOptions } from '@teable/core';
+import { Input } from '@teable/ui-lib/shadcn';
+import { DefaultValue } from '../DefaultValue';
 import { NumberFormatting } from '../formatting/NumberFormatting';
 import { MultiNumberShowAs } from '../show-as/MultiNumberShowAs';
 import { SingleNumberShowAs } from '../show-as/SingleNumberShowAs';
@@ -9,7 +11,7 @@ export const NumberOptions = (props: {
   isMultipleCellValue?: boolean;
   onChange?: (options: Partial<INumberFieldOptions>) => void;
 }) => {
-  const { options, isMultipleCellValue, onChange } = props;
+  const { isLookup, options, isMultipleCellValue, onChange } = props;
 
   const ShowAsComponent = isMultipleCellValue ? MultiNumberShowAs : SingleNumberShowAs;
 
@@ -25,9 +27,29 @@ export const NumberOptions = (props: {
     });
   };
 
+  const onDefaultValueChange = (defaultValue: number | null | undefined) => {
+    onChange?.({
+      defaultValue: defaultValue ?? null,
+    });
+  };
+
   return (
-    <div className="form-control space-y-2">
+    <div className="form-control space-y-4">
       <NumberFormatting formatting={options?.formatting} onChange={onFormattingChange} />
+      <hr />
+      {!isLookup && (
+        <DefaultValue onReset={() => onDefaultValueChange(null)}>
+          <Input
+            size="lg"
+            type="number"
+            value={options?.defaultValue ?? ''}
+            onChange={(e) => {
+              const value = e.target.value;
+              onDefaultValueChange(value === '' ? null : Number(value));
+            }}
+          />
+        </DefaultValue>
+      )}
       <ShowAsComponent showAs={options?.showAs as never} onChange={onShowAsChange} />
     </div>
   );

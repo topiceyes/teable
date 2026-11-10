@@ -1,0 +1,307 @@
+import {
+  ButtonConfirm,
+  ButtonWorkflow,
+  FieldHasError,
+  FieldId,
+  FieldName,
+  FormulaExpression,
+  RollupExpression,
+  createFormulaField,
+  createLastModifiedByField,
+  createLastModifiedTimeField,
+  createNumberField,
+  TableUpdateFieldTypeSpec,
+  UpdateButtonWorkflowSpec,
+} from '@teable/v2-core';
+import { describe, expect, it } from 'vitest';
+
+import { createBtnField, createTextField, createValidFieldId } from './__tests__/helpers';
+import { FieldValueChangeCollectorVisitor } from './FieldValueChangeCollectorVisitor';
+
+const mkFieldId = (seed: string) => FieldId.create(createValidFieldId(seed))._unsafeUnwrap();
+const mkFieldName = (name: string) => FieldName.create(name)._unsafeUnwrap();
+
+describe('FieldValueChangeCollectorVisitor coverage', () => {
+  it.each(['lastModifiedTime', 'lastModifiedBy'] as const)(
+    'cascades %s tracking changes without overwriting historical stamps',
+    (type) => {
+      const createField =
+        type === 'lastModifiedTime' ? createLastModifiedTimeField : createLastModifiedByField;
+      const oldField = createField({
+        id: mkFieldId('audit'),
+        name: mkFieldName('Audit'),
+        trackedFieldIds: [mkFieldId('tracked')],
+      })._unsafeUnwrap();
+      const newField = createField({
+        id: oldField.id(),
+        name: oldField.name(),
+        trackedFieldIds: [],
+        meta: oldField.meta(),
+      })._unsafeUnwrap();
+      for (const spec of [
+        TableUpdateFieldTypeSpec.create(oldField, newField),
+        TableUpdateFieldTypeSpec.create(newField, oldField),
+      ]) {
+        const visitor = new FieldValueChangeCollectorVisitor();
+        expect(spec.accept(visitor).isOk()).toBe(true);
+        expect(visitor.selfBackfillFields()).toEqual([]);
+        expect(visitor.valueChangedFields()).toEqual([oldField.id()]);
+        expect(visitor.preservedStoredFields()).toEqual([oldField.id()]);
+      }
+    }
+  );
+
+  it('keeps deferred initialization for number to modified-by conversion', () => {
+    const oldField = createNumberField({
+      id: mkFieldId('convert'),
+      name: mkFieldName('Value'),
+    })._unsafeUnwrap();
+    const newField = createLastModifiedByField({
+      id: oldField.id(),
+      name: oldField.name(),
+    })._unsafeUnwrap();
+    const visitor = new FieldValueChangeCollectorVisitor();
+    expect(TableUpdateFieldTypeSpec.create(oldField, newField).accept(visitor).isOk()).toBe(true);
+    expect(visitor.preservedStoredFields()).toEqual([]);
+    expect(visitor.selfBackfillFields()).toEqual([oldField.id()]);
+    expect(visitor.deferredBackfillFields()).toEqual([oldField.id()]);
+  });
+
+  it('covers no-op visitor methods without mutating tracked field ids', () => {
+    const visitor = new FieldValueChangeCollectorVisitor();
+    const noOpMethods = [
+      'visit',
+      'visitTableRename',
+      'visitTableAddField',
+      'visitTableAddFields',
+      'visitTableAddView',
+      'visitTableAddSelectOptions',
+      'visitTableUpdateViewColumnMeta',
+      'visitTableUpdateViewQueryDefaults',
+      'visitTableByBaseId',
+      'visitTableById',
+      'visitTableByViewId',
+      'visitTableWithViewIds',
+      'visitTableWithPrimaryField',
+      'visitTableWithFieldIds',
+      'visitTableByIncomingReferenceToTable',
+      'visitTableByIds',
+      'visitTableByName',
+      'visitTableByNameLike',
+      'visitTableUpdateFieldName',
+      'visitTableUpdateFieldDbFieldName',
+      'visitTableUpdateFieldConstraints',
+      'visitTableUpdateFieldAiConfig',
+      'visitTableUpdateFieldDescription',
+      'visitUpdateSingleLineTextShowAs',
+      'visitUpdateSingleLineTextDefaultValue',
+      'visitUpdateLongTextShowAs',
+      'visitUpdateLongTextDefaultValue',
+      'visitUpdateNumberFormatting',
+      'visitUpdateNumberShowAs',
+      'visitUpdateNumberDefaultValue',
+      'visitUpdateDateFormatting',
+      'visitUpdateDateDefaultValue',
+      'visitUpdateCheckboxDefaultValue',
+      'visitUpdateRatingIcon',
+      'visitUpdateRatingColor',
+      'visitUpdateUserNotification',
+      'visitUpdateUserDefaultValue',
+      'visitUpdateButtonLabel',
+      'visitUpdateButtonColor',
+      'visitUpdateButtonMaxCount',
+      'visitUpdateSingleSelectDefaultValue',
+      'visitUpdateSingleSelectAutoNewOptions',
+      'visitUpdateMultipleSelectDefaultValue',
+      'visitUpdateMultipleSelectAutoNewOptions',
+      'visitUpdateFormulaFormatting',
+      'visitUpdateFormulaShowAs',
+    ] as const;
+
+    for (const method of noOpMethods) {
+      const result = (visitor[method] as (spec: unknown) => ReturnType<typeof visitor.visit>)({});
+      expect(result.isOk()).toBe(true);
+    }
+
+    expect(visitor.valueChangedFields()).toEqual([]);
+    expect(visitor.selfBackfillFields()).toEqual([]);
+    expect(visitor.deferredBackfillFields()).toEqual([]);
+    expect(visitor.removedFields()).toEqual([]);
+    expect(visitor.hasDbStorageTypeChange()).toBe(false);
+  });
+
+  it('tracks the symmetric link field dropped by a twoWay to oneWay conversion', () => {
+    const visitor = new FieldValueChangeCollectorVisitor();
+    const symmetricField = createTextField(
+      'symCovered',
+      'Symmetric link',
+      'sym_covered_col'
+    )._unsafeUnwrap();
+
+    visitor.visitRemoveSymmetricLinkField({ fieldId: () => symmetricField.id() } as never);
+
+    expect(visitor.removedFields().map((fieldId) => fieldId.toString())).toEqual([
+      symmetricField.id().toString(),
+    ]);
+    expect(visitor.valueChangedFields()).toEqual([]);
+    expect(visitor.selfBackfillFields()).toEqual([]);
+  });
+
+  it('tracks removed fields without touching the other tracked sets', () => {
+    const visitor = new FieldValueChangeCollectorVisitor();
+    const removedField = createTextField('removeCovered', 'Removed', 'removed_col')._unsafeUnwrap();
+
+    visitor.visitTableRemoveField({ field: () => removedField } as never);
+
+    expect(visitor.removedFields().map((fieldId) => fieldId.toString())).toEqual([
+      removedField.id().toString(),
+    ]);
+    expect(visitor.valueChangedFields()).toEqual([]);
+    expect(visitor.selfBackfillFields()).toEqual([]);
+    expect(visitor.deferredBackfillFields()).toEqual([]);
+  });
+
+  it('tracks computed field duplication but skips non-computed duplicates', () => {
+    const visitor = new FieldValueChangeCollectorVisitor();
+    const computedField = createFormulaField({
+      id: mkFieldId('dupComputed'),
+      name: mkFieldName('Computed Copy'),
+      expression: FormulaExpression.create('1 + 1')._unsafeUnwrap(),
+    })._unsafeUnwrap();
+    const plainField = createTextField('dupPlain', 'Plain Copy', 'plain_copy')._unsafeUnwrap();
+
+    visitor.visitTableDuplicateField({
+      newField: () => computedField,
+    } as never);
+    visitor.visitTableDuplicateField({
+      newField: () => plainField,
+    } as never);
+
+    expect(visitor.selfBackfillFields().map((fieldId) => fieldId.toString())).toEqual([
+      computedField.id().toString(),
+    ]);
+  });
+
+  it('tracks value changes only for workflow identity updates', () => {
+    const visitor = new FieldValueChangeCollectorVisitor();
+    const errorFieldId = mkFieldId('hasError');
+    const workflowFieldId = mkFieldId('workflow');
+    const confirmFieldId = mkFieldId('confirmOnly');
+    const formulaFieldId = mkFieldId('formulaTz');
+    const rollupFieldId = mkFieldId('rollupTz');
+    const clearErrorFieldId = mkFieldId('clearError');
+    const previousWorkflow = ButtonWorkflow.create({
+      id: 'wflPreviousWorkflow',
+      name: 'Previous',
+      isActive: true,
+    })._unsafeUnwrap();
+    const nextWorkflow = ButtonWorkflow.create({
+      id: 'wflNextWorkflow',
+      name: 'Next',
+      isActive: true,
+    })._unsafeUnwrap();
+
+    visitor.visitTableUpdateFieldHasError({
+      isSettingError: () => true,
+      fieldId: () => errorFieldId,
+      previousHasError: () => FieldHasError.ok(),
+      nextHasError: () => FieldHasError.error(),
+    } as never);
+    visitor.visitTableUpdateFieldHasError({
+      isSettingError: () => false,
+      fieldId: () => clearErrorFieldId,
+      previousHasError: () => FieldHasError.error(),
+      nextHasError: () => FieldHasError.ok(),
+    } as never);
+    visitor.visitUpdateButtonWorkflow(
+      UpdateButtonWorkflowSpec.create(workflowFieldId, previousWorkflow, nextWorkflow)
+    );
+    visitor.visitUpdateButtonWorkflow(
+      UpdateButtonWorkflowSpec.create(
+        confirmFieldId,
+        previousWorkflow,
+        previousWorkflow,
+        undefined,
+        ButtonConfirm.create({ title: 'Confirm' })._unsafeUnwrap()
+      )
+    );
+    visitor.visitUpdateFormulaTimeZone({
+      fieldId: () => formulaFieldId,
+    } as never);
+    visitor.visitUpdateRollupTimeZone({
+      fieldId: () => rollupFieldId,
+    } as never);
+
+    expect(visitor.valueChangedFields().map((fieldId) => fieldId.toString())).toEqual([
+      errorFieldId.toString(),
+      workflowFieldId.toString(),
+    ]);
+    expect(visitor.selfBackfillFields().map((fieldId) => fieldId.toString())).toEqual([
+      clearErrorFieldId.toString(),
+      formulaFieldId.toString(),
+      rollupFieldId.toString(),
+    ]);
+  });
+
+  it('skips link self-backfill when lookup field stays unchanged', () => {
+    const visitor = new FieldValueChangeCollectorVisitor();
+    const unchangedLookupFieldId = createValidFieldId('sameLookup');
+
+    visitor.visitUpdateLinkConfig({
+      fieldId: () => mkFieldId('linkCfgSame'),
+      previousConfig: () => ({
+        lookupFieldId: () => ({
+          equals: (other: { toString(): string }) => other.toString() === unchangedLookupFieldId,
+        }),
+      }),
+      nextConfig: () => ({
+        lookupFieldId: () => ({
+          equals: (other: { toString(): string }) => other.toString() === unchangedLookupFieldId,
+          toString: () => unchangedLookupFieldId,
+        }),
+      }),
+    } as never);
+
+    expect(visitor.selfBackfillFields()).toEqual([]);
+  });
+
+  it('marks storage-type changes for formula expressions and rollup expression rewrites', () => {
+    const visitor = new FieldValueChangeCollectorVisitor();
+    const formulaFieldId = mkFieldId('formulaExpr');
+    const rollupFieldId = mkFieldId('rollupExpr');
+
+    visitor.visitUpdateFormulaExpression({
+      fieldId: () => formulaFieldId,
+      hasDbStorageTypeChange: () => true,
+    } as never);
+    visitor.visitUpdateRollupExpression({
+      fieldId: () => rollupFieldId,
+      previousExpression: () => RollupExpression.create('sum({values})')._unsafeUnwrap(),
+      nextExpression: () => RollupExpression.create('average({values})')._unsafeUnwrap(),
+    } as never);
+
+    expect(visitor.valueChangedFields().map((fieldId) => fieldId.toString())).toContain(
+      formulaFieldId.toString()
+    );
+    expect(visitor.selfBackfillFields().map((fieldId) => fieldId.toString())).toEqual([
+      formulaFieldId.toString(),
+      rollupFieldId.toString(),
+    ]);
+    expect(visitor.hasDbStorageTypeChange()).toBe(true);
+  });
+
+  it('accepts real button/text fields in workflow-related specs', () => {
+    const visitor = new FieldValueChangeCollectorVisitor();
+    const buttonField = createBtnField('buttonField', 'Button', 'button_col')._unsafeUnwrap();
+    const textField = createTextField('textField', 'Text', 'text_col')._unsafeUnwrap();
+
+    visitor.visitTableDuplicateField({
+      newField: () => buttonField,
+    } as never);
+    visitor.visitTableDuplicateField({
+      newField: () => textField,
+    } as never);
+
+    expect(visitor.selfBackfillFields()).toEqual([]);
+  });
+});

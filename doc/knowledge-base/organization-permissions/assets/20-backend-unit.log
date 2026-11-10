@@ -1,0 +1,98 @@
+(!) Your Vite config uses features that are unsupported by `configLoader: 'native'`, which is planned to become the default in a future major version of Vite:
+  - ESM syntax in a file loaded as CommonJS (vitest.config.ts:1:1). Use a `.mjs` extension or set `"type": "module"` in the closest package.json
+Set `VITE_CONFIG_NATIVE_IGNORE_WARNING=true` to suppress this warning.
+The plugin "vite-tsconfig-paths" is detected. Vite now supports tsconfig paths resolution natively via the resolve.tsconfigPaths option. You can remove the plugin and set resolve.tsconfigPaths: true in your Vite config instead.
+`esbuild` option is set to false, but `oxc` option was not set to false. `esbuild: false` does not have effect any more. If you want to disable the default transformation, which is now handled by Oxc, please set `oxc: false` instead.
+
+ RUN  v4.1.12 <workspace>/apps/nestjs-backend
+
+[Nest] 12940  - 11/10/2026, 2:43:34 PM    WARN [DomainEventOutboxRelayService] domain_event:maintenance_failed { cacheKey: 'idle-b', errorCode: 'domain_event.purge_failed' }
+[Nest] 13002  - 11/10/2026, 2:43:34 PM   DEBUG [ConditionalModule] (env)=>{
+                return Boolean(env.SOCIAL_AUTH_PROVIDERS?.split(",")?.includes("github"));
+            } evaluated to false. Skipping the registration of GithubModule
+[Nest] 13002  - 11/10/2026, 2:43:34 PM   DEBUG [ConditionalModule] (env)=>{
+                return Boolean(env.SOCIAL_AUTH_PROVIDERS?.split(",")?.includes("google"));
+            } evaluated to false. Skipping the registration of GoogleModule
+[Nest] 13002  - 11/10/2026, 2:43:34 PM   DEBUG [ConditionalModule] (env)=>{
+                return Boolean(env.SOCIAL_AUTH_PROVIDERS?.split(",")?.includes("oidc"));
+            } evaluated to false. Skipping the registration of OIDCModule
+[Nest] 13002  - 11/10/2026, 2:43:34 PM   DEBUG [ConditionalModule] (env)=>{
+                return Boolean(env.SOCIAL_AUTH_PROVIDERS?.split(",")?.includes("apple"));
+            } evaluated to false. Skipping the registration of AppleModule
+[Nest] 12993  - 11/10/2026, 2:43:34 PM   DEBUG [ConditionalModule] (env)=>{
+                return Boolean(env.SOCIAL_AUTH_PROVIDERS?.split(",")?.includes("github"));
+            } evaluated to false. Skipping the registration of GithubModule
+[Nest] 12993  - 11/10/2026, 2:43:34 PM   DEBUG [ConditionalModule] (env)=>{
+                return Boolean(env.SOCIAL_AUTH_PROVIDERS?.split(",")?.includes("google"));
+            } evaluated to false. Skipping the registration of GoogleModule
+[Nest] 12993  - 11/10/2026, 2:43:34 PM   DEBUG [ConditionalModule] (env)=>{
+                return Boolean(env.SOCIAL_AUTH_PROVIDERS?.split(",")?.includes("oidc"));
+            } evaluated to false. Skipping the registration of OIDCModule
+[Nest] 12993  - 11/10/2026, 2:43:34 PM   DEBUG [ConditionalModule] (env)=>{
+                return Boolean(env.SOCIAL_AUTH_PROVIDERS?.split(",")?.includes("apple"));
+            } evaluated to false. Skipping the registration of AppleModule
+[Nest] 12993  - 11/10/2026, 2:43:36 PM   DEBUG [ConditionalModule] (env) => !env.BACKEND_CACHE_REDIS_URI evaluated to false. Skipping the registration of FallbackQueueModule
+[Nest] 13002  - 11/10/2026, 2:43:36 PM   DEBUG [ConditionalModule] (env) => !env.BACKEND_CACHE_REDIS_URI evaluated to false. Skipping the registration of FallbackQueueModule
+[Nest] 12993  - 11/10/2026, 2:43:36 PM   DEBUG [ConditionalModule] (env) => !env.BACKEND_CACHE_REDIS_URI evaluated to false. Skipping the registration of FallbackQueueModule
+[Nest] 13002  - 11/10/2026, 2:43:36 PM   DEBUG [ConditionalModule] (env) => !env.BACKEND_CACHE_REDIS_URI evaluated to false. Skipping the registration of FallbackQueueModule
+[Nest] 13002  - 11/10/2026, 2:43:37 PM   DEBUG [ConditionalModule] (env) => !env.BACKEND_CACHE_REDIS_URI evaluated to false. Skipping the registration of FallbackQueueModule
+[Nest] 13002  - 11/10/2026, 2:43:37 PM   DEBUG [ConditionalModule] (env) => !env.BACKEND_CACHE_REDIS_URI evaluated to false. Skipping the registration of FallbackQueueModule
+[Nest] 13002  - 11/10/2026, 2:43:37 PM   DEBUG [ConditionalModule] (env) => !env.BACKEND_CACHE_REDIS_URI evaluated to false. Skipping the registration of FallbackQueueModule
+[Nest] 13002  - 11/10/2026, 2:43:37 PM   DEBUG [ConditionalModule] (env) => !env.BACKEND_CACHE_REDIS_URI evaluated to false. Skipping the registration of FallbackQueueModule
+[Nest] 13002  - 11/10/2026, 2:43:37 PM   DEBUG [ConditionalModule] (env) => !env.BACKEND_CACHE_REDIS_URI evaluated to false. Skipping the registration of FallbackQueueModule
+[Nest] 13002  - 11/10/2026, 2:43:37 PM   DEBUG [ConditionalModule] (env) => !env.BACKEND_CACHE_REDIS_URI evaluated to false. Skipping the registration of FallbackQueueModule
+[Nest] 13027  - 11/10/2026, 2:43:40 PM    WARN [TableOpenApiService] Best-effort data DB drop: failed to drop table tblA (data_db.tenant_missing), continuing: Error: (ENOTFOUND) tenant/user postgres.abc not found
+[Nest] 13027  - 11/10/2026, 2:43:40 PM    WARN [TableOpenApiService] Best-effort data DB drop: failed to drop table tblA (data_db.tenant_missing), continuing: Error: (ENOTFOUND) tenant/user postgres.abc not found
+[Nest] 13027  - 11/10/2026, 2:43:40 PM    WARN [TableOpenApiService] Best-effort data DB drop: failed to drop data database for base bseTest (data_db.tenant_missing), continuing: Error: (ENOTFOUND) tenant/user postgres.abc not found
+[Nest] 13027  - 11/10/2026, 2:43:40 PM    WARN [TableOpenApiService] Best-effort data DB drop: failed to drop table trash for tables tblA (data_db.relation_missing), continuing: Error: relation "table_trash" does not exist
+[Nest] 13027  - 11/10/2026, 2:43:40 PM     LOG [TableOpenApiService] sqlQuery:sql: select * from bseTest.orders
+[Nest] 13027  - 11/10/2026, 2:43:40 PM     LOG [TableOpenApiService] sqlQuery:sql:combine:
+      WITH base AS (select * from "bseTest"."orders")
+      select * from base;
+
+[Nest] 13034  - 11/10/2026, 2:43:40 PM     LOG [TableQueryObservationRuntimeService] Table query observations use an isolated max=2 PostgreSQL pool
+[Nest] 13034  - 11/10/2026, 2:43:40 PM     LOG [TableQueryObservationRuntimeService] Table query observations use an isolated max=2 PostgreSQL pool
+[Nest] 13034  - 01/01/1970, 8:00:01 AM   ERROR [TableQueryObservationRuntimeService] Table query observations disabled: isolated runtime initialization failed
+Error: temporary setup failure
+    at <workspace>/apps/nestjs-backend/src/features/v2/table-query-observation-runtime.service.spec.ts:123:42
+    at file://<workspace>/node_modules/.pnpm/@vitest+runner@4.1.12/node_modules/@vitest/runner/dist/chunk-artifact.js:302:11
+    at file://<workspace>/node_modules/.pnpm/@vitest+runner@4.1.12/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:26
+    at file://<workspace>/node_modules/.pnpm/@vitest+runner@4.1.12/node_modules/@vitest/runner/dist/chunk-artifact.js:2326:20
+    at new Promise (<anonymous>)
+    at runWithCancel (file://<workspace>/node_modules/.pnpm/@vitest+runner@4.1.12/node_modules/@vitest/runner/dist/chunk-artifact.js:2323:10)
+    at file://<workspace>/node_modules/.pnpm/@vitest+runner@4.1.12/node_modules/@vitest/runner/dist/chunk-artifact.js:2305:20
+    at new Promise (<anonymous>)
+    at runWithTimeout (file://<workspace>/node_modules/.pnpm/@vitest+runner@4.1.12/node_modules/@vitest/runner/dist/chunk-artifact.js:2272:10)
+    at file://<workspace>/node_modules/.pnpm/@vitest+runner@4.1.12/node_modules/@vitest/runner/dist/chunk-artifact.js:2956:64
+[Nest] 13034  - 01/01/1970, 8:00:06 AM     LOG [TableQueryObservationRuntimeService] Table query observations use an isolated max=2 PostgreSQL pool
+[Nest] 13034  - 11/10/2026, 2:43:40 PM   ERROR [TableQueryObservationRuntimeService] Table query observations disabled: isolated runtime initialization failed
+Error: registry shutting down
+    at Object.<anonymous> (<workspace>/apps/nestjs-backend/src/features/v2/table-query-observation-runtime.service.spec.ts:142:13)
+    at Object.acquire (file://<workspace>/node_modules/.pnpm/@vitest+spy@4.1.12/node_modules/@vitest/spy/dist/index.js:332:34)
+    at TableQueryObservationRuntimeService.create (<workspace>/apps/nestjs-backend/src/features/v2/table-query-observation-runtime.service.ts:147:35)
+    at TableQueryObservationRuntimeService.get (<workspace>/apps/nestjs-backend/src/features/v2/table-query-observation-runtime.service.ts:60:28)
+    at <workspace>/apps/nestjs-backend/src/features/v2/table-query-observation-runtime.service.spec.ts:145:26
+    at file://<workspace>/node_modules/.pnpm/@vitest+runner@4.1.12/node_modules/@vitest/runner/dist/chunk-artifact.js:302:11
+    at file://<workspace>/node_modules/.pnpm/@vitest+runner@4.1.12/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:26
+    at file://<workspace>/node_modules/.pnpm/@vitest+runner@4.1.12/node_modules/@vitest/runner/dist/chunk-artifact.js:2326:20
+    at new Promise (<anonymous>)
+    at runWithCancel (file://<workspace>/node_modules/.pnpm/@vitest+runner@4.1.12/node_modules/@vitest/runner/dist/chunk-artifact.js:2323:10)
+[Nest] 13034  - 11/10/2026, 2:43:40 PM     LOG [TableQueryObservationRuntimeService] Table query observations use an isolated max=2 PostgreSQL pool
+[Nest] 13034  - 11/10/2026, 2:43:40 PM    WARN [TableQueryObservationRuntimeService] Table query observation schema ensure failed; retrying in 5 seconds: schema unavailable
+[Nest] 13034  - 08/28/2026, 8:00:00 AM     LOG [TableQueryObservationRuntimeService] Table query observations use an isolated max=2 PostgreSQL pool
+[Nest] 13034  - 08/28/2026, 8:00:00 AM     LOG [TableQueryObservationRuntimeService] Table query observations use an isolated max=2 PostgreSQL pool
+[Nest] 13034  - 11/10/2026, 2:43:40 PM     LOG [TableQueryObservationRuntimeService] Table query observations use an isolated max=2 PostgreSQL pool
+[Nest] 13034  - 11/10/2026, 2:44:40 PM    WARN [TableQueryObservationRuntimeService] Table query observation pruning failed: disk full
+[Nest] 13034  - 11/10/2026, 2:43:40 PM     LOG [TableQueryObservationRuntimeService] Table query observations use an isolated max=2 PostgreSQL pool
+[Nest] 13034  - 11/10/2026, 2:43:40 PM     LOG [TableQueryObservationRuntimeService] Table query observations use an isolated max=2 PostgreSQL pool
+[Nest] 13035  - 11/10/2026, 2:43:41 PM    WARN [AbstractFilterQuery] Skip filter item: field=fld_num(fld_num) path=0 issues=[OPERATOR_NOT_ALLOWED]
+[Nest] 13035  - 11/10/2026, 2:43:41 PM    WARN [AbstractFilterQuery] Skip filter item: field=fld_num(fld_num) path=0 issues=[OPERATOR_NOT_ALLOWED]
+[Nest] 13035  - 11/10/2026, 2:43:41 PM    WARN [AbstractFilterQuery] Skip filter item: field=fld_date(fld_date) path=0 issues=[MODE_NOT_ALLOWED]
+[Nest] 13035  - 11/10/2026, 2:43:41 PM    WARN [AbstractFilterQuery] Skip filter item: field=fld_date_shape(fld_date_shape) path=0 issues=[VALUE_SHAPE_INVALID]
+[Nest] 13097  - 11/10/2026, 2:43:45 PM   DEBUG [V2FieldDeleteCompatService] Registering V2 field delete compatibility projections
+[Nest] 13102  - 11/10/2026, 2:43:48 PM   DEBUG [V2ViewDeleteSideEffectService] Registering V2 View delete resource cleanup projection
+
+ Test Files  45 passed | 2 skipped (47)
+      Tests  464 passed | 20 skipped (484)
+   Start at  14:43:20
+   Duration  33.18s (transform 20.90s, setup 1.17s, import 84.40s, tests 8.68s, environment 2ms)

@@ -1,9 +1,19 @@
-import { useMutation, useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import type { IHttpError } from '@teable/core';
 import { hasPermission } from '@teable/core';
-import { Database } from '@teable/icons';
-import { duplicateBase, getSpaceList, type IGetBaseVo } from '@teable/openapi';
+import { Check, LayoutGrid } from '@teable/icons';
+import {
+  duplicateBase,
+  duplicateBaseStream,
+  getSpaceList,
+  type DuplicateBaseProgressCallback,
+  type IDuplicateBaseProgressEvent,
+  type IDuplicateBaseRo,
+  type IGetBaseVo,
+} from '@teable/openapi';
+import { UsageLimitModalType, useUsageLimitModalStore } from '@teable/sdk/components/billing/store';
 import { ReactQueryKeys } from '@teable/sdk/config';
-import { Selector } from '@teable/ui-lib/base';
+import { Spin } from '@teable/ui-lib/base';
 import {
   Button,
   Dialog,
@@ -14,57 +24,142 @@ import {
   DialogTitle,
   Input,
   Label,
+  Progress,
   Switch,
 } from '@teable/ui-lib/shadcn';
 import { toast } from '@teable/ui-lib/shadcn/ui/sonner';
+import type { IOperationPreviewRequestDto } from '@teable/v2-contract-http/operationPreview';
 import { useRouter } from 'next/router';
 import { useTranslation } from 'next-i18next';
 import { useEffect, useMemo, useState } from 'react';
+import { Selector } from '@/components/Selector';
 import { Emoji } from '@/features/app/components/emoji/Emoji';
+import {
+  OperationPreviewPanel,
+  useOperationPreview,
+} from '@/features/app/components/operation-preview';
+import { getBaseDisplayName } from '@/features/app/utils/base-name';
 import { spaceConfig } from '@/features/i18n/space.config';
+import { getDuplicateProgressPercent, mergeDuplicateProgress } from './duplicateBaseProgress';
 import { useDuplicateBaseStore } from './useDuplicateBaseStore';
+
+type DuplicateBaseMutationParams = IDuplicateBaseRo & {
+  useStream: boolean;
+  onProgress?: DuplicateBaseProgressCallback;
+};
+
+type DuplicateBaseMutationResult =
+  | Awaited<ReturnType<typeof duplicateBase>>
+  | Awaited<ReturnType<typeof duplicateBaseStream>>;
 
 const DuplicateBase = ({ base }: { base: IGetBaseVo }) => {
   const { closeModal } = useDuplicateBaseStore();
   const [withRecords, setWithRecords] = useState(true);
-  const [targetSpaceId, setTargetSpaceId] = useState<string>();
+  const [targetSpaceId, setTargetSpaceId] = useState('');
   const router = useRouter();
   const { t } = useTranslation(spaceConfig.i18nNamespaces);
-  const [baseName, setBaseName] = useState(`${base.name} (${t('space:baseModal.copy')})`);
+  const [baseName, setBaseName] = useState(
+    `${getBaseDisplayName(base.name, t)} (${t('space:baseModal.copy')})`
+  );
+  const [successDuplicate, setSuccessDuplicate] = useState(false);
+  const [newBaseId, setNewBaseId] = useState<string>();
+  const [duplicateProgress, setDuplicateProgress] = useState<IDuplicateBaseProgressEvent | null>(
+    null
+  );
+  const useStreamDuplicate = base.v2Status?.useV2 ?? Boolean(base.isCanary);
 
   const { data: spaceList } = useQuery({
     queryKey: ReactQueryKeys.spaceList(),
-    queryFn: () => getSpaceList(),
+    queryFn: () => getSpaceList().then((res) => res.data),
   });
 
-  const { mutateAsync: duplicateBaseMutator } = useMutation({
-    mutationFn: duplicateBase,
+  const queryClient = useQueryClient();
+  const pendingWriteInput: IDuplicateBaseRo = {
+    fromBaseId: base.id,
+    spaceId: targetSpaceId,
+    name: baseName,
+    withRecords,
+  };
+  const previewRequest: IOperationPreviewRequestDto = {
+    operation: 'base.duplicate',
+    input: pendingWriteInput,
+    options: { detail: 'full' },
+  };
+  const previewQuery = useOperationPreview(previewRequest, Boolean(targetSpaceId));
+
+  const { mutateAsync: duplicateBaseMutator, isPending: isLoading } = useMutation<
+    DuplicateBaseMutationResult,
+    IHttpError,
+    DuplicateBaseMutationParams
+  >({
+    mutationFn: ({ useStream, onProgress, ...params }) =>
+      useStream ? duplicateBaseStream(params, onProgress) : duplicateBase(params),
     onSuccess: ({ data }) => {
-      closeModal();
-      router.push({
-        pathname: '/base/[baseId]',
-        query: { baseId: data.id },
+      targetSpaceId &&
+        queryClient.invalidateQueries({
+          queryKey: ReactQueryKeys.baseList(targetSpaceId),
+        });
+      queryClient.invalidateQueries({
+        queryKey: ReactQueryKeys.baseAll(),
       });
+      queryClient.invalidateQueries({
+        queryKey: ReactQueryKeys.recentlyBase(),
+      });
+      setSuccessDuplicate(true);
+      setNewBaseId(data.id);
+      setDuplicateProgress((progress) =>
+        progress
+          ? {
+              ...progress,
+              phase: 'duplicate_done',
+              processedRows: progress.totalRows ?? progress.processedRows,
+            }
+          : progress
+      );
     },
+    onError: (error) => {
+      setDuplicateProgress(null);
+      if (error.status === 402) {
+        useUsageLimitModalStore.setState({
+          modalType: UsageLimitModalType.Upgrade,
+          modalOpen: true,
+        });
+        return;
+      }
+      toast.error(error.message);
+    },
+    // Mutation failures are handled locally, including the upgrade flow.
+    meta: { preventGlobalError: true },
   });
 
   const editableSpaceList = useMemo(() => {
-    return spaceList?.data.filter((space) => hasPermission(space.role, 'base|create')) || [];
-  }, [spaceList?.data]);
+    return spaceList?.filter((space) => hasPermission(space.role, 'base|create')) || [];
+  }, [spaceList]);
 
   const onSubmit = () => {
     if (!targetSpaceId) {
       toast.error(t('space:baseModal.missTargetTip'));
       return;
     }
+    if (isLoading || !previewQuery.canConfirm) return;
 
-    toast.message(t('space:baseModal.copying'));
+    setDuplicateProgress(
+      useStreamDuplicate
+        ? {
+            type: 'progress',
+            phase: 'structure_creating',
+          }
+        : null
+    );
 
     duplicateBaseMutator({
-      fromBaseId: base.id,
-      spaceId: targetSpaceId,
-      name: baseName,
-      withRecords,
+      ...pendingWriteInput,
+      useStream: useStreamDuplicate,
+      onProgress: (_phase, _detail, event) => {
+        if (event) {
+          setDuplicateProgress((previous) => mergeDuplicateProgress(previous, event));
+        }
+      },
     });
   };
 
@@ -79,21 +174,21 @@ const DuplicateBase = ({ base }: { base: IGetBaseVo }) => {
     }
   }, [base.spaceId, editableSpaceList, targetSpaceId]);
   return (
-    <DialogContent className="sm:max-w-[425px]">
+    <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-[425px]">
       <DialogHeader>
         <DialogTitle>
           {t('space:baseModal.duplicate', {
-            baseName: base.name,
+            baseName: getBaseDisplayName(base.name, t),
           })}
         </DialogTitle>
       </DialogHeader>
       <div className="flex flex-col items-center gap-4 py-4">
         {base.icon ? (
-          <div className="size-14 min-w-[3.5rem] text-[3.5rem] leading-none">
+          <div className="size-14 min-w-14 text-[3.5rem] leading-none">
             <Emoji emoji={base.icon} size={56} />
           </div>
         ) : (
-          <Database className="size-14 min-w-[3.5rem]" />
+          <LayoutGrid className="size-14 min-w-14" />
         )}
         <div>
           <Input value={baseName} onChange={(e) => setBaseName(e.target.value)} />
@@ -112,8 +207,25 @@ const DuplicateBase = ({ base }: { base: IGetBaseVo }) => {
         <p className="text-xs text-secondary-foreground">
           {t('space:baseModal.duplicateRecordsTip')}
         </p>
+        {useStreamDuplicate && isLoading && (
+          <div className="space-y-2 rounded-md border p-3">
+            <div className="flex items-center justify-between text-xs text-secondary-foreground">
+              <span>{t('space:baseModal.copying')}</span>
+              <span>{getDuplicateProgressPercent(duplicateProgress)}%</span>
+            </div>
+            <Progress value={getDuplicateProgressPercent(duplicateProgress)} />
+            {duplicateProgress?.tableName && (
+              <div className="text-xs text-secondary-foreground">
+                {duplicateProgress.tableName}
+                {duplicateProgress.processedRows != null && duplicateProgress.totalRows != null
+                  ? ` ${duplicateProgress.processedRows}/${duplicateProgress.totalRows}`
+                  : null}
+              </div>
+            )}
+          </div>
+        )}
         <div className="flex items-center gap-4">
-          <Label htmlFor="username" className="text-right">
+          <Label htmlFor="username" className="text-end">
             {t('space:baseModal.copyToSpace')}
           </Label>
           <Selector
@@ -122,15 +234,45 @@ const DuplicateBase = ({ base }: { base: IGetBaseVo }) => {
             onChange={(id) => setTargetSpaceId(id)}
           />
         </div>
+        {targetSpaceId && (
+          <OperationPreviewPanel
+            preview={previewQuery.data}
+            error={previewQuery.error}
+            isLoading={previewQuery.isPending || previewQuery.isFetching}
+            onRetry={() => void previewQuery.refetch()}
+          />
+        )}
       </div>
       <DialogFooter className="mt-4">
         <DialogClose asChild>
-          <Button size="sm" type="button" variant="ghost">
+          <Button size="sm" type="button" variant="ghost" disabled={isLoading}>
             {t('common:actions.cancel')}
           </Button>
         </DialogClose>
-        <Button size="sm" type="submit" onClick={() => onSubmit()}>
-          {t('space:baseModal.duplicateBase')}
+        <Button
+          size="sm"
+          type="submit"
+          onClick={() => {
+            if (successDuplicate && newBaseId) {
+              closeModal();
+              router.push({
+                pathname: '/base/[baseId]',
+                query: { baseId: newBaseId },
+              });
+            } else {
+              onSubmit();
+            }
+          }}
+          className="flex items-center gap-2"
+          disabled={isLoading || (!successDuplicate && !previewQuery.canConfirm)}
+        >
+          {successDuplicate
+            ? t('space:baseModal.duplicateBaseSucceedAndJump')
+            : t('space:baseModal.duplicateBase')}
+
+          {successDuplicate && <Check className="size-3 text-green-300" />}
+
+          {isLoading && <Spin className="size-4" />}
         </Button>
       </DialogFooter>
     </DialogContent>

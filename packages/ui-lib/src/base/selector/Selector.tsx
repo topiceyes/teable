@@ -51,14 +51,14 @@ export const Selector: React.FC<ISelectorProps> = ({
     () =>
       candidates.reduce(
         (pre, cur) => {
-          pre[cur.id?.toLowerCase()] = cur;
+          pre[cur.id] = cur;
           return pre;
         },
         {} as Record<string, ISelectorItem>
       ),
     [candidates]
   );
-  const selected = candidatesMap[selectedId.toLowerCase()];
+  const selected = candidatesMap[selectedId];
 
   return (
     <Popover open={open} onOpenChange={setOpen} modal={true}>
@@ -69,7 +69,7 @@ export const Selector: React.FC<ISelectorProps> = ({
           variant="outline"
           role="combobox"
           aria-expanded={open}
-          className={cn('flex gap-2 font-normal px-4', className)}
+          className={cn('flex gap-2 font-normal px-3', className)}
         >
           {selected ? (
             <>
@@ -82,17 +82,16 @@ export const Selector: React.FC<ISelectorProps> = ({
             <span className="shrink-0">{placeholder}</span>
           )}
           <div className="grow"></div>
-          <ChevronDown className="h-4 w-4 shrink-0 opacity-50" />
+          <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" />
         </Button>
       </PopoverTrigger>
       <PopoverContent
-        className={cn('w-full p-0', contentClassName)}
+        className={cn('w-full max-w-[200px] p-0', contentClassName)}
         style={{ minWidth: ref.current?.offsetWidth }}
       >
         <Command
           filter={(value, search) => {
             if (!search) return 1;
-            // cmdk bugs value is always lowercase, sucks...
             const item = candidatesMap[value];
             const text = item?.name || item?.id;
             if (text?.toLocaleLowerCase().includes(search.toLocaleLowerCase())) return 1;
@@ -112,9 +111,15 @@ export const Selector: React.FC<ISelectorProps> = ({
                 }}
               >
                 <Check
-                  className={cn('mr-2 h-4 w-4', id === selectedId ? 'opacity-100' : 'opacity-0')}
+                  className={cn(
+                    'me-2 h-4 w-4 flex-shrink-0',
+                    id === selectedId ? 'opacity-100' : 'opacity-0'
+                  )}
                 />
-                {icon} <span className="ml-2">{name ? name : defaultName}</span>
+                {icon}{' '}
+                <span className={cn('ms-2 truncate', name ? '' : 'text-primary/60')}>
+                  {name || defaultName}
+                </span>
               </CommandItem>
             ))}
           </CommandList>

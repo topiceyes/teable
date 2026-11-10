@@ -1,3 +1,4 @@
+/* eslint-disable sonarjs/no-duplicate-string */
 import { CellValueType } from '../../models/field/constant';
 import { TypedValue } from '../typed-value';
 import {
@@ -81,6 +82,16 @@ describe('Numeric', () => {
 
       expect(result).toBe(3);
     });
+
+    it('should max datetime correctly', () => {
+      const result = maxFunc.eval([
+        new TypedValue('2024-01-01T00:00:00.000Z', CellValueType.DateTime, false),
+        new TypedValue('2024-01-02T00:00:00.000Z', CellValueType.DateTime, false),
+        new TypedValue('2024-01-03T00:00:00.000Z', CellValueType.DateTime, false),
+      ]);
+
+      expect(result).toBe('2024-01-03T00:00:00.000Z');
+    });
   });
 
   describe('Min', () => {
@@ -100,6 +111,16 @@ describe('Numeric', () => {
       const result = minFunc.eval([new TypedValue([1, 2, 3], CellValueType.Number, true)]);
 
       expect(result).toBe(1);
+    });
+
+    it('should min datetime correctly', () => {
+      const result = minFunc.eval([
+        new TypedValue('2024-01-01T00:00:00.000Z', CellValueType.DateTime, false),
+        new TypedValue('2024-01-02T00:00:00.000Z', CellValueType.DateTime, false),
+        new TypedValue('2024-01-03T00:00:00.000Z', CellValueType.DateTime, false),
+      ]);
+
+      expect(result).toBe('2024-01-01T00:00:00.000Z');
     });
   });
 
@@ -634,6 +655,12 @@ describe('Numeric', () => {
       const result = valueFunc.eval([new TypedValue('abc-100.12$$3', CellValueType.Number, false)]);
 
       expect(result).toBe(-100.123);
+    });
+
+    it('should throw an error when param is not a string', () => {
+      expect(() =>
+        valueFunc.validateParams([new TypedValue(100, CellValueType.Number, false)])
+      ).toThrowError(`${valueFunc.name} can't process string type param at 1`);
     });
   });
 });

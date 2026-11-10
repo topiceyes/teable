@@ -1,15 +1,23 @@
 import { difference, map } from 'lodash';
 import React from 'react';
+import { useTranslation } from '../../context/app/i18n';
+
 import { useViewId, useFields, useView } from '../../hooks';
 import type { GridView, IFieldInstance } from '../../model';
+import { swapReorder } from '../../utils';
 import { HideFieldsBase } from './HideFieldsBase';
 
 export const HideFields: React.FC<{
+  footer?: React.ReactNode;
+  onFieldClick?: (field: IFieldInstance) => void;
+  responsive?: boolean;
+  title?: string;
   children: (text: string, isActive: boolean) => React.ReactNode;
-}> = ({ children }) => {
+}> = ({ footer, onFieldClick, responsive, title, children }) => {
   const activeViewId = useViewId();
-  const fields = useFields({ withHidden: true });
+  const fields = useFields({ withHidden: true, withDenied: true });
   const view = useView() as GridView | undefined;
+  const { t } = useTranslation();
 
   const filterFields = (fields: IFieldInstance[], shouldBeHidden?: boolean) =>
     fields.filter(
@@ -41,14 +49,45 @@ export const HideFields: React.FC<{
     }
   };
 
+  const onOrderChange = (fieldId: string, fromIndex: number, toIndex: number) => {
+    if (!view) return;
+
+    const newOrder = swapReorder(1, fromIndex, toIndex, fields.length, (index) => {
+      const fieldId = fields[index].id;
+      return view?.columnMeta[fieldId].order;
+    })[0];
+
+    if (newOrder === view?.columnMeta[fieldId].order) {
+      return;
+    }
+
+    view.updateColumnMeta([
+      {
+        fieldId,
+        columnMeta: {
+          order: newOrder,
+        },
+      },
+    ]);
+  };
+
   if (!activeViewId) {
     return <></>;
   }
 
   return (
-    <HideFieldsBase fields={fieldData} hidden={hiddenFieldIds} onChange={onChange}>
+    <HideFieldsBase
+      responsive={responsive}
+      title={title}
+      footer={footer}
+      fields={fieldData}
+      hidden={hiddenFieldIds}
+      onChange={onChange}
+      onOrderChange={onOrderChange}
+      onFieldClick={onFieldClick}
+    >
       {children(
-        hiddenCount ? `${hiddenCount} hidden field(s)` : 'Hide fields',
+        hiddenCount ? t('hidden.configLabel_other', { count: hiddenCount }) : t('hidden.label'),
         Boolean(hiddenCount)
       )}
     </HideFieldsBase>

@@ -1,0 +1,99 @@
+{
+  "add": "Nouvelle application OAuth",
+  "title": {
+    "add": "Nouvelle application OAuth",
+    "edit": "Modifier l'application OAuth",
+    "description": "Les applications Teable peuvent agir en leur propre nom et effectuer des opérations directement via l’API, sans usurper l’identité d’un utilisateur. Consultez notre <a>documentation d’aide</a> pour en savoir plus."
+  },
+  "form": {
+    "name": {
+      "label": "Nom de l'application OAuth",
+      "description": "Le nom de votre application OAuth."
+    },
+    "description": {
+      "label": "Description"
+    },
+    "homePageUrl": {
+      "label": "URL de la page d'accueil",
+      "description": "L'URL complète du site web de votre application OAuth."
+    },
+    "logo": {
+      "label": "Logo",
+      "description": "Une image carrée est recommandée.",
+      "placeholder": "Glissez-déposez votre logo ici ou cliquez pour télécharger",
+      "button": "Télécharger un logo",
+      "clear": "Effacer",
+      "lengthError": "Un seul fichier est autorisé.",
+      "typeError": "Seul un fichier image est autorisé."
+    },
+    "callbackUrl": {
+      "label": "URL de rappel",
+      "description": "L'URL complète à laquelle rediriger après qu'un utilisateur a autorisé votre intégration.",
+      "add": "Ajouter une URL de rappel"
+    },
+    "deviceFlow": {
+      "label": "Activer le flux par code d'appareil",
+      "description": "Autorise cette application à connecter les utilisateurs avec un code à usage unique saisi dans un navigateur (pour les CLI et les appareils qui n'en ont pas). Toute personne connaissant le client ID peut lancer ce flux au nom de votre application : ne l'activez que si votre application en a besoin."
+    },
+    "secret": {
+      "label": "Secrets du client",
+      "add": "Générer un nouveau secret client",
+      "newDescription": "Assurez-vous de copier votre nouveau secret client maintenant. Vous ne pourrez plus le voir par la suite.",
+      "empty": "Vous avez besoin d'un secret client pour vous authentifier en tant qu'application auprès de l'API.",
+      "lastUsed": "Dernière utilisation le {{date}}",
+      "tag": "Secret client",
+      "neverUsed": "Jamais utilisé"
+    },
+    "clientId": {
+      "label": "ID Client : "
+    }
+  },
+  "formType": {
+    "basic": "Informations de base",
+    "scopes": "Périmètres",
+    "identify": "Identification et autorisation des utilisateurs",
+    "clientInfo": "Informations sur le client"
+  },
+  "decision": {
+    "title": "{{name}} demande l'accès à votre compte",
+    "scopes": "Cette application pourra obtenir les périmètres suivants :",
+    "redirectDescription": "L'autorisation redirigera vers",
+    "authorize": "Autoriser"
+  },
+  "mcpDecision": {
+    "title": "Connecter Teable MCP",
+    "subtitle": "Accorder à <b>{{name}}</b> l'accès à Teable",
+    "capabilities": "Grâce à Teable MCP, <b>{{name}}</b> pourra :",
+    "ability1": "Consulter et modifier les tables, champs, vues, enregistrements, automatisations et applications selon vos autorisations dans chaque projet",
+    "ability2": "Agir en votre nom ; les actions sont enregistrées sous cette application",
+    "ability3": "Utiliser tous les projets auxquels vous avez accès",
+    "redirectTitle": "Vous serez redirigé vers :",
+    "trustRedirect": "Je reconnais cette URL et je lui fais confiance",
+    "continue": "Continuer"
+  },
+  "device": {
+    "title": "Connecter un appareil",
+    "description": "Saisissez le code à 8 caractères affiché dans votre terminal pour connecter cet appareil à votre compte.",
+    "submit": "Continuer",
+    "invalidCode": "Ce code est invalide ou a expiré. Vérifiez votre terminal et réessayez.",
+    "codeUsed": "Ce code a déjà été utilisé. Relancez la commande de connexion pour obtenir un nouveau code.",
+    "deviceFlowDisabled": "Cette application n'autorise pas la connexion avec un code d'appareil.",
+    "codeLabel": "Code d'autorisation",
+    "confirmCode": "Vérifiez qu'il correspond au code affiché dans votre terminal.",
+    "securityTitle": "Avertissement de sécurité",
+    "phishingHint": "Les codes d'appareil sont une cible fréquente d'hameçonnage et peuvent servir à se connecter à votre compte. Ne communiquez jamais le vôtre, et ne continuez que si vous avez vous-même lancé cette connexion.",
+    "phishingHintStrong": "Si vous n'aviez pas l'intention d'ouvrir cette page, ou si le lien vous a été envoyé par quelqu'un d'autre, fermez cet onglet.",
+    "approvedTitle": "Appareil connecté",
+    "approvedDescription": "Vous pouvez fermer cette page et revenir à votre terminal.",
+    "deniedTitle": "Demande refusée",
+    "deniedDescription": "Cet appareil n'a pas reçu l'accès. Vous pouvez fermer cette page."
+  },
+  "help": {
+    "link": "https://help.teable.ai/en/api-doc/oauth",
+    "title": "En savoir plus"
+  },
+  "deleteConfirm": {
+    "title": "Supprimer l’application OAuth",
+    "description": "Voulez-vous vraiment supprimer l’application OAuth {{name}} ? Cette action est irréversible."
+  }
+}

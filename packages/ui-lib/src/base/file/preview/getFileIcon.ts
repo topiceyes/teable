@@ -1,54 +1,49 @@
 import {
   FileAudio,
+  FileAudioDark,
   FileDocument,
+  FileDocumentDark,
   FileImage,
   FilePack,
+  FilePackDark,
   FilePdf,
+  FilePdfDark,
   FilePresentation,
+  FilePresentationDark,
+  FileSpreadsheetDark,
   FileSpreadsheet,
-  FileText,
   FileUnknown,
+  FileUnknownDark,
   FileVideo,
+  FileVideoDark,
 } from '@teable/icons';
-import {
-  isAudio,
-  isExcel,
-  isImage,
-  isPackage,
-  isPdf,
-  isPpt,
-  isText,
-  isVideo,
-  isWord,
-} from './utils';
+import { isAudio, isExcel, isImage, isPackage, isPdf, isPpt, isVideo, isWord } from './utils';
 
-export const getFileIcon = (mimetype: string) => {
+// eslint-disable-next-line sonarjs/cognitive-complexity
+export const getFileIcon = (mimetype: string, theme?: 'light' | 'dark') => {
   if (isImage(mimetype)) {
     return FileImage;
   }
   if (isPdf(mimetype)) {
-    return FilePdf;
+    return theme === 'dark' ? FilePdfDark : FilePdf;
   }
   if (isExcel(mimetype)) {
-    return FileSpreadsheet;
+    return theme === 'dark' ? FileSpreadsheetDark : FileSpreadsheet;
   }
   if (isWord(mimetype)) {
-    return FileDocument;
+    return theme === 'dark' ? FileDocumentDark : FileDocument;
   }
   if (isPackage(mimetype)) {
-    return FilePack;
+    return theme === 'dark' ? FilePackDark : FilePack;
   }
   if (isAudio(mimetype)) {
-    return FileAudio;
+    return theme === 'dark' ? FileAudioDark : FileAudio;
   }
   if (isVideo(mimetype)) {
-    return FileVideo;
+    return theme === 'dark' ? FileVideoDark : FileVideo;
   }
   if (isPpt(mimetype)) {
-    return FilePresentation;
+    return theme === 'dark' ? FilePresentationDark : FilePresentation;
   }
-  if (isText(mimetype)) {
-    return FileText;
-  }
-  return FileUnknown;
+  return theme === 'dark' ? FileUnknownDark : FileUnknown;
 };

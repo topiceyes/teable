@@ -1,0 +1,82 @@
+import type { RouteConfig } from '@asteasolutions/zod-to-openapi';
+import type { AxiosResponse } from 'axios';
+import { axios } from '../../axios';
+import { registerRoute, urlBuilder } from '../../utils';
+import { z } from '../../zod';
+
+export enum RecurringIntervalType {
+  Month = 'month',
+  Year = 'year',
+}
+
+export enum BillingProductLevel {
+  Free = 'free',
+  Pro = 'pro',
+  Business = 'business',
+  Enterprise = 'enterprise',
+}
+
+export enum SubscriptionStatus {
+  Active = 'active',
+  Canceled = 'canceled',
+  Incomplete = 'incomplete',
+  IncompleteExpired = 'incomplete_expired',
+  Trialing = 'trialing',
+  PastDue = 'past_due',
+  Unpaid = 'unpaid',
+  Paused = 'paused',
+  SeatLimitExceeded = 'seat_limit_exceeded',
+}
+
+export const appSumoTierSchema = z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4)]);
+export type IAppSumoTier = z.infer<typeof appSumoTierSchema>;
+
+export const subscriptionSummaryVoSchema = z.object({
+  spaceId: z.string(),
+  status: z.enum(SubscriptionStatus),
+  level: z.enum(BillingProductLevel),
+  appSumoTier: appSumoTierSchema.optional(),
+  // Fixed-seat (AppSumo/manual) subscriptions only: the purchased seat cap and
+  // the billable collaborators currently occupying it. Exceeding the cap is
+  // not blocked — the space degrades after a grace period — so clients warn
+  // before adding billable members. Absent for Stripe-billed subscriptions,
+  // whose seat limit is hard-enforced server-side.
+  fixedSeatQuantity: z.number().optional(),
+  fixedSeatUsage: z.number().optional(),
+});
+
+export type ISubscriptionSummaryVo = z.infer<typeof subscriptionSummaryVoSchema>;
+
+export const GET_SUBSCRIPTION_SUMMARY = '/space/{spaceId}/billing/subscription/summary';
+
+export const GetSubscriptionSummaryRoute: RouteConfig = registerRoute({
+  method: 'get',
+  path: GET_SUBSCRIPTION_SUMMARY,
+  description: 'Retrieves a summary of subscription information for a space',
+  request: {
+    params: z.object({
+      spaceId: z.string(),
+    }),
+  },
+  responses: {
+    200: {
+      description: 'Returns a summary of subscription information about a space.',
+      content: {
+        'application/json': {
+          schema: subscriptionSummaryVoSchema,
+        },
+      },
+    },
+  },
+  tags: ['billing'],
+});
+
+export async function getSubscriptionSummary(
+  spaceId: string
+): Promise<AxiosResponse<ISubscriptionSummaryVo>> {
+  return axios.get<ISubscriptionSummaryVo>(
+    urlBuilder(GET_SUBSCRIPTION_SUMMARY, {
+      spaceId: spaceId,
+    })
+  );
+}

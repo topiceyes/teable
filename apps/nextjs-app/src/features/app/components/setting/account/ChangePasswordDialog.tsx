@@ -1,6 +1,7 @@
 import { useMutation } from '@tanstack/react-query';
 import type { HttpError } from '@teable/core';
 import { changePassword, changePasswordRoSchema } from '@teable/openapi';
+import { useSession } from '@teable/sdk/hooks';
 import { Spin } from '@teable/ui-lib/base';
 import {
   Button,
@@ -14,12 +15,11 @@ import {
   DialogTrigger,
   Input,
   Label,
-  useToast,
 } from '@teable/ui-lib/shadcn';
+import { toast } from '@teable/ui-lib/shadcn/ui/sonner';
 import { useRouter } from 'next/router';
 import { useTranslation } from 'next-i18next';
 import { useState } from 'react';
-import { fromZodError } from 'zod-validation-error';
 
 interface IChangePasswordDialogProps {
   children?: React.ReactNode;
@@ -28,22 +28,24 @@ export const ChangePasswordDialog = (props: IChangePasswordDialogProps) => {
   const { children } = props;
   const { t } = useTranslation('common');
   const router = useRouter();
-  const { toast } = useToast();
+  const { user } = useSession();
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [currentPassword, setCurrentPassword] = useState('');
   const [error, setError] = useState('');
 
-  const { mutate: changePasswordMutate, isLoading } = useMutation(changePassword, {
+  const {
+    mutate: changePasswordMutate,
+    isPending: isLoading,
+    isSuccess,
+  } = useMutation({
+    mutationFn: changePassword,
     onSuccess: () => {
-      toast({
-        title: t('settings.account.changePasswordSuccess.title'),
+      toast.success(t('settings.account.changePasswordSuccess.title'), {
         description: t('settings.account.changePasswordSuccess.desc'),
       });
       setTimeout(() => {
-        router.push('/auth/login', {
-          query: { redirect: router.asPath },
-        });
+        router.reload();
       }, 2000);
     },
     onError: (err: HttpError) => {
@@ -77,8 +79,7 @@ export const ChangePasswordDialog = (props: IChangePasswordDialogProps) => {
   const handleSubmit = async () => {
     const valid = changePasswordRoSchema.safeParse({ password: currentPassword, newPassword });
     if (!valid.success) {
-      console.error(fromZodError(valid.error).message);
-      setError(t('settings.account.changePasswordError.invalidNew'));
+      setError(t('password.setInvalid'));
       return;
     }
     changePasswordMutate({ password: currentPassword, newPassword });
@@ -87,22 +88,30 @@ export const ChangePasswordDialog = (props: IChangePasswordDialogProps) => {
   return (
     <Dialog onOpenChange={reset}>
       <DialogTrigger asChild>{children}</DialogTrigger>
-      <DialogContent className="md:w-80">
+      <DialogContent className="md:w-[400px]">
         <DialogHeader>
-          <DialogTitle className="text-center text-sm">
+          <DialogTitle className="text-base">
             {t('settings.account.changePassword.title')}
           </DialogTitle>
-          <DialogDescription className="text-center text-xs">
+          <DialogDescription className="text-sm">
             {t('settings.account.changePassword.desc')}
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-2">
           <div className="space-y-1">
-            <Label className="text-xs text-muted-foreground" htmlFor="currentPassword">
+            <Input
+              className="visible m-0 h-0 border-0 p-0 text-[0]"
+              type="text"
+              name="email"
+              autoComplete="email"
+              readOnly
+              value={user.email}
+            />
+            <Label className="font-normal text-foreground" htmlFor="currentPassword">
               {t('settings.account.changePassword.current')}
             </Label>
             <Input
-              className="h-7"
+              size="sm"
               id="currentPassword"
               autoComplete="current-password"
               type="password"
@@ -112,11 +121,11 @@ export const ChangePasswordDialog = (props: IChangePasswordDialogProps) => {
             />
           </div>
           <div className="space-y-1">
-            <Label className="text-xs text-muted-foreground" htmlFor="newPassword">
+            <Label className="font-normal text-foreground" htmlFor="newPassword">
               {t('settings.account.changePassword.new')}
             </Label>
             <Input
-              className="h-7"
+              size="sm"
               id="newPassword"
               autoComplete="new-password"
               type="password"
@@ -127,11 +136,11 @@ export const ChangePasswordDialog = (props: IChangePasswordDialogProps) => {
             />
           </div>
           <div className="space-y-1">
-            <Label className="text-xs text-muted-foreground" htmlFor="confirmPassword">
+            <Label className="font-normal text-foreground" htmlFor="confirmPassword">
               {t('settings.account.changePassword.confirm')}
             </Label>
             <Input
-              className="h-7"
+              size="sm"
               id="confirmPassword"
               autoComplete="new-password"
               type="password"
@@ -141,24 +150,24 @@ export const ChangePasswordDialog = (props: IChangePasswordDialogProps) => {
               aria-autocomplete="inline"
             />
           </div>
-          {error && <div className="text-center text-xs text-red-500">{error}</div>}
+          {error && <div className="!mt-4 text-xs text-destructive">{error}</div>}
         </div>
-        <DialogFooter className="flex-col space-y-2 sm:flex-col sm:space-x-0">
-          <Button
-            size={'sm'}
-            className="w-full"
-            type="submit"
-            disabled={disableSubmitBtn}
-            onClick={handleSubmit}
-          >
-            {isLoading && <Spin className="mr-1 size-4" />}
-            {t('settings.account.changePassword.title')}
-          </Button>
+        <DialogFooter className="flex flex-col gap-2 sm:flex-row">
           <DialogClose asChild>
-            <Button size={'sm'} className="w-full" variant={'ghost'}>
+            <Button size={'sm'} className="w-full" variant={'outline'}>
               {t('actions.cancel')}
             </Button>
           </DialogClose>
+          <Button
+            size={'sm'}
+            className="m-0 w-full"
+            type="submit"
+            disabled={disableSubmitBtn || isSuccess || isLoading}
+            onClick={handleSubmit}
+          >
+            {isLoading && <Spin className="me-1 size-4" />}
+            {t('settings.account.changePassword.title')}
+          </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

@@ -107,9 +107,7 @@ describe('AttachmentsService', () => {
       vi.spyOn(service as any, 'getAttachmentFields').mockResolvedValue(mockAttachmentFields);
       await service.createRecords(userId, tableId, records);
 
-      expect(prismaService.attachmentsTable.create).toHaveBeenCalledTimes(
-        mockAttachmentCellValue.length
-      );
+      expect(prismaService.attachmentsTable.createMany).toBeCalled();
     });
   });
 
@@ -136,9 +134,7 @@ describe('AttachmentsService', () => {
       // Call the method
       await service.updateRecords(userId, tableId, records);
 
-      expect(prismaService.txClient().attachmentsTable.create).toHaveBeenCalledTimes(
-        mockAttachmentCellValue.length
-      );
+      expect(prismaService.txClient().attachmentsTable.createMany).toBeCalled();
       expect(service.delete).toHaveBeenCalledTimes(0);
     });
 
@@ -190,7 +186,7 @@ describe('AttachmentsService', () => {
 
       await service.updateRecords(userId, tableId, records);
 
-      expect(prismaService.txClient().attachmentsTable.create).toHaveBeenCalledTimes(2);
+      expect(prismaService.txClient().attachmentsTable.createMany).toBeCalled();
       expect(service.delete).toHaveBeenCalledWith([
         {
           tableId,

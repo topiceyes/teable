@@ -1,0 +1,80 @@
+{
+  "name": "@teable/v2-contract-http",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "main": "dist/index.cjs",
+  "module": "dist/index.js",
+  "types": "src/index.ts",
+  "exports": {
+    ".": {
+      "@teable/source": "./src/index.ts",
+      "types": "./src/index.ts",
+      "import": "./dist/index.js",
+      "module": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./dataQueryExplain": {
+      "@teable/source": "./src/dataQueryExplain.ts",
+      "types": "./src/dataQueryExplain.ts",
+      "import": "./dist/index.js",
+      "module": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./complexityPaths": {
+      "@teable/source": "./src/complexityPaths.ts",
+      "types": "./src/complexityPaths.ts",
+      "import": "./src/complexityPaths.ts",
+      "require": "./src/complexityPaths.ts"
+    },
+    "./complexityInput": {
+      "@teable/source": "./src/complexityInput.ts",
+      "types": "./src/complexityInput.ts",
+      "import": "./src/complexityInput.ts",
+      "require": "./src/complexityInput.ts"
+    },
+    "./operationPreview": {
+      "@teable/source": "./src/operationPreview.ts",
+      "types": "./src/operationPreview.ts",
+      "import": "./dist/operationPreview.js",
+      "require": "./dist/operationPreview.cjs"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsdown --tsconfig tsconfig.build.json",
+    "dev": "tsdown --tsconfig tsconfig.build.json --watch",
+    "clean": "rimraf ./dist ./coverage ./tsconfig.tsbuildinfo ./tsconfig.build.tsbuildinfo",
+    "lint": "oxlint && oxfmt --check",
+    "typecheck": "tsc --project ./tsconfig.json --noEmit",
+    "test-unit": "vitest run --silent",
+    "test-unit-cover": "pnpm test-unit --coverage",
+    "fix-all-files": "oxlint --fix && oxfmt"
+  },
+  "dependencies": {
+    "@orpc/contract": "1.15.7",
+    "@teable/v2-complexity": "workspace:*",
+    "@teable/v2-core": "workspace:*",
+    "@teable/v2-data-query": "workspace:*",
+    "neverthrow": "8.2.0",
+    "openapi-types": "12.1.3",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@teable/v2-tsdown-config": "workspace:*",
+    "@teable/eslint-config-bases": "workspace:^",
+    "@types/node": "24.19.2",
+    "@vitest/coverage-v8": "4.1.12",
+    "oxfmt": "0.74.0",
+    "oxlint": "1.89.0",
+    "rimraf": "5.0.5",
+    "tsdown": "0.23.1",
+    "typescript": "catalog:",
+    "vitest": "4.1.12"
+  }
+}

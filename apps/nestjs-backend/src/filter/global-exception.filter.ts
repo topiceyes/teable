@@ -1,26 +1,63 @@
-import type { ArgumentsHost, ExceptionFilter } from '@nestjs/common';
+import type { ArgumentsHost, ExceptionFilter, HttpException } from '@nestjs/common';
 import {
   BadRequestException,
   Catch,
   ForbiddenException,
-  HttpException,
-  HttpStatus,
+  Inject,
   Logger,
   NotFoundException,
   NotImplementedException,
+  Optional,
   UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { metrics, trace, SpanStatusCode } from '@opentelemetry/api';
+import * as Sentry from '@sentry/nestjs';
 import { HttpErrorCode } from '@teable/core';
 import type { Request, Response } from 'express';
+import { ClsService } from 'nestjs-cls';
 import type { ILoggerConfig } from '../configs/logger.config';
-import { CustomHttpException, getDefaultCodeByStatus } from '../custom.exception';
+import { CustomHttpException, TemplateAppTokenNotAllowedException } from '../custom.exception';
+import {
+  getV2Attribution,
+  getV2AttributionLogContext,
+  getV2AttributionSpanAttributes,
+  setV2AttributionHeaders,
+  setV2AttributionOnSentryScope,
+} from '../features/canary/v2-attribution';
+import { ColdStorageUnavailableError } from '../features/cold-archive/cold-errors';
+import { resolveBoolean } from '../features/v2/v2-config-parsers';
+import { dataQueryErrorResponse, dataQueryHostError } from '../features/v2/v2-data-query-http';
+import { classifyDataDbRuntimeError } from '../global/data-db-runtime-error';
+import type { IDataDbRuntimeErrorClassification } from '../global/data-db-runtime-error';
+import type { IClsStore } from '../types/cls';
+import { exceptionParse } from '../utils/exception-parse';
+
+const dataDbRuntimeErrorCounter = metrics
+  .getMeter('teable-observability')
+  .createCounter('teable.data_db.runtime_errors', {
+    description: 'Runtime errors from an external data database bound to a space',
+  });
+const dataDbOtelAttribute = {
+  mode: 'teable.data_db.mode',
+  errorCode: 'teable.data_db.error_code',
+  connectionId: 'teable.data_db.connection_id',
+  urlFingerprint: 'teable.data_db.url_fingerprint',
+  host: 'teable.data_db.host',
+  database: 'teable.data_db.database',
+  internalSchema: 'teable.data_db.internal_schema',
+  retryable: 'teable.data_db.retryable',
+  userActionable: 'teable.data_db.user_actionable',
+} as const;
 
 @Catch()
 export class GlobalExceptionFilter implements ExceptionFilter {
-  private logger = new Logger(GlobalExceptionFilter.name);
+  private readonly logger = new Logger(GlobalExceptionFilter.name);
 
-  constructor(private readonly configService: ConfigService) {}
+  constructor(
+    private readonly configService: ConfigService,
+    @Optional() @Inject(ClsService) private readonly cls?: ClsService<IClsStore>
+  ) {}
 
   catch(exception: Error | HttpException, host: ArgumentsHost) {
     const { enableGlobalErrorLogging } = this.configService.getOrThrow<ILoggerConfig>('logger');
@@ -29,47 +66,241 @@ export class GlobalExceptionFilter implements ExceptionFilter {
     const response = ctx.getResponse<Response>();
     const request = ctx.getRequest<Request>();
 
+    // Express parsing runs before controller filters. Nest wraps its SyntaxError in a
+    // BadRequestException whose message can contain request data: never observe that error.
+    if (
+      exception instanceof BadRequestException &&
+      request.method === 'POST' &&
+      /^\/api\/v2\/queries\/(?:execute|validate)\/?$/i.test(request.path) &&
+      (resolveBoolean(this.configService.get('V2_DATA_QUERY_ENABLED'), false) ||
+        resolveBoolean(this.configService.get('V2_DATA_QUERY_EXECUTE_ENABLED'), false))
+    ) {
+      const safeException = new BadRequestException('Invalid data query request');
+      this.annotateActiveSpan(safeException);
+      if (response.headersSent) return;
+      const result = dataQueryErrorResponse(dataQueryHostError(safeException));
+      return response.status(result.status).json(result.body);
+    }
+    const dataDbContext = this.getDataDbContext();
+    const dataDbError = dataDbContext ? classifyDataDbRuntimeError(exception) : null;
+
+    // The response may already be completed upstream (e.g. a guard issued a
+    // redirect and returned false, or a streamed reply failed midway). Any
+    // further header/body write would itself throw ERR_HTTP_HEADERS_SENT.
+    const responseWritable = !response.headersSent;
+
+    if (responseWritable) {
+      setV2AttributionHeaders(response, getV2Attribution(this.cls));
+    }
+    this.annotateActiveSpan(exception, dataDbError);
+    this.recordDataDbMetric(dataDbError);
+    this.captureException(exception, dataDbError);
+
     if (
       enableGlobalErrorLogging ||
       !(
         exception instanceof BadRequestException ||
+        // a localized 400 is the same routine rejection, just with translatable copy
+        (exception instanceof CustomHttpException && exception.getStatus() === 400) ||
         exception instanceof UnauthorizedException ||
         exception instanceof ForbiddenException ||
         exception instanceof NotFoundException ||
         exception instanceof NotImplementedException
       )
-    )
+    ) {
       this.logError(exception, request);
-
-    if (exception instanceof CustomHttpException) {
-      const customException = exception as CustomHttpException;
-      const status = customException.getStatus();
-      return response.status(status).json({
+    }
+    if (!responseWritable) {
+      return;
+    }
+    if (exception instanceof TemplateAppTokenNotAllowedException) {
+      return response.status(exception.getStatus()).json({
         message: exception.message,
-        status: status,
-        code: customException.code,
       });
     }
-
-    if (exception instanceof HttpException) {
-      const status = exception.getStatus();
-      return response
-        .status(status)
-        .json({ message: exception.message, status, code: getDefaultCodeByStatus(status) });
+    // reaches here only from cold reads that had no local degradation left
+    if (exception instanceof ColdStorageUnavailableError) {
+      return response.status(503).json({
+        message: 'Archived data is temporarily unavailable; please retry.',
+        status: 503,
+        code: HttpErrorCode.DATABASE_CONNECTION_UNAVAILABLE,
+      });
     }
-
-    response.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
-      message: 'Internal Server Error',
-      status: HttpStatus.INTERNAL_SERVER_ERROR,
-      code: HttpErrorCode.INTERNAL_SERVER_ERROR,
+    if (dataDbError) {
+      return response.status(503).json({
+        message:
+          'The data database bound to this space is currently unavailable. Please check the external database connection and try again.',
+        status: 503,
+        code: HttpErrorCode.DATABASE_CONNECTION_UNAVAILABLE,
+        data: {
+          dataDb: {
+            code: dataDbError.code,
+            retryable: dataDbError.retryable,
+            userActionable: dataDbError.userActionable,
+            connectionId: dataDbContext?.connectionId,
+            urlFingerprint: dataDbContext?.urlFingerprint,
+            displayHost: dataDbContext?.displayHost,
+            displayDatabase: dataDbContext?.displayDatabase,
+            internalSchema: dataDbContext?.internalSchema,
+          },
+        },
+      });
+    }
+    const customHttpException = exceptionParse(exception);
+    const status = customHttpException.getStatus();
+    return response.status(status).json({
+      message: customHttpException.message,
+      status: status,
+      code: customHttpException.code,
+      data: customHttpException.data,
     });
   }
 
+  private captureException(
+    exception: Error | HttpException,
+    dataDbError?: IDataDbRuntimeErrorClassification | null
+  ) {
+    if (this.isExpectedError(exception)) return;
+
+    Sentry.withScope((scope) => {
+      this.setSentryContext(scope);
+      this.setSentryDataDbContext(scope, dataDbError);
+      Sentry.captureException(exception, {
+        mechanism: { handled: false, type: 'auto.function.nestjs.exception_captured' },
+      });
+    });
+  }
+
+  private setSentryContext(scope: Sentry.Scope) {
+    scope.setUser(null);
+    if (!this.cls) return;
+
+    try {
+      const userId = this.cls.get('user.id');
+      if (userId && userId !== 'aiRobot') {
+        const email = this.cls.get('user.email');
+        scope.setUser({ id: userId, email });
+      }
+
+      const spaceId = this.cls.get('spaceId');
+      if (spaceId) {
+        scope.setTag('space.id', spaceId);
+      }
+      setV2AttributionOnSentryScope(scope, getV2Attribution(this.cls));
+    } catch {
+      // CLS may not be active (e.g., non-HTTP contexts)
+    }
+  }
+
+  private setSentryDataDbContext(
+    scope: Sentry.Scope,
+    dataDbError?: IDataDbRuntimeErrorClassification | null
+  ) {
+    const dataDbContext = this.getDataDbContext();
+    if (!dataDbContext || !dataDbError) return;
+
+    scope.setTag('data_db.mode', dataDbContext.mode);
+    scope.setTag('data_db.error_code', dataDbError.code);
+    scope.setTag('data_db.connection_id', dataDbContext.connectionId);
+    scope.setTag('data_db.host', dataDbContext.displayHost ?? 'unknown');
+    scope.setTag('data_db.database', dataDbContext.displayDatabase ?? 'unknown');
+    scope.setTag('data_db.internal_schema', dataDbContext.internalSchema ?? 'unknown');
+    scope.setContext('data_db', {
+      ...dataDbContext,
+      errorCode: dataDbError.code,
+      driverCode: dataDbError.driverCode,
+      retryable: dataDbError.retryable,
+      userActionable: dataDbError.userActionable,
+    });
+  }
+
+  private annotateActiveSpan(
+    exception: Error | HttpException,
+    dataDbError?: IDataDbRuntimeErrorClassification | null
+  ) {
+    const span = trace.getActiveSpan();
+    if (!span) return;
+
+    // NestInstrumentation is disabled (see tracing.ts) and RouteTracingInterceptor never
+    // runs for what a guard or pipe rejects, so this filter is the only place left that
+    // still sees a thrown exception with the request span active.
+    span.recordException(exception);
+    // Only 5xx is the server failing. Marking 4xx would multiply the APM error rate and
+    // promote every routine 404 into a full-detail trace export.
+    const status = dataDbError ? 503 : exceptionParse(exception).getStatus();
+    if (status >= 500) {
+      span.setStatus({
+        code: SpanStatusCode.ERROR,
+        message: dataDbError?.code ?? exception.message,
+      });
+    }
+
+    const v2Attributes = getV2AttributionSpanAttributes(getV2Attribution(this.cls));
+    if (Object.keys(v2Attributes).length) {
+      span.setAttributes(v2Attributes);
+    }
+
+    const dataDbContext = this.getDataDbContext();
+    if (!dataDbContext || !dataDbError) return;
+
+    span.setAttributes({
+      [dataDbOtelAttribute.mode]: dataDbContext.mode,
+      [dataDbOtelAttribute.errorCode]: dataDbError.code,
+      [dataDbOtelAttribute.connectionId]: dataDbContext.connectionId,
+      [dataDbOtelAttribute.urlFingerprint]: dataDbContext.urlFingerprint ?? '',
+      [dataDbOtelAttribute.host]: dataDbContext.displayHost ?? '',
+      [dataDbOtelAttribute.database]: dataDbContext.displayDatabase ?? '',
+      [dataDbOtelAttribute.internalSchema]: dataDbContext.internalSchema ?? '',
+      [dataDbOtelAttribute.retryable]: dataDbError.retryable,
+      [dataDbOtelAttribute.userActionable]: dataDbError.userActionable,
+    });
+  }
+
+  private recordDataDbMetric(dataDbError?: IDataDbRuntimeErrorClassification | null) {
+    if (!dataDbError) return;
+
+    dataDbRuntimeErrorCounter.add(1, {
+      [dataDbOtelAttribute.errorCode]: dataDbError.code,
+      [dataDbOtelAttribute.retryable]: dataDbError.retryable,
+      [dataDbOtelAttribute.userActionable]: dataDbError.userActionable,
+    });
+  }
+
+  private getDataDbContext() {
+    try {
+      return this.cls?.get('dataDb');
+    } catch {
+      return undefined;
+    }
+  }
+
+  private isExpectedError(exception: unknown) {
+    return (
+      typeof exception === 'object' &&
+      exception !== null &&
+      ('status' in exception || 'error' in exception)
+    );
+  }
+
   protected logError(exception: Error, request: Request) {
+    const dataDbContext = this.getDataDbContext();
+    const dataDbError = dataDbContext ? classifyDataDbRuntimeError(exception) : null;
+    const v2 = getV2AttributionLogContext(getV2Attribution(this.cls));
     this.logger.error(
       {
         url: request?.url,
         message: exception.message,
+        v2,
+        dataDb: dataDbError
+          ? {
+              code: dataDbError.code,
+              connectionId: dataDbContext?.connectionId,
+              urlFingerprint: dataDbContext?.urlFingerprint,
+              displayHost: dataDbContext?.displayHost,
+              displayDatabase: dataDbContext?.displayDatabase,
+              internalSchema: dataDbContext?.internalSchema,
+            }
+          : undefined,
       },
       exception.stack
     );

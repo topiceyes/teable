@@ -1,7 +1,12 @@
 import { CreatedTimeFieldCore } from '@teable/core';
-import type { IFieldBase } from '../field-base';
+import type { IFormulaFieldMeta } from '@teable/core';
+import type { FieldBase } from '../field-base';
 
-export class CreatedTimeFieldDto extends CreatedTimeFieldCore implements IFieldBase {
+export class CreatedTimeFieldDto extends CreatedTimeFieldCore implements FieldBase {
+  get isStructuredCellValue() {
+    return false;
+  }
+
   convertCellValue2DBValue(value: unknown): unknown {
     if (this.isMultipleCellValue) {
       return value == null ? value : JSON.stringify(value);
@@ -10,12 +15,33 @@ export class CreatedTimeFieldDto extends CreatedTimeFieldCore implements IFieldB
   }
 
   convertDBValue2CellValue(value: unknown): unknown {
+    const normalizeDateValue = (input: unknown) => {
+      if (input instanceof Date) {
+        return input.toISOString();
+      }
+      if (typeof input === 'string') {
+        const hasTimezone = /(?:z|[+-]\d{2}:\d{2})$/i.test(input);
+        const parsed = new Date(hasTimezone ? input : `${input}Z`);
+        if (!Number.isNaN(parsed.getTime())) {
+          return parsed.toISOString();
+        }
+      }
+      return input;
+    };
+
     if (this.isMultipleCellValue) {
-      return value == null || typeof value === 'object' ? value : JSON.parse(value as string);
+      if (value == null) return value;
+      const parsed = typeof value === 'string' ? JSON.parse(value) : value;
+      if (Array.isArray(parsed)) {
+        return parsed.map(normalizeDateValue);
+      }
+      return parsed;
     }
-    if (value instanceof Date) {
-      return value.toISOString();
-    }
-    return value;
+
+    return normalizeDateValue(value);
+  }
+
+  setMetadata(meta: IFormulaFieldMeta) {
+    this.meta = meta;
   }
 }

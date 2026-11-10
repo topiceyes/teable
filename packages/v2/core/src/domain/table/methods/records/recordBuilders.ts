@@ -1,0 +1,253 @@
+import { sdkErrorI18nKeys } from '@teable/i18n-keys';
+import { err, ok, safeTry } from 'neverthrow';
+import type { Result } from 'neverthrow';
+import { domainError, type DomainError } from '../../../shared/DomainError';
+import { RecordCreated } from '../../events/RecordCreated';
+import type { RecordCreateSource } from '../../events/RecordFieldValuesDTO';
+import type { Field } from '../../fields/Field';
+import { FieldType } from '../../fields/FieldType';
+import { FieldByKeySpec } from '../../fields/specs/FieldByKeySpec';
+import { FieldCellValueSchemaVisitor } from '../../fields/visitors/FieldCellValueSchemaVisitor';
+import type { FieldCellValueSchema } from '../../fields/visitors/FieldCellValueSchemaVisitor';
+import { FieldDefaultValueVisitor } from '../../fields/visitors/FieldDefaultValueVisitor';
+import { RecordCreateResult } from '../../records/RecordCreateResult';
+import { RecordId } from '../../records/RecordId';
+import { RecordMutationSpecBuilder } from '../../records/RecordMutationSpecBuilder';
+import { materializeRecordSpec } from '../../records/RecordSpecMaterializer';
+import { recordToFieldValues } from '../../records/recordToFieldValues';
+import type { ICellValueSpec } from '../../records/specs/values/ICellValueSpecVisitor';
+import { TableRecord } from '../../records/TableRecord';
+import type { Table } from '../../Table';
+
+interface CreateRecordEditableFieldContext {
+  field: Field;
+  fieldId: string;
+  hasDefaultValue: boolean;
+  defaultValue: unknown;
+  resolveDefaultValue: (() => unknown) | undefined;
+  isUserField: boolean;
+  cellValueSchema: FieldCellValueSchema | undefined;
+}
+
+export interface CreateRecordBuildContext {
+  readonly fieldByKey: ReadonlyMap<string, Field>;
+  readonly editableFields: ReadonlyArray<CreateRecordEditableFieldContext>;
+}
+
+export interface CreateRecordBuildContextOptions {
+  /** Streams reuse field metadata but must evaluate dynamic defaults (date `now`) per record. */
+  readonly freshDefaults?: boolean;
+}
+
+export function createRecordBuildContext(
+  table: Table,
+  options?: CreateRecordBuildContextOptions
+): CreateRecordBuildContext {
+  const fieldByKey = new Map<string, Field>();
+  for (const field of table.getFields()) {
+    const fieldId = field.id().toString();
+    const fieldName = field.name().toString();
+    if (!fieldByKey.has(fieldId)) {
+      fieldByKey.set(fieldId, field);
+    }
+    if (!fieldByKey.has(fieldName)) {
+      fieldByKey.set(fieldName, field);
+    }
+  }
+
+  const defaultValueVisitor = FieldDefaultValueVisitor.create();
+  const schemaVisitor = FieldCellValueSchemaVisitor.create();
+  const editableFields = table.getEditableFields().map((field) => {
+    const defaultValueResult = field.accept(defaultValueVisitor);
+    const defaultValue =
+      defaultValueResult.isOk() && defaultValueResult.value !== undefined
+        ? defaultValueResult.value
+        : undefined;
+    const schemaResult = field.accept(schemaVisitor);
+
+    return {
+      field,
+      fieldId: field.id().toString(),
+      hasDefaultValue: defaultValue !== undefined,
+      defaultValue,
+      resolveDefaultValue:
+        options?.freshDefaults && field.type().equals(FieldType.date())
+          ? () => {
+              const result = field.accept(defaultValueVisitor);
+              return result.isOk() && result.value !== undefined ? result.value : undefined;
+            }
+          : undefined,
+      isUserField: field.type().equals(FieldType.user()),
+      cellValueSchema: schemaResult.isOk() ? schemaResult.value : undefined,
+    } satisfies CreateRecordEditableFieldContext;
+  });
+
+  return {
+    fieldByKey,
+    editableFields,
+  };
+}
+
+/**
+ * Build a record with spec, supporting field keys that can be either fieldId or fieldName.
+ *
+ * @param fieldValues - Map where keys can be fieldId or fieldName
+ * @param recordId - Optional record ID
+ * @param options - Optional options (typecast)
+ * @returns RecordCreateResult containing the record, mutation spec, and fieldKeyMapping
+ */
+export function buildRecordWithSpec(
+  this: Table,
+  fieldValues: ReadonlyMap<string, unknown>,
+  recordId?: RecordId,
+  options?: {
+    typecast?: boolean;
+    source?: RecordCreateSource;
+    buildContext?: CreateRecordBuildContext;
+    valuesAreValidated?: boolean;
+    emitRecordCreatedEvent?: boolean;
+  }
+): Result<RecordCreateResult, DomainError> {
+  const table = this; // NOSONAR typescript:S7740 -- generator functions cannot be arrow functions, so `this` must be captured
+  const {
+    typecast = false,
+    source = { type: 'user' },
+    buildContext,
+    valuesAreValidated = false,
+    emitRecordCreatedEvent = true,
+  } = options ?? {};
+  return safeTry<RecordCreateResult, DomainError>(function* () {
+    // 1. Generate a new record ID
+    const resolvedRecordId = recordId ?? (yield* RecordId.generate());
+
+    // 2. Resolve field keys to actual fields and build fieldKeyMapping
+    // fieldKeyMapping: Map<fieldId, originalKey>
+    const fieldKeyMapping = new Map<string, string>();
+    const resolvedFieldValues = new Map<string, unknown>();
+
+    for (const [key, value] of fieldValues.entries()) {
+      const cachedField = buildContext?.fieldByKey.get(key);
+      const fieldResult = cachedField
+        ? ok(cachedField)
+        : table.getField(FieldByKeySpec.create(key));
+
+      if (fieldResult.isErr()) {
+        return err(
+          domainError.notFound({
+            code: 'field.not_found',
+            message: `Field not found: ${key}`,
+          })
+        );
+      }
+
+      const field = fieldResult.value;
+      const fieldIdStr = field.id().toString();
+      resolvedFieldValues.set(fieldIdStr, value);
+      fieldKeyMapping.set(fieldIdStr, key);
+    }
+
+    // 3. Build mutation specs from resolved field values with default value support
+    const builder = RecordMutationSpecBuilder.create().withTypecast(typecast);
+    const fields = buildContext?.editableFields ?? createRecordBuildContext(table).editableFields;
+
+    for (const field of fields) {
+      const fieldIdStr = field.fieldId;
+      const providedValue = resolvedFieldValues.get(fieldIdStr);
+
+      // If value was explicitly provided (including null), use it
+      if (resolvedFieldValues.has(fieldIdStr)) {
+        if (valuesAreValidated) {
+          builder.setValidated(field.field, providedValue);
+        } else {
+          builder.setWithSchema(field.field, providedValue, field.cellValueSchema);
+        }
+      } else if (field.hasDefaultValue) {
+        const defaultValue = field.resolveDefaultValue
+          ? field.resolveDefaultValue()
+          : field.defaultValue;
+        if (field.isUserField && !typecast) {
+          builder.withTypecast(true);
+          builder.set(field.field, defaultValue);
+          builder.withTypecast(typecast);
+        } else {
+          builder.setWithSchema(field.field, defaultValue, field.cellValueSchema);
+        }
+      } else if (!valuesAreValidated && field.field.notNull().toBoolean()) {
+        // v1 parity (T6520): reject missing notNull fields before any SQL runs.
+        // Relying on the database constraint means the INSERT has already
+        // consumed the auto-number sequence when it fails, leaving gaps —
+        // Postgres sequences do not roll back. Pre-validated internal flows
+        // (restore/duplicate) are exempt so legacy rows stay restorable.
+        return err(
+          domainError.validation({
+            code: 'validation.field.not_null',
+            message: `Cannot create record: field "${field.field.name().toString()}" violates not-null constraint`,
+            details: {
+              fieldId: field.fieldId,
+              fieldName: field.field.name().toString(),
+              fieldType: field.field.type().toString(),
+            },
+            localization: {
+              i18nKey: sdkErrorI18nKeys.custom.recordFieldValueNotNull,
+              context: { fieldName: field.field.name().toString() },
+            },
+          })
+        );
+      }
+    }
+
+    // 4. Check for validation errors before proceeding
+    if (builder.hasErrors()) {
+      return err(builder.getErrors()[0]!);
+    }
+
+    // 5. Materialize all immediately known cells once. The mutation spec remains unchanged for
+    // persistence visitors and deferred link/user resolution.
+    let mutateSpec: ICellValueSpec | null = null;
+    let record: TableRecord;
+    if (builder.hasSpecs()) {
+      mutateSpec = yield* builder.build();
+      record = yield* materializeRecordSpec({
+        id: resolvedRecordId,
+        tableId: table.id(),
+        spec: mutateSpec,
+      });
+    } else {
+      record = yield* TableRecord.create({
+        id: resolvedRecordId,
+        tableId: table.id(),
+        fieldValues: [],
+      });
+    }
+
+    if (emitRecordCreatedEvent) {
+      table.addDomainEvent(
+        RecordCreated.create({
+          tableId: table.id(),
+          baseId: table.baseId(),
+          recordId: record.id(),
+          fieldValues: recordToFieldValues(record),
+          source,
+        })
+      );
+    }
+
+    return ok(RecordCreateResult.create(record, mutateSpec, fieldKeyMapping));
+  });
+}
+
+export function buildRecord(
+  this: Table,
+  fieldValues: ReadonlyMap<string, unknown>,
+  recordId?: RecordId,
+  options?: {
+    typecast?: boolean;
+    source?: RecordCreateSource;
+    emitRecordCreatedEvent?: boolean;
+    buildContext?: CreateRecordBuildContext;
+  }
+): Result<TableRecord, DomainError> {
+  return buildRecordWithSpec
+    .call(this, fieldValues, recordId, options)
+    .map((result) => result.record);
+}

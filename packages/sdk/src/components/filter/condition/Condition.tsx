@@ -1,98 +1,43 @@
-import type { IFilterItem } from '@teable/core';
+import { isConditionGroup } from '../types';
+import type { IFilterPath, IBaseFilterItem, IBaseConditionProps } from '../types';
+import { ConditionItem, ConditionGroup } from './condition-item';
 
-import { Trash2 } from '@teable/icons';
-import { Button } from '@teable/ui-lib';
-
-import { isEqual } from 'lodash';
-import { useContext, useMemo } from 'react';
-import { useFields } from '../../../hooks';
-
-import { FilterContext } from '../context';
-import type { IConditionProps } from '../types';
-import { Conjunction } from './Conjunction';
-import { FieldSelect } from './FieldSelect';
-import { FieldValue } from './FieldValue';
-import { OperatorSelect } from './OperatorSelect';
-
-function Condition(props: IConditionProps) {
-  const { index, filter, path, conjunction } = props;
-  const { fieldId, value, operator } = filter;
-  const context = useContext(FilterContext);
-  const { setFilters, deleteCondition } = context;
-  const fields = useFields();
-  const fieldMap = useMemo(() => {
-    const map: Record<string, string> = {};
-    fields.forEach((field) => {
-      const key = field.id;
-      const value = field.type;
-      map[key] = value;
-    });
-    return map;
-  }, [fields]);
-
-  const fieldTypeHandler = (newFieldId: string | null) => {
-    const newFieldType = newFieldId ? fieldMap[newFieldId] : null;
-    const currentFieldType = fieldMap[fieldId] || null;
-    const newFieldPath = [...path, 'fieldId'];
-    const newValuePath = [...path, 'value'];
-    // different type should reset value to null.
-    if (newFieldType !== currentFieldType) {
-      setFilters(newValuePath, null);
-    }
-    setFilters(newFieldPath, newFieldId);
-  };
-  const operatorHandler = (value: string | null) => {
-    if (operator !== value) {
-      const newPath = [...path, 'operator'];
-      setFilters(newPath, value);
-    }
-  };
-  const fieldValueHandler = (newValue: IFilterItem['value']) => {
-    if (isEqual(value, newValue)) {
-      return;
-    }
-
-    let mergedValue = null;
-
-    // empty array and string should be null!
-    if (newValue !== '' && !(Array.isArray(newValue) && !newValue.length)) {
-      mergedValue = newValue;
-    }
-
-    const newPath = [...path, 'value'];
-    setFilters(newPath, mergedValue);
-  };
-
-  return (
-    <div className="my-1 flex items-center px-1">
-      <Conjunction
-        index={index}
-        value={conjunction}
-        onSelect={(value) => {
-          const newPath = [...path];
-          newPath.splice(-2, 2, 'conjunction');
-          setFilters(newPath, value);
-        }}
-      ></Conjunction>
-
-      <section className="flex items-center pl-1">
-        <FieldSelect fieldId={fieldId} onSelect={fieldTypeHandler} />
-
-        <OperatorSelect value={operator} fieldId={fieldId} onSelect={operatorHandler} />
-
-        <FieldValue filter={filter} onSelect={fieldValueHandler}></FieldValue>
-
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => deleteCondition(path, index)}
-          className="ml-1"
-        >
-          <Trash2 className="size-4"></Trash2>
-        </Button>
-      </section>
-    </div>
-  );
+interface IConditionProps extends IBaseConditionProps {
+  path: IFilterPath;
+  value: IBaseFilterItem;
+  conjunction: 'or' | 'and';
 }
 
-export { Condition };
+export const Condition = (props: IConditionProps) => {
+  const { index, path, value, depth } = props;
+
+  return (
+    // `min-w-0` lets this shrink below the min-content width of the condition
+    // tree inside it, instead of pushing the panel wider than the drawer.
+    <div className="flex w-full min-w-0 items-start">
+      {isConditionGroup(value) ? (
+        <ConditionGroup
+          path={[...path]}
+          index={index}
+          depth={depth + 1}
+          conjunction={value.conjunction}
+        >
+          {value.children.map((item, idx) => {
+            return (
+              <Condition
+                key={idx}
+                index={idx}
+                value={item}
+                path={[...path, 'children', idx]}
+                depth={depth + 1}
+                conjunction={value.conjunction}
+              />
+            );
+          })}
+        </ConditionGroup>
+      ) : (
+        <ConditionItem value={value} depth={depth + 1} index={index} path={[...path]} />
+      )}
+    </div>
+  );
+};

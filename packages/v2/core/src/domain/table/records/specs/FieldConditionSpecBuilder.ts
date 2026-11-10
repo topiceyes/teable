@@ -1,0 +1,425 @@
+import { err, ok } from 'neverthrow';
+import type { Result } from 'neverthrow';
+import type { z } from 'zod';
+
+import { domainError, type DomainError } from '../../../shared/DomainError';
+import type { Field } from '../../fields/Field';
+import { FieldType } from '../../fields/FieldType';
+import { CellValueType } from '../../fields/types/CellValueType';
+import type { ConditionalLookupField } from '../../fields/types/ConditionalLookupField';
+import type { LookupField } from '../../fields/types/LookupField';
+import type { SingleLineTextField } from '../../fields/types/SingleLineTextField';
+import {
+  isFieldReferenceFilterValue,
+  remapUserFilterOperator,
+} from '../../fields/user-filter-operator-remap';
+import {
+  FieldValueTypeVisitor,
+  type FieldValueType,
+} from '../../fields/visitors/FieldValueTypeVisitor';
+import { AttachmentConditionSpec } from './AttachmentConditionSpec';
+import { ButtonConditionSpec } from './ButtonConditionSpec';
+import { CheckboxConditionSpec } from './CheckboxConditionSpec';
+import { ConditionalLookupConditionSpec } from './ConditionalLookupConditionSpec';
+import { ConditionalRollupConditionSpec } from './ConditionalRollupConditionSpec';
+import { DateConditionSpec } from './DateConditionSpec';
+import { FormulaConditionSpec } from './FormulaConditionSpec';
+import type { ITableRecordConditionSpecVisitor } from './ITableRecordConditionSpecVisitor';
+import { LinkConditionSpec } from './LinkConditionSpec';
+import { LongTextConditionSpec } from './LongTextConditionSpec';
+import { MultipleSelectConditionSpec } from './MultipleSelectConditionSpec';
+import { NumberConditionSpec } from './NumberConditionSpec';
+import { RatingConditionSpec } from './RatingConditionSpec';
+import type { RecordConditionOperator } from './RecordConditionOperators';
+import {
+  attachmentConditionOperatorSchema,
+  booleanConditionOperatorSchema,
+  dateConditionOperatorSchema,
+  getValidRecordConditionOperators,
+  linkConditionOperatorSchema,
+  multipleSelectConditionOperatorSchema,
+  numberConditionOperatorSchema,
+  recordConditionOperatorSchema,
+  recordConditionOperatorsExpectingArray,
+  recordConditionOperatorsExpectingNull,
+  singleSelectConditionOperatorSchema,
+  textConditionOperatorSchema,
+  userConditionOperatorSchema,
+} from './RecordConditionOperators';
+import type { RecordConditionSpec } from './RecordConditionSpec';
+import {
+  isRecordConditionFieldReferenceValue,
+  isRecordConditionLiteralListValue,
+  isRecordConditionLiteralValue,
+  RecordConditionLiteralListValue,
+  RecordConditionLiteralValue,
+  type RecordConditionValue,
+} from './RecordConditionValues';
+import { RollupConditionSpec } from './RollupConditionSpec';
+import { SingleLineTextConditionSpec } from './SingleLineTextConditionSpec';
+import { SingleSelectConditionSpec } from './SingleSelectConditionSpec';
+import { UserConditionSpec } from './UserConditionSpec';
+
+export type FieldConditionSpecInput = {
+  operator: RecordConditionOperator;
+  value?: RecordConditionValue;
+};
+
+const adaptStaleUserConditionInput = (
+  field: Field,
+  isMultiple: boolean,
+  input: FieldConditionSpecInput
+): FieldConditionSpecInput | undefined => {
+  const type = field.type();
+  if (
+    !type.equals(FieldType.user()) &&
+    !type.equals(FieldType.createdBy()) &&
+    !type.equals(FieldType.lastModifiedBy())
+  ) {
+    return undefined;
+  }
+
+  let rawValue: unknown;
+  if (!input.value) {
+    rawValue = undefined;
+  } else if (isRecordConditionLiteralListValue(input.value)) {
+    rawValue = [...input.value.toValues()];
+  } else if (isRecordConditionLiteralValue(input.value)) {
+    rawValue = input.value.toValue();
+  } else if (isRecordConditionFieldReferenceValue(input.value)) {
+    rawValue = { type: 'field', fieldId: input.value.field().id().toString() };
+  } else {
+    return undefined;
+  }
+
+  const remapped = remapUserFilterOperator(
+    input.operator,
+    rawValue,
+    isMultiple ? 'singleToMultiple' : 'multipleToSingle'
+  );
+  if (!remapped || !remapped.changed) {
+    return undefined;
+  }
+
+  const parsedOperator = recordConditionOperatorSchema.safeParse(remapped.operator);
+  if (!parsedOperator.success) {
+    return undefined;
+  }
+
+  if (remapped.value == null) {
+    return { operator: parsedOperator.data };
+  }
+  if (
+    isRecordConditionFieldReferenceValue(input.value) &&
+    isFieldReferenceFilterValue(remapped.value)
+  ) {
+    return { operator: parsedOperator.data, value: input.value };
+  }
+  const nextValue = Array.isArray(remapped.value)
+    ? RecordConditionLiteralListValue.create(remapped.value)
+    : RecordConditionLiteralValue.create(remapped.value);
+  if (nextValue.isErr()) {
+    return undefined;
+  }
+  return { operator: parsedOperator.data, value: nextValue.value };
+};
+
+const parseOperator = <T>(
+  schema: z.ZodType<T>,
+  value: RecordConditionOperator,
+  message: string
+): Result<T, DomainError> => {
+  const parsed = schema.safeParse(value);
+  if (!parsed.success) return err(domainError.unexpected({ message: message }));
+  return ok(parsed.data);
+};
+
+export type FieldConditionSpecInputResolution =
+  | {
+      readonly accepted: true;
+      readonly input: FieldConditionSpecInput;
+      readonly operatorField: Field;
+      readonly valueType: FieldValueType;
+    }
+  | {
+      readonly accepted: false;
+      readonly operator: RecordConditionOperator;
+      readonly supportedOperators: ReadonlyArray<RecordConditionOperator>;
+    };
+
+/**
+ * Resolve the operator an input is actually evaluated with, including the V1 compatibility
+ * rewrites `create` applies (checkbox null folding and stale user-operator adaptation).
+ * Shared so callers can locate an unsupported operator without duplicating the operator matrix.
+ */
+export const resolveFieldConditionSpecInput = (
+  field: Field,
+  input: FieldConditionSpecInput
+): Result<FieldConditionSpecInputResolution, DomainError> => {
+  const valueTypeResult = field.accept(new FieldValueTypeVisitor());
+  if (valueTypeResult.isErr()) return err(valueTypeResult.error);
+  const valueType = valueTypeResult.value;
+
+  const fieldType = field.type();
+  let operatorField: Field = field;
+
+  if (fieldType.equals(FieldType.lookup())) {
+    const innerResult = (field as LookupField).innerField();
+    if (innerResult.isErr()) return err(innerResult.error);
+    operatorField = innerResult.value;
+  }
+
+  if (fieldType.equals(FieldType.conditionalLookup())) {
+    const innerResult = (field as ConditionalLookupField).innerField();
+    // If the inner field is not yet resolved (e.g. during field creation), fall back to the
+    // outer field for operator validation.
+    if (innerResult.isOk()) operatorField = innerResult.value;
+  }
+
+  // V1 compatibility: checkbox filters store unchecked as is+null and checked as isNot+null.
+  // Other fields use the same shape for incomplete UI filters, which callers should sanitize away.
+  if (input.value == null && (input.operator === 'is' || input.operator === 'isNot')) {
+    if (valueType.cellValueType.equals(CellValueType.boolean())) {
+      input = {
+        ...input,
+        operator: 'is',
+        value:
+          input.operator === 'is'
+            ? RecordConditionLiteralValue.create(false)._unsafeUnwrap()
+            : RecordConditionLiteralValue.create(true)._unsafeUnwrap(),
+      };
+    }
+  }
+
+  const supportedOperators = getValidRecordConditionOperators(operatorField, valueType);
+  if (supportedOperators.includes(input.operator)) {
+    return ok({ accepted: true, input, operatorField, valueType });
+  }
+
+  const adapted = adaptStaleUserConditionInput(
+    operatorField,
+    valueType.isMultipleCellValue.isMultiple(),
+    input
+  );
+  if (!adapted || !supportedOperators.includes(adapted.operator)) {
+    return ok({
+      accepted: false,
+      operator: adapted?.operator ?? input.operator,
+      supportedOperators,
+    });
+  }
+  return ok({ accepted: true, input: adapted, operatorField, valueType });
+};
+
+export class FieldConditionSpecBuilder {
+  private constructor(private readonly field: Field) {}
+
+  static create(field: Field): FieldConditionSpecBuilder {
+    return new FieldConditionSpecBuilder(field);
+  }
+
+  create(
+    input: FieldConditionSpecInput
+  ): Result<RecordConditionSpec<ITableRecordConditionSpecVisitor>, DomainError> {
+    const resolution = resolveFieldConditionSpecInput(this.field, input);
+    if (resolution.isErr()) return err(resolution.error);
+    const resolved = resolution.value;
+    if (!resolved.accepted) {
+      return err(
+        domainError.validation({
+          code: 'field.condition.invalid_operator_for_field',
+          message: `Invalid record condition operator for field ${this.field
+            .id()
+            .toString()}: "${resolved.operator}"`,
+          details: {
+            fieldId: this.field.id().toString(),
+            operator: resolved.operator,
+            validOperators: resolved.supportedOperators,
+          },
+          localization: { i18nKey: 'httpErrors.view.filterInvalidOperator' },
+        })
+      );
+    }
+    input = resolved.input;
+    const valueType = resolved.valueType;
+    const fieldType = this.field.type();
+    // Lookups route spec creation through their inner field, while conditional lookups keep
+    // their own type for spec routing even though the inner field owns operator validation.
+    const effectiveFieldType = fieldType.equals(FieldType.lookup())
+      ? resolved.operatorField.type()
+      : fieldType;
+
+    if (recordConditionOperatorsExpectingNull.includes(input.operator)) {
+      if (input.value)
+        return err(domainError.unexpected({ message: 'Record condition expects null value' }));
+    } else {
+      if (!input.value)
+        return err(domainError.unexpected({ message: 'Record condition requires a value' }));
+    }
+
+    if (recordConditionOperatorsExpectingArray.includes(input.operator)) {
+      if (input.value && !isRecordConditionLiteralListValue(input.value)) {
+        if (!isRecordConditionFieldReferenceValue(input.value)) {
+          return err(domainError.unexpected({ message: 'Record condition requires list value' }));
+        }
+      }
+    } else if (input.value && isRecordConditionLiteralListValue(input.value)) {
+      return err(domainError.validation({ message: 'Record condition does not allow list value' }));
+    }
+
+    const specField = this.field;
+
+    if (effectiveFieldType.equals(FieldType.singleLineText())) {
+      const textField = specField as unknown as SingleLineTextField;
+      return parseOperator(
+        textConditionOperatorSchema,
+        input.operator,
+        'Invalid operator for singleLineText'
+      ).map((operator) => SingleLineTextConditionSpec.create(textField, operator, input.value));
+    }
+
+    if (effectiveFieldType.equals(FieldType.longText())) {
+      return parseOperator(
+        textConditionOperatorSchema,
+        input.operator,
+        'Invalid operator for longText'
+      ).map((operator) => LongTextConditionSpec.create(specField, operator, input.value));
+    }
+
+    if (effectiveFieldType.equals(FieldType.button())) {
+      return parseOperator(
+        textConditionOperatorSchema,
+        input.operator,
+        'Invalid operator for button'
+      ).map((operator) => ButtonConditionSpec.create(specField, operator, input.value));
+    }
+
+    if (effectiveFieldType.equals(FieldType.number())) {
+      return parseOperator(
+        numberConditionOperatorSchema,
+        input.operator,
+        'Invalid operator for number'
+      ).map((operator) => NumberConditionSpec.create(specField, operator, input.value));
+    }
+
+    if (effectiveFieldType.equals(FieldType.autoNumber())) {
+      return parseOperator(
+        numberConditionOperatorSchema,
+        input.operator,
+        'Invalid operator for autoNumber'
+      ).map((operator) => NumberConditionSpec.create(specField, operator, input.value));
+    }
+
+    if (effectiveFieldType.equals(FieldType.rating())) {
+      return parseOperator(
+        numberConditionOperatorSchema,
+        input.operator,
+        'Invalid operator for rating'
+      ).map((operator) => RatingConditionSpec.create(specField, operator, input.value));
+    }
+
+    if (effectiveFieldType.equals(FieldType.checkbox())) {
+      return parseOperator(
+        booleanConditionOperatorSchema,
+        input.operator,
+        'Invalid operator for checkbox'
+      ).map((operator) => CheckboxConditionSpec.create(specField, operator, input.value));
+    }
+
+    if (effectiveFieldType.equals(FieldType.date())) {
+      return parseOperator(
+        dateConditionOperatorSchema,
+        input.operator,
+        'Invalid operator for date'
+      ).map((operator) => DateConditionSpec.create(specField, operator, input.value));
+    }
+
+    if (
+      effectiveFieldType.equals(FieldType.createdTime()) ||
+      effectiveFieldType.equals(FieldType.lastModifiedTime())
+    ) {
+      return parseOperator(
+        dateConditionOperatorSchema,
+        input.operator,
+        'Invalid operator for system date field'
+      ).map((operator) => DateConditionSpec.create(specField, operator, input.value));
+    }
+
+    if (effectiveFieldType.equals(FieldType.singleSelect())) {
+      const isMultipleCellValue = valueType.isMultipleCellValue.isMultiple();
+      if (isMultipleCellValue) {
+        return parseOperator(
+          multipleSelectConditionOperatorSchema,
+          input.operator,
+          'Invalid operator for singleSelect'
+        ).map((operator) => MultipleSelectConditionSpec.create(specField, operator, input.value));
+      }
+      return parseOperator(
+        singleSelectConditionOperatorSchema,
+        input.operator,
+        'Invalid operator for singleSelect'
+      ).map((operator) => SingleSelectConditionSpec.create(specField, operator, input.value));
+    }
+
+    if (effectiveFieldType.equals(FieldType.multipleSelect())) {
+      return parseOperator(
+        multipleSelectConditionOperatorSchema,
+        input.operator,
+        'Invalid operator for multipleSelect'
+      ).map((operator) => MultipleSelectConditionSpec.create(specField, operator, input.value));
+    }
+
+    if (effectiveFieldType.equals(FieldType.attachment())) {
+      return parseOperator(
+        attachmentConditionOperatorSchema,
+        input.operator,
+        'Invalid operator for attachment'
+      ).map((operator) => AttachmentConditionSpec.create(specField, operator, input.value));
+    }
+
+    if (effectiveFieldType.equals(FieldType.user())) {
+      return parseOperator(
+        userConditionOperatorSchema,
+        input.operator,
+        'Invalid operator for user'
+      ).map((operator) => UserConditionSpec.create(specField, operator, input.value));
+    }
+
+    if (
+      effectiveFieldType.equals(FieldType.createdBy()) ||
+      effectiveFieldType.equals(FieldType.lastModifiedBy())
+    ) {
+      return parseOperator(
+        userConditionOperatorSchema,
+        input.operator,
+        'Invalid operator for system user field'
+      ).map((operator) => UserConditionSpec.create(specField, operator, input.value));
+    }
+
+    if (effectiveFieldType.equals(FieldType.link())) {
+      return parseOperator(
+        linkConditionOperatorSchema,
+        input.operator,
+        'Invalid operator for link'
+      ).map((operator) => LinkConditionSpec.create(specField, operator, input.value));
+    }
+
+    if (effectiveFieldType.equals(FieldType.formula())) {
+      return ok(FormulaConditionSpec.create(specField, input.operator, input.value));
+    }
+
+    if (effectiveFieldType.equals(FieldType.rollup())) {
+      return ok(RollupConditionSpec.create(specField, input.operator, input.value));
+    }
+
+    if (effectiveFieldType.equals(FieldType.conditionalRollup())) {
+      return ok(ConditionalRollupConditionSpec.create(specField, input.operator, input.value));
+    }
+
+    if (effectiveFieldType.equals(FieldType.conditionalLookup())) {
+      return ok(ConditionalLookupConditionSpec.create(specField, input.operator, input.value));
+    }
+
+    return err(domainError.validation({ message: 'Unsupported record condition field' }));
+  }
+}

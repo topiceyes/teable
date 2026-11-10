@@ -1,19 +1,35 @@
 import { axios } from '../axios';
 import { registerRoute } from '../utils';
 import { z } from '../zod';
+import { accessTokenScopesSchema } from './scopes';
 
 export const CREATE_ACCESS_TOKEN = '/access-token';
+
+const isValidDateString = (dateString: string) => {
+  const date = new Date(dateString);
+  return !Number.isNaN(date.getTime());
+};
 
 export const createAccessTokenRoSchema = z.object({
   name: z.string().min(1),
   description: z.string().optional(),
-  scopes: z.array(z.string()).min(1),
+  scopes: accessTokenScopesSchema,
   spaceIds: z.array(z.string()).min(1).nullable().optional(),
   baseIds: z.array(z.string()).min(1).nullable().optional(),
-  expiredTime: z.string(),
+  hasFullAccess: z.boolean().optional(),
+  expiredTime: z
+    .string()
+    .refine(isValidDateString, {
+      message: 'expiredTime: Invalid Date ',
+    })
+    .meta({ type: 'string', example: '2024-03-25' }),
 });
 
-export type CreateAccessTokenRo = z.infer<typeof createAccessTokenRoSchema>;
+type CreateAccessTokenRoSchema = z.infer<typeof createAccessTokenRoSchema>;
+
+export type CreateAccessTokenRo = Omit<CreateAccessTokenRoSchema, 'scopes'> & {
+  scopes: string[];
+};
 
 export const createAccessTokenVoSchema = z.object({
   id: z.string(),
@@ -22,6 +38,7 @@ export const createAccessTokenVoSchema = z.object({
   scopes: z.array(z.string()),
   spaceIds: z.array(z.string()).nullable().optional(),
   baseIds: z.array(z.string()).nullable().optional(),
+  hasFullAccess: z.boolean().optional(),
   expiredTime: z.string(),
   token: z.string(),
   createdTime: z.string(),

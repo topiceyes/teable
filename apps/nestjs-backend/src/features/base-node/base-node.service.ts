@@ -1,0 +1,1378 @@
+/* eslint-disable sonarjs/no-duplicate-string */
+import { Injectable, Logger } from '@nestjs/common';
+import { generateBaseNodeId, HttpErrorCode } from '@teable/core';
+import { PrismaService, ProvisionState } from '@teable/db-main-prisma';
+import type {
+  IMoveBaseNodeRo,
+  IBaseNodeVo,
+  IBaseNodeTreeVo,
+  ICreateBaseNodeRo,
+  IDuplicateBaseNodeRo,
+  IDuplicateTableRo,
+  ICreateDashboardRo,
+  ICreateFolderNodeRo,
+  IDuplicateDashboardRo,
+  IUpdateBaseNodeRo,
+  IBaseNodeResourceMeta,
+  IBaseNodeResourceMetaWithId,
+  ICreateTableRo,
+  IBaseNodePresenceCreatePayload,
+  IBaseNodePresenceDeletePayload,
+  IBaseNodePresenceUpdatePayload,
+  IBaseNodePresenceFlushPayload,
+  IBaseNodeTableResourceMeta,
+  IUserInfoVo,
+  V2Feature,
+} from '@teable/openapi';
+import { BaseNodeResourceType, ShortLinkType } from '@teable/openapi';
+import { Knex } from 'knex';
+import { isString, keyBy, omit } from 'lodash';
+import { InjectModel } from 'nest-knexjs';
+import { ClsService } from 'nestjs-cls';
+import type { LocalPresence } from 'sharedb/lib/client';
+import { type IThresholdConfig, ThresholdConfig } from '../../configs/threshold.config';
+import { CustomHttpException } from '../../custom.exception';
+import {
+  generateBaseNodeListCacheKey,
+  generateBaseShareListCacheKey,
+} from '../../performance-cache/generate-keys';
+import { PerformanceCacheService } from '../../performance-cache/service';
+import type { IPerformanceCacheStore } from '../../performance-cache/types';
+import { ShareDbService } from '../../share-db/share-db.service';
+import type { IClsStore } from '../../types/cls';
+import { updateOrder } from '../../utils/update-order';
+import { getPublicFullStorageUrl } from '../attachments/plugins/utils';
+import type { IV2Decision } from '../canary/canary.service';
+import { CanaryService } from '../canary/canary.service';
+import { DashboardService } from '../dashboard/dashboard.service';
+import { ShortLinkService } from '../short-link/short-link.service';
+import { TableOpenApiV2Service } from '../table/open-api/table-open-api-v2.service';
+import { TableOpenApiService } from '../table/open-api/table-open-api.service';
+import { prepareCreateTableRo } from '../table/open-api/table.pipe.helper';
+import { TableDuplicateService } from '../table/table-duplicate.service';
+import { buildBaseNodeUrl } from './base-node-url.helper';
+import { BaseNodeFolderService } from './folder/base-node-folder.service';
+import { buildBatchUpdateSql, presenceHandler } from './helper';
+
+type IBaseNodeEntry = {
+  id: string;
+  baseId: string;
+  parentId: string | null;
+  resourceType: string;
+  resourceId: string;
+  order: number;
+  createdBy?: string | null;
+  createdTime?: Date | string | null;
+  lastModifiedBy?: string | null;
+  lastModifiedTime?: Date | string | null;
+  children: { id: string; order: number }[];
+  parent: { id: string } | null;
+};
+
+type IBaseNodeResourceInput = Omit<
+  IBaseNodeResourceMeta,
+  'createdByUser' | 'lastModifiedByUser' | 'createdTime' | 'lastModifiedTime'
+> & {
+  id: string;
+  type?: BaseNodeResourceType;
+  createdBy?: string | null;
+  createdTime?: Date | string | null;
+  lastModifiedBy?: string | null;
+  lastModifiedTime?: Date | string | null;
+};
+
+@Injectable()
+export class BaseNodeService {
+  private readonly logger = new Logger(BaseNodeService.name);
+  constructor(
+    private readonly performanceCacheService: PerformanceCacheService<IPerformanceCacheStore>,
+    private readonly shareDbService: ShareDbService,
+    private readonly prismaService: PrismaService,
+    @InjectModel('CUSTOM_KNEX') private readonly knex: Knex,
+    @ThresholdConfig() private readonly thresholdConfig: IThresholdConfig,
+    private readonly cls: ClsService<IClsStore & { ignoreBaseNodeListener?: boolean }>,
+    private readonly baseNodeFolderService: BaseNodeFolderService,
+    private readonly canaryService: CanaryService,
+    private readonly tableOpenApiService: TableOpenApiService,
+    private readonly tableOpenApiV2Service: TableOpenApiV2Service,
+    private readonly tableDuplicateService: TableDuplicateService,
+    private readonly dashboardService: DashboardService,
+    private readonly shortLinkService: ShortLinkService
+  ) {}
+
+  private get userId() {
+    return this.cls.get('user.id');
+  }
+
+  /**
+   * max depth is maxFolderDepth + 1
+   */
+  private get maxFolderDepth() {
+    return this.thresholdConfig.baseNodeMaxFolderDepth;
+  }
+
+  private setIgnoreBaseNodeListener() {
+    this.cls.set('ignoreBaseNodeListener', true);
+  }
+
+  /**
+   * Delete all share records for a node and invalidate cache
+   */
+  private async deleteNodeShares(baseId: string, nodeId: string): Promise<void> {
+    const shares = await this.prismaService.baseShare.findMany({
+      where: { baseId, nodeId },
+      select: { shareId: true },
+    });
+
+    // Unconditional so a share committed between findMany and here is still
+    // removed (its short links, if any, stay unmarked — harmless)
+    const deleted = await this.prismaService.baseShare.deleteMany({
+      where: { baseId, nodeId },
+    });
+
+    // The shareIds are gone for good, so their short links are dead too
+    for (const share of shares) {
+      await this.shortLinkService.markDeletedByResource(ShortLinkType.BaseShare, share.shareId);
+    }
+    if (deleted.count > 0) {
+      await this.performanceCacheService.del(generateBaseShareListCacheKey(baseId));
+    }
+  }
+
+  private getSelect() {
+    return {
+      id: true,
+      baseId: true,
+      parentId: true,
+      resourceType: true,
+      resourceId: true,
+      order: true,
+      createdBy: true,
+      createdTime: true,
+      lastModifiedBy: true,
+      lastModifiedTime: true,
+      children: {
+        select: { id: true, order: true },
+        orderBy: { order: 'asc' as const },
+      },
+      parent: {
+        select: { id: true },
+      },
+    };
+  }
+
+  async getTableV2Decision(
+    baseId: string,
+    nodeId: string,
+    feature: V2Feature
+  ): Promise<IV2Decision | undefined> {
+    const node = await this.prismaService.baseNode.findFirst({
+      where: { baseId, id: nodeId },
+      select: { resourceType: true },
+    });
+
+    if (node?.resourceType !== BaseNodeResourceType.Table) {
+      return undefined;
+    }
+
+    const base = await this.prismaService.txClient().base.findUnique({
+      where: { id: baseId, deletedTime: null },
+      select: { spaceId: true, v2Enabled: true },
+    });
+
+    return this.canaryService.shouldUseV2ForBaseWithReason(base, feature);
+  }
+
+  async getDeleteTableV2Decision(baseId: string, nodeId: string): Promise<IV2Decision | undefined> {
+    return this.getTableV2Decision(baseId, nodeId, 'deleteTable');
+  }
+
+  async getCreateTableV2Decision(baseId: string): Promise<IV2Decision | undefined> {
+    const base = await this.prismaService.txClient().base.findUnique({
+      where: { id: baseId, deletedTime: null },
+      select: { spaceId: true, v2Enabled: true },
+    });
+
+    return this.canaryService.shouldUseV2ForBaseWithReason(base, 'createTable');
+  }
+
+  /**
+   * Resolve a folder reference — its node id or its folder resource id — to
+   * the node id, asserting it exists in this base and is a folder.
+   */
+  async resolveFolderNodeId(baseId: string, folderId: string): Promise<string> {
+    const node = await this.prismaService.baseNode.findFirst({
+      where: { baseId, OR: [{ id: folderId }, { resourceId: folderId }] },
+      select: { id: true, resourceType: true },
+    });
+    if (!node) {
+      throw new CustomHttpException(`Parent ${folderId} not found`, HttpErrorCode.NOT_FOUND, {
+        localization: {
+          i18nKey: 'httpErrors.baseNode.parentNotFound',
+        },
+      });
+    }
+    if (node.resourceType !== BaseNodeResourceType.Folder) {
+      throw new CustomHttpException(
+        `Parent ${folderId} is not a folder`,
+        HttpErrorCode.VALIDATION_ERROR,
+        {
+          localization: {
+            i18nKey: 'httpErrors.baseNode.parentIsNotFolder',
+          },
+        }
+      );
+    }
+    return node.id;
+  }
+
+  /**
+   * Place a resource created outside the base-node flow under a folder, or at
+   * root when parentId is null; callers validate the folder first. Upserts
+   * because node-list reconciliation may have already created the row.
+   */
+  async attachResourceToParent(input: {
+    baseId: string;
+    parentId: string | null;
+    resourceType: BaseNodeResourceType;
+    resourceId: string;
+  }): Promise<void> {
+    const { baseId, parentId, resourceType, resourceId } = input;
+    const userId = this.userId;
+    const placement = { order: (await this.getMaxOrder(baseId)) + 1, parentId };
+    await this.prismaService.baseNode.upsert({
+      where: {
+        // eslint-disable-next-line @typescript-eslint/naming-convention -- prisma composite unique key
+        baseId_resourceType_resourceId: { baseId, resourceType, resourceId },
+      },
+      create: {
+        id: generateBaseNodeId(),
+        baseId,
+        resourceType,
+        resourceId,
+        ...placement,
+        createdBy: userId,
+      },
+      update: {
+        ...placement,
+        lastModifiedBy: userId,
+      },
+    });
+    this.presenceHandler<IBaseNodePresenceFlushPayload>(baseId, (presence) => {
+      presence.submit({
+        event: 'flush',
+      });
+    });
+  }
+
+  private generateDefaultUrl(
+    baseId: string,
+    resourceType: BaseNodeResourceType,
+    resourceId: string,
+    resourceMeta?: IBaseNodeResourceMeta
+  ): string {
+    const viewId =
+      resourceType === BaseNodeResourceType.Table
+        ? (resourceMeta as IBaseNodeTableResourceMeta | undefined)?.defaultViewId
+        : undefined;
+    return buildBaseNodeUrl(baseId, resourceType, resourceId, viewId) ?? `/base/${baseId}`;
+  }
+
+  private async entry2vo(
+    entry: IBaseNodeEntry,
+    resource?: IBaseNodeResourceInput,
+    userMap?: Map<string, IUserInfoVo>
+  ): Promise<IBaseNodeVo> {
+    const baseNodeEntry = omit(entry, [
+      'createdBy',
+      'createdTime',
+      'lastModifiedBy',
+      'lastModifiedTime',
+    ]) as Omit<IBaseNodeEntry, 'createdBy' | 'createdTime' | 'lastModifiedBy' | 'lastModifiedTime'>;
+    const resourceType = baseNodeEntry.resourceType as BaseNodeResourceType;
+    const rawResource: IBaseNodeResourceInput =
+      resource ??
+      (
+        await this.getNodeResource(baseNodeEntry.baseId, resourceType, [baseNodeEntry.resourceId])
+      )[0];
+    const { id, type, createdBy, createdTime, lastModifiedBy, lastModifiedTime, ...resourceMeta } =
+      rawResource;
+    const map = userMap ?? (await this.getUserMap([createdBy, lastModifiedBy]));
+    const resolveUser = (userId?: string | null) => (userId ? (map.get(userId) ?? null) : null);
+    const formatDate = (value: unknown) =>
+      value instanceof Date ? value.toISOString() : typeof value === 'string' ? value : null;
+    const resourceMetaWithAudit = {
+      ...resourceMeta,
+      createdTime: formatDate(createdTime),
+      createdByUser: resolveUser(createdBy),
+      lastModifiedTime: formatDate(lastModifiedTime),
+      lastModifiedByUser: resolveUser(lastModifiedBy),
+    } as IBaseNodeResourceMeta;
+
+    const defaultUrl = this.generateDefaultUrl(
+      baseNodeEntry.baseId,
+      resourceType,
+      baseNodeEntry.resourceId,
+      resourceMetaWithAudit
+    );
+
+    return {
+      ...baseNodeEntry,
+      resourceType,
+      resourceMeta: resourceMetaWithAudit,
+      defaultUrl,
+    };
+  }
+
+  private async getUserMap(
+    userIds: Array<string | null | undefined>
+  ): Promise<Map<string, IUserInfoVo>> {
+    const ids = [...new Set(userIds.filter(Boolean) as string[])];
+    if (ids.length === 0) {
+      return new Map();
+    }
+
+    const users = await this.prismaService.user.findMany({
+      where: { id: { in: ids } },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        avatar: true,
+      },
+    });
+
+    return new Map(
+      users.map((user) => [
+        user.id,
+        { ...user, avatar: user.avatar && getPublicFullStorageUrl(user.avatar) },
+      ])
+    );
+  }
+
+  protected async getTableResources(baseId: string, ids?: string[]) {
+    return await this.prismaService.tableMeta.findMany({
+      where: {
+        baseId,
+        id: { in: ids || undefined },
+        deletedTime: null,
+        // `deleting` is in-flight (or about to roll back to ready). Dropping
+        // the sidebar node here is permanent: base_node has no soft delete,
+        // so a failed delete cannot restore the folder or order.
+        provisionState: { in: [ProvisionState.ready, ProvisionState.deleting] },
+      },
+      select: {
+        id: true,
+        name: true,
+        icon: true,
+        createdBy: true,
+        createdTime: true,
+        lastModifiedBy: true,
+        lastModifiedTime: true,
+      },
+    });
+  }
+
+  protected async getDashboardResources(baseId: string, ids?: string[]) {
+    return await this.prismaService.dashboard.findMany({
+      where: { baseId, id: { in: ids || undefined } },
+      select: {
+        id: true,
+        name: true,
+        createdBy: true,
+        createdTime: true,
+        lastModifiedBy: true,
+        lastModifiedTime: true,
+      },
+    });
+  }
+
+  protected async getFolderResources(baseId: string, ids?: string[]) {
+    return await this.prismaService.baseNodeFolder.findMany({
+      where: { baseId, id: { in: ids || undefined } },
+      select: {
+        id: true,
+        name: true,
+        createdBy: true,
+        createdTime: true,
+        lastModifiedBy: true,
+        lastModifiedTime: true,
+      },
+    });
+  }
+
+  protected async getNodeResource(baseId: string, type: BaseNodeResourceType, ids?: string[]) {
+    switch (type) {
+      case BaseNodeResourceType.Folder:
+        return this.getFolderResources(baseId, ids);
+      case BaseNodeResourceType.Table:
+        return this.getTableResources(baseId, ids);
+      case BaseNodeResourceType.Dashboard:
+        return this.getDashboardResources(baseId, ids);
+      default:
+        throw new CustomHttpException(
+          `Invalid resource type ${type}`,
+          HttpErrorCode.VALIDATION_ERROR,
+          {
+            localization: {
+              i18nKey: 'httpErrors.baseNode.invalidResourceType',
+            },
+          }
+        );
+    }
+  }
+
+  protected getResourceTypes(): BaseNodeResourceType[] {
+    return [
+      BaseNodeResourceType.Folder,
+      BaseNodeResourceType.Table,
+      BaseNodeResourceType.Dashboard,
+    ];
+  }
+
+  async prepareNodeList(baseId: string): Promise<IBaseNodeVo[]> {
+    const resourceTypes = this.getResourceTypes();
+    const resourceResults = await Promise.all(
+      resourceTypes.map((type) => this.getNodeResource(baseId, type))
+    );
+
+    const resources = resourceResults.flatMap((list, index) =>
+      list.map((r) => ({ ...r, type: resourceTypes[index] }))
+    );
+
+    const userMap = await this.getUserMap(
+      resources.flatMap((resource) => [resource.createdBy, resource.lastModifiedBy])
+    );
+    const resourceMap = keyBy(resources, (r) => `${r.type}_${r.id}`);
+    const resourceKeys = new Set(resources.map((r) => `${r.type}_${r.id}`));
+
+    const nodes = await this.prismaService.baseNode.findMany({
+      where: { baseId },
+      select: this.getSelect(),
+      orderBy: { order: 'asc' },
+    });
+
+    const nodeKeys = new Set(nodes.map((n) => `${n.resourceType}_${n.resourceId}`));
+
+    const toCreate = resources.filter((r) => !nodeKeys.has(`${r.type}_${r.id}`));
+    const toDelete = nodes.filter((n) => !resourceKeys.has(`${n.resourceType}_${n.resourceId}`));
+    const validParentIds = new Set(nodes.filter((n) => !toDelete.includes(n)).map((n) => n.id));
+    const orphans = nodes.filter(
+      (n) => n.parentId && !validParentIds.has(n.parentId) && !toDelete.includes(n)
+    );
+
+    if (toCreate.length === 0 && toDelete.length === 0 && orphans.length === 0) {
+      return Promise.all(
+        nodes.map((entry) => {
+          const key = `${entry.resourceType}_${entry.resourceId}`;
+          const resource = resourceMap[key];
+          return this.entry2vo(entry, resource, userMap);
+        })
+      );
+    }
+
+    const finalMenus = await this.prismaService.$tx(async (prisma) => {
+      // Delete redundant
+      if (toDelete.length > 0) {
+        await prisma.baseNode.deleteMany({
+          where: { id: { in: toDelete.map((m) => m.id) } },
+        });
+      }
+
+      // Prepare for create and update
+      let nextOrder = 0;
+      if (toCreate.length > 0 || orphans.length > 0) {
+        const maxOrderAgg = await prisma.baseNode.aggregate({
+          where: { baseId },
+          _max: { order: true },
+        });
+        nextOrder = (maxOrderAgg._max.order ?? 0) + 1;
+      }
+
+      // Create missing; skipDuplicates absorbs concurrent reconciliations
+      if (toCreate.length > 0) {
+        await prisma.baseNode.createMany({
+          data: toCreate.map((r) => ({
+            id: generateBaseNodeId(),
+            baseId,
+            resourceType: r.type,
+            resourceId: r.id,
+            order: nextOrder++,
+            parentId: null,
+            createdBy: this.userId,
+          })),
+          skipDuplicates: true,
+        });
+      }
+
+      // Reset orphans to root level with new order
+      if (orphans.length > 0) {
+        await this.batchUpdateBaseNodes(
+          orphans.map((orphan, index) => ({
+            id: orphan.id,
+            values: { parentId: null, order: nextOrder + index },
+          }))
+        );
+      }
+      return prisma.baseNode.findMany({
+        where: { baseId },
+        select: this.getSelect(),
+        orderBy: { order: 'asc' },
+      });
+    });
+
+    return await Promise.all(
+      finalMenus.map(async (entry) => {
+        const key = `${entry.resourceType}_${entry.resourceId}`;
+        const resource = resourceMap[key];
+        return await this.entry2vo(entry, resource, userMap);
+      })
+    );
+  }
+
+  async getNodeListWithCache(baseId: string): Promise<IBaseNodeVo[]> {
+    return this.performanceCacheService.wrap(
+      generateBaseNodeListCacheKey(baseId),
+      () => this.prepareNodeList(baseId),
+      {
+        ttl: 60 * 60, // 1 hour
+        statsType: 'base-node-list',
+      }
+    );
+  }
+
+  async getList(baseId: string): Promise<IBaseNodeVo[]> {
+    return this.getNodeListWithCache(baseId);
+  }
+
+  async getTree(baseId: string): Promise<IBaseNodeTreeVo> {
+    const nodes = await this.getNodeListWithCache(baseId);
+
+    return {
+      nodes,
+      maxFolderDepth: this.maxFolderDepth,
+    };
+  }
+
+  async getNode(baseId: string, nodeId: string) {
+    const node = await this.prismaService.baseNode
+      .findFirstOrThrow({
+        where: { baseId, id: nodeId },
+        select: this.getSelect(),
+      })
+      .catch(() => {
+        throw new CustomHttpException(`Project node ${nodeId} not found`, HttpErrorCode.NOT_FOUND, {
+          localization: {
+            i18nKey: 'httpErrors.baseNode.notFound',
+          },
+        });
+      });
+    return {
+      ...node,
+      resourceType: node.resourceType as BaseNodeResourceType,
+    };
+  }
+
+  async getNodeVo(baseId: string, nodeId: string): Promise<IBaseNodeVo> {
+    const node = await this.getNode(baseId, nodeId);
+    return this.entry2vo(node);
+  }
+
+  async create(baseId: string, ro: ICreateBaseNodeRo): Promise<IBaseNodeVo> {
+    this.setIgnoreBaseNodeListener();
+
+    const { resourceType, parentId } = ro;
+    const resource = await this.createResource(baseId, ro);
+    const resourceId = resource.id;
+
+    const maxOrder = await this.getMaxOrder(baseId);
+    const placement = { order: maxOrder + 1, parentId: parentId ?? null };
+    // upsert: a concurrent node-list reconciliation may already hold a root-level row
+    const entry = await this.prismaService.baseNode.upsert({
+      where: {
+        // eslint-disable-next-line @typescript-eslint/naming-convention -- prisma composite unique key
+        baseId_resourceType_resourceId: { baseId, resourceType, resourceId },
+      },
+      create: {
+        id: generateBaseNodeId(),
+        baseId,
+        resourceType,
+        resourceId,
+        ...placement,
+        createdBy: this.userId,
+      },
+      update: {
+        ...placement,
+        lastModifiedBy: this.userId,
+      },
+      select: this.getSelect(),
+    });
+
+    const vo = await this.entry2vo(entry, resource);
+    this.presenceHandler(baseId, (presence) => {
+      presence.submit({
+        event: 'create',
+        data: { ...vo },
+      });
+    });
+
+    return vo;
+  }
+
+  protected async createResource(
+    baseId: string,
+    createRo: ICreateBaseNodeRo
+  ): Promise<IBaseNodeResourceMetaWithId> {
+    const { resourceType, parentId, ...ro } = createRo;
+    const parentNode = parentId ? await this.getParentNodeOrThrow(parentId) : null;
+    if (parentNode && parentNode.resourceType !== BaseNodeResourceType.Folder) {
+      throw new CustomHttpException('Parent must be a folder', HttpErrorCode.VALIDATION_ERROR, {
+        localization: {
+          i18nKey: 'httpErrors.baseNode.parentMustBeFolder',
+        },
+      });
+    }
+
+    if (parentNode && resourceType === BaseNodeResourceType.Folder) {
+      await this.assertFolderDepth(baseId, parentNode.id);
+    }
+
+    switch (resourceType) {
+      case BaseNodeResourceType.Folder: {
+        const folder = await this.baseNodeFolderService.createFolder(
+          baseId,
+          ro as ICreateFolderNodeRo
+        );
+        return { id: folder.id, name: folder.name };
+      }
+      case BaseNodeResourceType.Table: {
+        const preparedRo = prepareCreateTableRo(ro as ICreateTableRo);
+        const table = this.cls.get('useV2')
+          ? await this.tableOpenApiV2Service.createTable(baseId, preparedRo)
+          : await this.tableOpenApiService.createTable(baseId, preparedRo);
+
+        return {
+          id: table.id,
+          name: table.name,
+          icon: table.icon,
+          defaultViewId: table.defaultViewId,
+        };
+      }
+      case BaseNodeResourceType.Dashboard: {
+        const dashboard = await this.dashboardService.createDashboard(
+          baseId,
+          ro as ICreateDashboardRo
+        );
+        return { id: dashboard.id, name: dashboard.name };
+      }
+      default:
+        throw new CustomHttpException(
+          `Invalid resource type ${resourceType}`,
+          HttpErrorCode.VALIDATION_ERROR,
+          {
+            localization: {
+              i18nKey: 'httpErrors.baseNode.invalidResourceType',
+            },
+          }
+        );
+    }
+  }
+
+  async duplicate(baseId: string, nodeId: string, ro: IDuplicateBaseNodeRo) {
+    this.setIgnoreBaseNodeListener();
+
+    const anchor = await this.prismaService.baseNode
+      .findFirstOrThrow({
+        where: { baseId, id: nodeId },
+      })
+      .catch(() => {
+        throw new CustomHttpException(`Node ${nodeId} not found`, HttpErrorCode.NOT_FOUND, {
+          localization: {
+            i18nKey: 'httpErrors.baseNode.notFound',
+          },
+        });
+      });
+    const { resourceType, resourceId } = anchor;
+
+    if (resourceType === BaseNodeResourceType.Folder) {
+      throw new CustomHttpException('Cannot duplicate folder', HttpErrorCode.VALIDATION_ERROR, {
+        localization: {
+          i18nKey: 'httpErrors.baseNode.cannotDuplicateFolder',
+        },
+      });
+    }
+
+    const resource = await this.duplicateResource(
+      baseId,
+      resourceType as BaseNodeResourceType,
+      resourceId,
+      ro
+    );
+    const { entry } = await this.prismaService.$tx(async (prisma) => {
+      const maxOrder = await this.getMaxOrder(baseId, anchor.parentId);
+      const placement = { order: maxOrder + 1, parentId: anchor.parentId };
+      // upsert: a concurrent node-list reconciliation may already hold a root-level row
+      const entry = await prisma.baseNode.upsert({
+        where: {
+          // eslint-disable-next-line @typescript-eslint/naming-convention -- prisma composite unique key
+          baseId_resourceType_resourceId: {
+            baseId,
+            resourceType,
+            resourceId: resource.id,
+          },
+        },
+        create: {
+          id: generateBaseNodeId(),
+          baseId,
+          resourceType,
+          resourceId: resource.id,
+          ...placement,
+          createdBy: this.userId,
+        },
+        update: {
+          ...placement,
+          lastModifiedBy: this.userId,
+        },
+        select: this.getSelect(),
+      });
+
+      await updateOrder({
+        query: baseId,
+        position: 'after',
+        item: entry,
+        anchorItem: anchor,
+        getNextItem: async (whereOrder, align) => {
+          return prisma.baseNode.findFirst({
+            where: {
+              baseId,
+              parentId: anchor.parentId,
+              order: whereOrder,
+              id: { not: entry.id },
+            },
+            select: { order: true, id: true },
+            orderBy: { order: align },
+          });
+        },
+        update: async (_, id, data) => {
+          await prisma.baseNode.update({
+            where: { id },
+            data: { parentId: anchor.parentId, order: data.newOrder },
+          });
+        },
+        shuffle: async () => {
+          await this.shuffleOrders(baseId, anchor.parentId);
+        },
+      });
+
+      return {
+        entry,
+      };
+    });
+
+    const vo = await this.entry2vo(entry, resource);
+    this.presenceHandler(baseId, (presence) => {
+      presence.submit({
+        event: 'create',
+        data: { ...vo },
+      });
+    });
+    return vo;
+  }
+
+  protected async duplicateResource(
+    baseId: string,
+    type: BaseNodeResourceType,
+    id: string,
+    duplicateRo: IDuplicateBaseNodeRo
+  ): Promise<IBaseNodeResourceMetaWithId> {
+    switch (type) {
+      case BaseNodeResourceType.Table: {
+        const table = this.cls.get('useV2')
+          ? await this.tableOpenApiV2Service.duplicateTable(
+              baseId,
+              id,
+              duplicateRo as IDuplicateTableRo
+            )
+          : await this.tableDuplicateService.duplicateTable(
+              baseId,
+              id,
+              duplicateRo as IDuplicateTableRo
+            );
+
+        return {
+          id: table.id,
+          name: table.name,
+          icon: table.icon ?? undefined,
+          defaultViewId: table.defaultViewId,
+        };
+      }
+      case BaseNodeResourceType.Dashboard: {
+        const dashboard = await this.dashboardService.duplicateDashboard(
+          baseId,
+          id,
+          duplicateRo as IDuplicateDashboardRo
+        );
+        return { id: dashboard.id, name: dashboard.name };
+      }
+      default:
+        throw new CustomHttpException(
+          `Invalid resource type ${type}`,
+          HttpErrorCode.VALIDATION_ERROR,
+          {
+            localization: {
+              i18nKey: 'httpErrors.baseNode.invalidResourceType',
+            },
+          }
+        );
+    }
+  }
+
+  async update(baseId: string, nodeId: string, ro: IUpdateBaseNodeRo) {
+    this.setIgnoreBaseNodeListener();
+
+    const node = await this.prismaService.baseNode
+      .findFirstOrThrow({
+        where: { baseId, id: nodeId },
+        select: this.getSelect(),
+      })
+      .catch(() => {
+        throw new CustomHttpException(`Node ${nodeId} not found`, HttpErrorCode.NOT_FOUND, {
+          localization: {
+            i18nKey: 'httpErrors.baseNode.notFound',
+          },
+        });
+      });
+
+    await this.updateResource(
+      baseId,
+      node.resourceType as BaseNodeResourceType,
+      node.resourceId,
+      ro
+    );
+
+    const vo = await this.entry2vo(node);
+    this.presenceHandler(baseId, (presence) => {
+      presence.submit({
+        event: 'update',
+        data: { ...vo },
+      });
+    });
+    return vo;
+  }
+
+  protected async updateResource(
+    baseId: string,
+    type: BaseNodeResourceType,
+    id: string,
+    updateRo: IUpdateBaseNodeRo
+  ): Promise<void> {
+    const { name, icon } = updateRo;
+    switch (type) {
+      case BaseNodeResourceType.Folder:
+        if (name) {
+          await this.baseNodeFolderService.renameFolder(baseId, id, { name });
+        }
+        break;
+      case BaseNodeResourceType.Table:
+        if (name) {
+          await this.tableOpenApiService.updateName(baseId, id, name);
+        }
+        if (icon !== undefined) {
+          await this.tableOpenApiService.updateIcon(baseId, id, icon);
+        }
+        break;
+      case BaseNodeResourceType.Dashboard:
+        if (name) {
+          await this.dashboardService.renameDashboard(baseId, id, name);
+        }
+        break;
+      default:
+        throw new CustomHttpException(
+          `Invalid resource type ${type}`,
+          HttpErrorCode.VALIDATION_ERROR,
+          {
+            localization: {
+              i18nKey: 'httpErrors.baseNode.invalidResourceType',
+            },
+          }
+        );
+    }
+  }
+
+  async delete(baseId: string, nodeId: string, permanent?: boolean) {
+    this.setIgnoreBaseNodeListener();
+
+    const node = await this.prismaService.baseNode
+      .findFirstOrThrow({
+        where: { baseId, id: nodeId },
+        select: { resourceType: true, resourceId: true },
+      })
+      .catch(() => {
+        throw new CustomHttpException(`Node ${nodeId} not found`, HttpErrorCode.NOT_FOUND, {
+          localization: {
+            i18nKey: 'httpErrors.baseNode.notFound',
+          },
+        });
+      });
+    if (node.resourceType === BaseNodeResourceType.Folder) {
+      const children = await this.prismaService.baseNode.findMany({
+        where: { baseId, parentId: nodeId },
+      });
+      if (children.length > 0) {
+        throw new CustomHttpException(
+          'Cannot delete folder because it is not empty',
+          HttpErrorCode.VALIDATION_ERROR,
+          {
+            localization: {
+              i18nKey: 'httpErrors.baseNode.cannotDeleteEmptyFolder',
+            },
+          }
+        );
+      }
+    }
+
+    // Clean up share records for this node before deletion
+    await this.deleteNodeShares(baseId, nodeId);
+
+    await this.deleteResource(
+      baseId,
+      node.resourceType as BaseNodeResourceType,
+      node.resourceId,
+      permanent
+    );
+    await this.prismaService.baseNode.delete({
+      where: { id: nodeId },
+    });
+
+    this.presenceHandler(baseId, (presence) => {
+      presence.submit({
+        event: 'delete',
+        data: { id: nodeId },
+      });
+    });
+    return node;
+  }
+
+  protected async deleteResource(
+    baseId: string,
+    type: BaseNodeResourceType,
+    id: string,
+    permanent?: boolean
+  ) {
+    switch (type) {
+      case BaseNodeResourceType.Folder:
+        await this.baseNodeFolderService.deleteFolder(baseId, id);
+        break;
+      case BaseNodeResourceType.Table:
+        if (this.cls.get('useV2')) {
+          await this.tableOpenApiV2Service.deleteTable(
+            baseId,
+            id,
+            permanent ? 'permanent' : undefined
+          );
+          break;
+        }
+        if (permanent) {
+          await this.tableOpenApiService.permanentDeleteTables(baseId, [id]);
+        } else {
+          await this.tableOpenApiService.deleteTable(baseId, id);
+        }
+        break;
+      case BaseNodeResourceType.Dashboard:
+        await this.dashboardService.deleteDashboard(baseId, id);
+        break;
+      default:
+        throw new CustomHttpException(
+          `Invalid resource type ${type}`,
+          HttpErrorCode.VALIDATION_ERROR,
+          {
+            localization: {
+              i18nKey: 'httpErrors.baseNode.invalidResourceType',
+            },
+          }
+        );
+    }
+  }
+
+  async move(baseId: string, nodeId: string, ro: IMoveBaseNodeRo): Promise<IBaseNodeVo> {
+    this.setIgnoreBaseNodeListener();
+
+    const { parentId, anchorId, position } = ro;
+
+    const node = await this.prismaService.baseNode
+      .findFirstOrThrow({
+        where: { baseId, id: nodeId },
+      })
+      .catch(() => {
+        throw new CustomHttpException(`Node ${nodeId} not found`, HttpErrorCode.NOT_FOUND, {
+          localization: {
+            i18nKey: 'httpErrors.baseNode.notFound',
+          },
+        });
+      });
+
+    if (isString(parentId) && isString(anchorId)) {
+      throw new CustomHttpException(
+        'Only one of parentId or anchorId must be provided',
+        HttpErrorCode.VALIDATION_ERROR,
+        {
+          localization: {
+            i18nKey: 'httpErrors.baseNode.onlyOneOfParentIdOrAnchorIdRequired',
+          },
+        }
+      );
+    }
+
+    if (parentId === nodeId) {
+      throw new CustomHttpException('Cannot move node to itself', HttpErrorCode.VALIDATION_ERROR, {
+        localization: {
+          i18nKey: 'httpErrors.baseNode.cannotMoveToItself',
+        },
+      });
+    }
+
+    if (anchorId === nodeId) {
+      throw new CustomHttpException(
+        'Cannot move node to its own child (circular reference)',
+        HttpErrorCode.VALIDATION_ERROR,
+        {
+          localization: {
+            i18nKey: 'httpErrors.baseNode.cannotMoveToCircularReference',
+          },
+        }
+      );
+    }
+
+    let newNode: IBaseNodeEntry;
+    if (anchorId) {
+      newNode = await this.moveNodeTo(baseId, node.id, { anchorId, position });
+    } else if (parentId === null) {
+      newNode = await this.moveNodeToRoot(baseId, node.id);
+    } else if (parentId) {
+      newNode = await this.moveNodeToFolder(baseId, node.id, parentId);
+    } else {
+      throw new CustomHttpException(
+        'At least one of parentId or anchorId must be provided',
+        HttpErrorCode.VALIDATION_ERROR,
+        {
+          localization: {
+            i18nKey: 'httpErrors.baseNode.anchorIdOrParentIdRequired',
+          },
+        }
+      );
+    }
+
+    const vo = await this.entry2vo(newNode);
+    this.presenceHandler(baseId, (presence) => {
+      presence.submit({
+        event: 'update',
+        data: { ...vo },
+      });
+    });
+
+    return vo;
+  }
+
+  private async moveNodeToRoot(baseId: string, nodeId: string) {
+    return this.prismaService.$tx(async (prisma) => {
+      const maxOrder = await this.getMaxOrder(baseId);
+      return prisma.baseNode.update({
+        where: { id: nodeId },
+        select: this.getSelect(),
+        data: {
+          parentId: null,
+          order: maxOrder + 1,
+          lastModifiedBy: this.userId,
+        },
+      });
+    });
+  }
+
+  private async moveNodeToFolder(baseId: string, nodeId: string, parentId: string) {
+    return this.prismaService.$tx(async (prisma) => {
+      const node = await prisma.baseNode
+        .findFirstOrThrow({
+          where: { baseId, id: nodeId },
+        })
+        .catch(() => {
+          throw new CustomHttpException(`Node ${nodeId} not found`, HttpErrorCode.NOT_FOUND, {
+            localization: {
+              i18nKey: 'httpErrors.baseNode.notFound',
+            },
+          });
+        });
+
+      const parentNode = await prisma.baseNode
+        .findFirstOrThrow({
+          where: { baseId, id: parentId },
+        })
+        .catch(() => {
+          throw new CustomHttpException(`Parent ${parentId} not found`, HttpErrorCode.NOT_FOUND, {
+            localization: {
+              i18nKey: 'httpErrors.baseNode.parentNotFound',
+            },
+          });
+        });
+
+      if (parentNode.resourceType !== BaseNodeResourceType.Folder) {
+        throw new CustomHttpException(
+          `Parent ${parentId} is not a folder`,
+          HttpErrorCode.VALIDATION_ERROR,
+          {
+            localization: {
+              i18nKey: 'httpErrors.baseNode.parentIsNotFolder',
+            },
+          }
+        );
+      }
+
+      if (node.resourceType === BaseNodeResourceType.Folder) {
+        await this.assertFolderMoveDepth(baseId, parentId, nodeId);
+      }
+
+      const maxOrder = await this.getMaxOrder(baseId);
+      return prisma.baseNode.update({
+        where: { id: nodeId },
+        select: this.getSelect(),
+        data: {
+          parentId,
+          order: maxOrder + 1,
+          lastModifiedBy: this.userId,
+        },
+      });
+    });
+  }
+
+  private async moveNodeTo(
+    baseId: string,
+    nodeId: string,
+    ro: Pick<IMoveBaseNodeRo, 'anchorId' | 'position'>
+  ): Promise<IBaseNodeEntry> {
+    const { anchorId, position } = ro;
+    return this.prismaService.$tx(async (prisma) => {
+      const node = await prisma.baseNode
+        .findFirstOrThrow({
+          where: { baseId, id: nodeId },
+        })
+        .catch(() => {
+          throw new CustomHttpException(`Node ${nodeId} not found`, HttpErrorCode.NOT_FOUND, {
+            localization: {
+              i18nKey: 'httpErrors.baseNode.notFound',
+            },
+          });
+        });
+
+      const anchor = await prisma.baseNode
+        .findFirstOrThrow({
+          where: { baseId, id: anchorId },
+        })
+        .catch(() => {
+          throw new CustomHttpException(`Anchor ${anchorId} not found`, HttpErrorCode.NOT_FOUND, {
+            localization: {
+              i18nKey: 'httpErrors.baseNode.anchorNotFound',
+            },
+          });
+        });
+
+      if (node.resourceType === BaseNodeResourceType.Folder && anchor.parentId) {
+        await this.assertFolderMoveDepth(baseId, anchor.parentId, nodeId);
+      }
+
+      await updateOrder({
+        query: baseId,
+        position: position ?? 'after',
+        item: node,
+        anchorItem: anchor,
+        getNextItem: async (whereOrder, align) => {
+          return prisma.baseNode.findFirst({
+            where: {
+              baseId,
+              parentId: anchor.parentId,
+              order: whereOrder,
+            },
+            select: { order: true, id: true },
+            orderBy: { order: align },
+          });
+        },
+        update: async (_, id, data) => {
+          await prisma.baseNode.update({
+            where: { id },
+            data: { parentId: anchor.parentId, order: data.newOrder },
+          });
+        },
+        shuffle: async () => {
+          await this.shuffleOrders(baseId, anchor.parentId);
+        },
+      });
+
+      return prisma.baseNode.findFirstOrThrow({
+        where: { baseId, id: nodeId },
+        select: this.getSelect(),
+      });
+    });
+  }
+
+  async getMaxOrder(baseId: string, parentId?: string | null) {
+    const prisma = this.prismaService.txClient();
+    const aggregate = await prisma.baseNode.aggregate({
+      where: { baseId, parentId },
+      _max: { order: true },
+    });
+
+    return aggregate._max.order ?? 0;
+  }
+
+  private async shuffleOrders(baseId: string, parentId: string | null) {
+    const prisma = this.prismaService.txClient();
+    const siblings = await prisma.baseNode.findMany({
+      where: { baseId, parentId },
+      orderBy: { order: 'asc' },
+    });
+
+    for (const [index, sibling] of siblings.entries()) {
+      await prisma.baseNode.update({
+        where: { id: sibling.id },
+        data: { order: index + 10, lastModifiedBy: this.userId },
+      });
+    }
+  }
+
+  private async getParentNodeOrThrow(id: string) {
+    const entry = await this.prismaService.baseNode.findFirst({
+      where: { id },
+      select: {
+        id: true,
+        parentId: true,
+        resourceType: true,
+        resourceId: true,
+      },
+    });
+    if (!entry) {
+      throw new CustomHttpException('Project node not found', HttpErrorCode.NOT_FOUND, {
+        localization: {
+          i18nKey: 'httpErrors.baseNode.notFound',
+        },
+      });
+    }
+    return entry;
+  }
+
+  private async assertFolderDepth(baseId: string, id: string) {
+    const folderDepth = await this.getFolderDepth(baseId, id);
+    if (folderDepth >= this.maxFolderDepth) {
+      throw new CustomHttpException('Folder depth limit exceeded', HttpErrorCode.VALIDATION_ERROR, {
+        localization: {
+          i18nKey: 'httpErrors.baseNode.folderDepthLimitExceeded',
+        },
+      });
+    }
+  }
+
+  private async assertFolderMoveDepth(baseId: string, parentId: string, nodeId: string) {
+    const allFolders = await this.getAllFolders(baseId);
+
+    const parentDepth = this.getFolderDepthFromList(allFolders, parentId, nodeId);
+    const subtreeDepth = this.getFolderSubtreeDepth(allFolders, nodeId);
+
+    if (parentDepth + subtreeDepth >= this.maxFolderDepth) {
+      throw new CustomHttpException('Folder depth limit exceeded', HttpErrorCode.VALIDATION_ERROR, {
+        localization: {
+          i18nKey: 'httpErrors.baseNode.folderDepthLimitExceeded',
+        },
+      });
+    }
+  }
+
+  private async getAllFolders(baseId: string) {
+    return this.prismaService.txClient().baseNode.findMany({
+      where: { baseId, resourceType: BaseNodeResourceType.Folder },
+      select: { id: true, parentId: true },
+    });
+  }
+
+  private getFolderDepthFromList(
+    allFolders: { id: string; parentId: string | null }[],
+    id: string,
+    circularCheckNodeId?: string
+  ) {
+    let depth = 0;
+    if (allFolders.length === 0) {
+      return depth;
+    }
+
+    const folderMap = keyBy(allFolders, 'id');
+    const visited = new Set<string>();
+    let current = id;
+    while (current) {
+      if ((circularCheckNodeId && current === circularCheckNodeId) || visited.has(current)) {
+        throw new CustomHttpException(
+          'Circular reference detected in folder hierarchy',
+          HttpErrorCode.VALIDATION_ERROR,
+          {
+            localization: {
+              i18nKey: 'httpErrors.baseNode.circularReference',
+            },
+          }
+        );
+      }
+      visited.add(current);
+      depth++;
+      const folder = folderMap[current];
+      if (!folder) {
+        throw new CustomHttpException('Folder not found', HttpErrorCode.NOT_FOUND, {
+          localization: {
+            i18nKey: 'httpErrors.baseNode.folderNotFound',
+          },
+        });
+      }
+      current = folder.parentId ?? '';
+    }
+    return depth;
+  }
+
+  private getFolderSubtreeDepth(
+    allFolders: { id: string; parentId: string | null }[],
+    nodeId: string
+  ) {
+    const childrenMap: Record<string, string[]> = {};
+    for (const folder of allFolders) {
+      if (folder.parentId) {
+        (childrenMap[folder.parentId] ??= []).push(folder.id);
+      }
+    }
+    const calc = (id: string): number => {
+      const children = childrenMap[id];
+      if (!children?.length) return 0;
+      return 1 + Math.max(...children.map(calc));
+    };
+    return calc(nodeId);
+  }
+
+  private async getFolderDepth(baseId: string, id: string) {
+    const allFolders = await this.getAllFolders(baseId);
+    return this.getFolderDepthFromList(allFolders, id);
+  }
+
+  async batchUpdateBaseNodes(data: { id: string; values: { [key: string]: unknown } }[]) {
+    const sql = buildBatchUpdateSql(this.knex, data);
+    if (!sql) {
+      return;
+    }
+    await this.prismaService.txClient().$executeRawUnsafe(sql);
+  }
+
+  private presenceHandler<
+    T =
+      | IBaseNodePresenceCreatePayload
+      | IBaseNodePresenceUpdatePayload
+      | IBaseNodePresenceDeletePayload,
+  >(baseId: string, handler: (presence: LocalPresence<T>) => void) {
+    this.performanceCacheService.del(generateBaseNodeListCacheKey(baseId));
+    // Skip if ShareDB connection is already closed (e.g., during shutdown)
+    if (this.shareDbService.shareDbAdapter.closed) {
+      this.logger.error('ShareDB connection is already closed, presence handler skipped');
+      return;
+    }
+    presenceHandler(baseId, this.shareDbService, handler);
+  }
+}

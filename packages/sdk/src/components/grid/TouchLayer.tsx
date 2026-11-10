@@ -11,9 +11,11 @@ import {
 } from './configs';
 import type { IGridProps } from './Grid';
 import { useSelection, useVisibleRegion } from './hooks';
-import { RegionType, SelectionRegionType } from './interface';
+import { LinearRowType, RegionType, SelectionRegionType } from './interface';
 import type {
   ICellItem,
+  ICellRegionWithData,
+  IInnerCell,
   ILinearRow,
   IMouseState,
   IRange,
@@ -22,26 +24,27 @@ import type {
 } from './interface';
 import type { CoordinateManager, ImageManager, SpriteManager } from './managers';
 import { emptySelection } from './managers';
+import { CellRegionType, getCellRenderer } from './renderers';
 import { RenderLayer } from './RenderLayer';
+import { getColumnStatisticData, inRange } from './utils';
 
-export interface ITouchLayerProps
-  extends Omit<
-    IGridProps,
-    | 'style'
-    | 'rowCount'
-    | 'rowHeight'
-    | 'smoothScrollX'
-    | 'smoothScrollY'
-    | 'freezeColumnCount'
-    | 'onCopy'
-    | 'onPaste'
-    | 'onRowOrdered'
-    | 'onColumnResize'
-    | 'onColumnOrdered'
-    | 'onColumnHeaderDblClick'
-    | 'onColumnHeaderMenuClick'
-    | 'onVisibleRegionChanged'
-  > {
+export interface ITouchLayerProps extends Omit<
+  IGridProps,
+  | 'style'
+  | 'rowCount'
+  | 'rowHeight'
+  | 'smoothScrollX'
+  | 'smoothScrollY'
+  | 'freezeColumnCount'
+  | 'onCopy'
+  | 'onPaste'
+  | 'onRowOrdered'
+  | 'onColumnResize'
+  | 'onColumnOrdered'
+  | 'onColumnHeaderDblClick'
+  | 'onColumnHeaderMenuClick'
+  | 'onVisibleRegionChanged'
+> {
   theme: IGridTheme;
   width: number;
   height: number;
@@ -70,14 +73,18 @@ export const TouchLayer: FC<ITouchLayerProps> = (props) => {
     coordInstance,
     scrollState,
     collaborators,
+    searchCursor,
+    highlightedRowIndex,
     mouseState,
     rowControls,
+    rowControlPaddingX,
     imageManager,
     spriteManager,
     forceRenderFlag,
     rowIndexVisible,
     groupCollection,
-    columnHeaderVisible,
+    collapsedGroupIds,
+    columnHeaderHeight,
     getCellContent,
     getLinearRow,
     real2RowIndex,
@@ -88,11 +95,21 @@ export const TouchLayer: FC<ITouchLayerProps> = (props) => {
     onColumnAppend,
     onColumnHeaderClick,
     onSelectionChanged,
+    onColumnStatisticClick,
+    onCollapsedGroupChanged,
   } = props;
   const hasAppendRow = onRowAppend != null;
   const hasAppendColumn = onColumnAppend != null;
   const { scrollTop, scrollLeft } = scrollState;
-  const { freezeRegionWidth, totalWidth, columnInitSize, rowCount, rowInitSize } = coordInstance;
+  const {
+    totalHeight,
+    containerHeight,
+    freezeRegionWidth,
+    totalWidth,
+    columnInitSize,
+    rowCount,
+    rowInitSize,
+  } = coordInstance;
 
   const containerRef = useRef<HTMLDivElement | null>(null);
 
@@ -128,12 +145,27 @@ export const TouchLayer: FC<ITouchLayerProps> = (props) => {
     setTimeout(() => setMouseState(DEFAULT_MOUSE_STATE), 500);
   };
 
+  // eslint-disable-next-line sonarjs/cognitive-complexity
   const onTap = (e: HammerInput) => {
     const pointerEvent = e.changedPointers[0];
     const x = pointerEvent?.offsetX ?? pointerEvent?.layerX;
     const y = pointerEvent?.offsetY ?? pointerEvent?.layerY;
     const [columnIndex, rowIndex] = getRangeByPosition(x, y);
     const posInfo = { x, y, rowIndex, columnIndex, isOutOfBounds: false };
+
+    // Tap the column statistic
+    const statisticBoundData = getColumnStatisticData({
+      columnStatistics,
+      scrollState,
+      coordInstance,
+      getLinearRow,
+      position: { x, y, rowIndex, columnIndex },
+      height,
+    });
+    if (statisticBoundData != null) {
+      const { type, ...rest } = statisticBoundData;
+      return onColumnStatisticClick?.(columnIndex, { ...rest });
+    }
 
     // Tap the column header
     if (rowIndex === -1 && columnIndex > -1) {
@@ -160,11 +192,66 @@ export const TouchLayer: FC<ITouchLayerProps> = (props) => {
 
     // Tap the row
     if (rowIndex >= 0) {
+      const linearRow = getLinearRow(rowIndex);
+
+      if (linearRow.type === LinearRowType.Group && x < rowInitSize) {
+        const { id } = linearRow;
+        if (collapsedGroupIds == null) return onCollapsedGroupChanged?.(new Set([id]));
+        if (collapsedGroupIds.has(id)) {
+          const newCollapsedGroupIds = new Set(collapsedGroupIds);
+          newCollapsedGroupIds.delete(id);
+          return onCollapsedGroupChanged?.(newCollapsedGroupIds);
+        }
+        return onCollapsedGroupChanged?.(new Set([...collapsedGroupIds, id]));
+      }
+
+      if (scrollTop + y > totalHeight && !inRange(y, containerHeight, height)) {
+        return;
+      }
+
+      let isPreview = false;
+
+      // Tap the cell
+      if (columnIndex >= 0) {
+        const cell = getCellContent([columnIndex, rowIndex]) as IInnerCell;
+        const cellRenderer = getCellRenderer(cell.type);
+        const onCellClick = cellRenderer.onClick;
+
+        if (onCellClick) {
+          const offsetX = coordInstance.getColumnOffset(columnIndex);
+          onCellClick(
+            cell as never,
+            {
+              width: coordInstance.getColumnWidth(columnIndex),
+              height: coordInstance.getRowHeight(rowIndex),
+              theme,
+              hoverCellPosition: [
+                columnIndex < coordInstance.freezeColumnCount
+                  ? x - offsetX
+                  : x - offsetX + scrollLeft,
+                y - coordInstance.getRowOffset(rowIndex) + scrollTop,
+              ],
+              activeCellBound: null,
+              isActive: false,
+            },
+            (cellRegion: ICellRegionWithData) => {
+              const { type } = cellRegion;
+
+              if (type === CellRegionType.Preview) {
+                isPreview = true;
+              }
+            }
+          );
+        }
+
+        if (isPreview) return;
+      }
+
       const range = [0, rowIndex];
       setActiveCell(range as IRange);
       setSelection(selection.set(SelectionRegionType.Cells, [range, range] as IRange[]));
       onTapStyleEffect({ ...posInfo, type: RegionType.Cell });
-      onRowExpand?.(rowIndex);
+      onRowExpand?.(linearRow.realIndex);
     }
   };
 
@@ -178,8 +265,11 @@ export const TouchLayer: FC<ITouchLayerProps> = (props) => {
           columns={columns}
           columnStatistics={columnStatistics}
           collaborators={collaborators}
+          searchCursor={searchCursor}
+          highlightedRowIndex={highlightedRowIndex}
           coordInstance={coordInstance}
           rowControls={rowControls}
+          rowControlPaddingX={rowControlPaddingX}
           imageManager={imageManager}
           spriteManager={spriteManager}
           visibleRegion={visibleRegion}
@@ -193,7 +283,7 @@ export const TouchLayer: FC<ITouchLayerProps> = (props) => {
           selection={emptySelection}
           isSelecting={false}
           forceRenderFlag={forceRenderFlag}
-          columnHeaderVisible={columnHeaderVisible}
+          columnHeaderHeight={columnHeaderHeight}
           columnFreezeState={DEFAULT_FREEZE_COLUMN_STATE}
           columnResizeState={DEFAULT_COLUMN_RESIZE_STATE}
           hoverCellPosition={null}

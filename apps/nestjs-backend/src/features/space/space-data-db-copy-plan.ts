@@ -1,0 +1,943 @@
+import path from 'node:path';
+
+export type ISpaceDataDbProcessPlan = {
+  command: string;
+  args: string[];
+};
+
+export type ISpaceDataDbProcessPipelinePlan = {
+  source: ISpaceDataDbProcessPlan;
+  target: ISpaceDataDbProcessPlan;
+  label?: string;
+};
+
+export type ISpaceDataDbDumpRestorePlan = {
+  dumpFile: string;
+  dump: ISpaceDataDbProcessPlan;
+  restoreList?: ISpaceDataDbProcessPlan;
+  restoreListFile?: string;
+  restore: ISpaceDataDbProcessPlan;
+};
+
+export type ISpaceDataDbDumpStreamRestorePlan = ISpaceDataDbProcessPipelinePlan & {
+  schemaNames: string[];
+};
+
+export type ISpaceDataDbPgcopydbPlan = {
+  workDirectory: string;
+  filterFile: string;
+  filterFileContent: string;
+  copy: ISpaceDataDbProcessPlan;
+};
+
+export type ISharedTableCopyPlan = {
+  sourceSql: string;
+  sourceBindings: unknown[];
+  targetSql: string;
+};
+
+export type ISharedTablePsqlCopyPlan = ISpaceDataDbProcessPipelinePlan & {
+  table: string;
+  sourceSql: string;
+  targetSql: string;
+  /** Idempotent scoped delete before COPY so per-table retries restart cleanly. */
+  targetReset?: ISpaceDataDbProcessPlan;
+};
+
+export type ISharedTablePostgresFdwCopyPlan = {
+  table: string;
+  sql: string;
+  target: ISpaceDataDbProcessPlan;
+};
+
+const quoteIdent = (identifier: string) => `"${identifier.replaceAll('"', '""')}"`;
+
+const qualify = (schema: string, table: string) => `${quoteIdent(schema)}.${quoteIdent(table)}`;
+
+const normalizeJobs = (jobs?: number) => Math.max(1, Math.floor(jobs ?? 1));
+
+const literal = (value: string) => `'${value.replaceAll("'", "''")}'`;
+const noOwnerArg = '--no-owner';
+const noAclArg = '--no-acl';
+const exitOnErrorArg = '--exit-on-error';
+const jobsArg = '--jobs';
+const pgcopydbBaseSchemasDir = 'pgcopydb-base-schemas';
+const pgcopydbFilterFileName = 'pgcopydb-base-schemas.filter.ini';
+const includeOnlySchemaSection = '[include-only-schema]';
+const prismaOnlyPostgresUrlParams = [
+  'schema',
+  'statement_cache_size',
+  'connection_limit',
+  'pool_timeout',
+  'pgbouncer',
+] as const;
+
+// node-pg treats `sslmode=require` as full CA verification, so self-signed targets must use
+// its non-standard `no-verify` value. libpq-based consumers (pg_dump/pg_restore/psql/pgcopydb
+// and postgres_fdw server options) reject `no-verify`; their spelling of the same semantics
+// (encrypt without CA verification) is `require`.
+const libpqSslMode = (sslmode: string) => (sslmode === 'no-verify' ? 'require' : sslmode);
+
+const textArray = (values: string[]) =>
+  values.length ? `ARRAY[${values.map(literal).join(', ')}]::text[]` : 'ARRAY[]::text[]';
+
+const textArrayPredicate = (column: string, values: string[]) =>
+  `${quoteIdent(column)} = ANY(${textArray(values)})`;
+
+const withExportedSnapshot = (copySql: string, snapshotId?: string) =>
+  snapshotId
+    ? [
+        'BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY',
+        `SET TRANSACTION SNAPSHOT ${literal(snapshotId)}`,
+        copySql,
+        'COMMIT',
+      ]
+        .map((statement) => `${statement};`)
+        .join('\n')
+    : copySql;
+
+const decodePostgresToolUserInfoComponent = (value: string) => {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    const escapedInvalidPercent = value.replace(/%(?![0-9a-f]{2})/gi, '%25');
+    try {
+      return decodeURIComponent(escapedInvalidPercent);
+    } catch {
+      return value;
+    }
+  }
+};
+
+const encodePostgresToolUserInfoComponent = (value: string) =>
+  encodeURIComponent(decodePostgresToolUserInfoComponent(value));
+
+const postgresToolUserInfo = (parsed: URL) => {
+  if (!parsed.username) {
+    return '';
+  }
+  const username = encodePostgresToolUserInfoComponent(parsed.username);
+  const password = parsed.password
+    ? `:${encodePostgresToolUserInfoComponent(parsed.password)}`
+    : '';
+  return `${username}${password}@`;
+};
+
+export const postgresToolUrl = (url: string) => {
+  const parsed = new URL(url);
+  for (const param of prismaOnlyPostgresUrlParams) {
+    parsed.searchParams.delete(param);
+  }
+  const sslmode = parsed.searchParams.get('sslmode');
+  if (sslmode) {
+    parsed.searchParams.set('sslmode', libpqSslMode(sslmode));
+  }
+  return `${parsed.protocol}//${postgresToolUserInfo(parsed)}${parsed.host}${parsed.pathname}${
+    parsed.search
+  }${parsed.hash}`;
+};
+
+const postgresMajorVersionPattern = /\b([1-9]\d?)\.\d+\b/;
+
+export const parsePostgresMajorVersion = (text: string): number | null => {
+  const match = text.match(postgresMajorVersionPattern);
+  return match ? Number(match[1]) : null;
+};
+
+export const assertPgDumpSupportsServer = (input: {
+  dumpVersionText: string;
+  serverVersionText: string;
+}): { dumpMajor: number; serverMajor: number } => {
+  const dumpMajor = parsePostgresMajorVersion(input.dumpVersionText);
+  const serverMajor = parsePostgresMajorVersion(input.serverVersionText);
+  if (dumpMajor == null || serverMajor == null) {
+    throw new Error(
+      `Unable to parse PostgreSQL versions for dump compatibility: pg_dump=${
+        input.dumpVersionText.trim() || '<empty>'
+      }; server=${input.serverVersionText.trim() || '<empty>'}`
+    );
+  }
+  if (dumpMajor < serverMajor) {
+    throw new Error(
+      `pg_dump version ${dumpMajor} cannot dump PostgreSQL ${serverMajor}. Install postgresql-client-${serverMajor} or newer; newer pg_dump can dump older servers.`
+    );
+  }
+  return { dumpMajor, serverMajor };
+};
+
+export const buildServerVersionProbePlan = (url: string): ISpaceDataDbProcessPlan => ({
+  command: 'psql',
+  args: [
+    '--no-psqlrc',
+    '--quiet',
+    '--tuples-only',
+    '--no-align',
+    '--command',
+    'SHOW server_version',
+    postgresToolUrl(url),
+  ],
+});
+
+export const buildBaseSchemaRestoreListPlan = (dumpFile: string): ISpaceDataDbProcessPlan => ({
+  command: 'pg_restore',
+  args: ['--list', dumpFile],
+});
+
+export const buildBaseSchemaRestorePlan = (input: {
+  targetUrl: string;
+  dumpFile: string;
+  jobs?: number;
+  restoreListFile?: string;
+}): ISpaceDataDbProcessPlan => {
+  const jobs = String(normalizeJobs(input.jobs));
+  const targetUrl = postgresToolUrl(input.targetUrl);
+  return {
+    command: 'pg_restore',
+    args: [
+      noOwnerArg,
+      noAclArg,
+      exitOnErrorArg,
+      jobsArg,
+      jobs,
+      ...(input.restoreListFile ? ['--use-list', input.restoreListFile] : []),
+      '--dbname',
+      targetUrl,
+      input.dumpFile,
+    ],
+  };
+};
+
+const psqlArgs = (url: string, command: string) => [
+  '--no-psqlrc',
+  '--quiet',
+  '--set',
+  'ON_ERROR_STOP=1',
+  '--command',
+  command,
+  postgresToolUrl(url),
+];
+
+const parsePostgresUrl = (url: string) => {
+  const parsed = new URL(url);
+  const dbname = decodeURIComponent(parsed.pathname.replace(/^\//, ''));
+  if (!dbname) {
+    throw new Error('Source PostgreSQL URL must include a database name for postgres_fdw copy');
+  }
+
+  const sslmode = parsed.searchParams.get('sslmode');
+  return {
+    host: parsed.hostname,
+    port: parsed.port || '5432',
+    dbname,
+    user: decodeURIComponent(parsed.username),
+    password: decodeURIComponent(parsed.password),
+    sslmode: sslmode ? libpqSslMode(sslmode) : undefined,
+  };
+};
+
+const fdwOptions = (options: Record<string, string | undefined>) =>
+  Object.entries(options)
+    .filter((entry): entry is [string, string] => Boolean(entry[1]))
+    .map(([key, value]) => `${key} ${literal(value)}`)
+    .join(', ');
+
+export const buildBaseSchemaDumpRestorePlan = (input: {
+  sourceUrl: string;
+  targetUrl: string;
+  schemaNames: string[];
+  workDir: string;
+  jobs?: number;
+  snapshotId?: string;
+}): ISpaceDataDbDumpRestorePlan => {
+  const schemaNames = [...input.schemaNames].sort((a, b) => Number(a > b) - Number(a < b));
+  if (!schemaNames.length) {
+    throw new Error('At least one project schema is required for pg_dump planning');
+  }
+
+  const dumpFile = path.join(input.workDir, 'base-schemas.dump');
+  const schemaArgs = schemaNames.flatMap((schemaName) => ['--schema', quoteIdent(schemaName)]);
+  const sourceUrl = postgresToolUrl(input.sourceUrl);
+  const targetUrl = postgresToolUrl(input.targetUrl);
+
+  return {
+    dumpFile,
+    dump: {
+      command: 'pg_dump',
+      args: [
+        '--format=custom',
+        noOwnerArg,
+        noAclArg,
+        ...(input.snapshotId ? ['--snapshot', input.snapshotId] : []),
+        '--file',
+        dumpFile,
+        ...schemaArgs,
+        sourceUrl,
+      ],
+    },
+    restore: buildBaseSchemaRestorePlan({
+      targetUrl,
+      dumpFile,
+      jobs: input.jobs,
+    }),
+  };
+};
+
+export const buildBaseSchemaDumpStreamRestorePlan = (input: {
+  sourceUrl: string;
+  targetUrl: string;
+  schemaNames: string[];
+  snapshotId?: string;
+}): ISpaceDataDbDumpStreamRestorePlan => {
+  const schemaNames = [...input.schemaNames].sort((a, b) => Number(a > b) - Number(a < b));
+  if (!schemaNames.length) {
+    throw new Error('At least one project schema is required for pg_dump planning');
+  }
+
+  const schemaArgs = schemaNames.flatMap((schemaName) => ['--schema', quoteIdent(schemaName)]);
+  const sourceUrl = postgresToolUrl(input.sourceUrl);
+  const targetUrl = postgresToolUrl(input.targetUrl);
+
+  return {
+    label: 'base-schemas',
+    schemaNames,
+    source: {
+      command: 'pg_dump',
+      args: [
+        '--format=custom',
+        noOwnerArg,
+        noAclArg,
+        ...(input.snapshotId ? ['--snapshot', input.snapshotId] : []),
+        ...schemaArgs,
+        sourceUrl,
+      ],
+    },
+    target: {
+      command: 'pg_restore',
+      args: [noOwnerArg, noAclArg, exitOnErrorArg, '--dbname', targetUrl],
+    },
+  };
+};
+
+export const buildBaseSchemaPgcopydbPlan = (input: {
+  sourceUrl: string;
+  targetUrl: string;
+  schemaNames: string[];
+  workDir: string;
+  jobs?: number;
+}): ISpaceDataDbPgcopydbPlan => {
+  const schemaNames = [...input.schemaNames].sort((a, b) => Number(a > b) - Number(a < b));
+  if (!schemaNames.length) {
+    throw new Error('At least one project schema is required for pgcopydb planning');
+  }
+
+  const jobs = String(normalizeJobs(input.jobs));
+  const workDirectory = path.join(input.workDir, pgcopydbBaseSchemasDir);
+  const filterFile = path.join(input.workDir, pgcopydbFilterFileName);
+  const filterFileContent = [includeOnlySchemaSection, ...schemaNames.map(quoteIdent), ''].join(
+    '\n'
+  );
+
+  return {
+    workDirectory,
+    filterFile,
+    filterFileContent,
+    copy: {
+      command: 'pgcopydb',
+      args: [
+        'copy',
+        'db',
+        '--source',
+        postgresToolUrl(input.sourceUrl),
+        '--target',
+        postgresToolUrl(input.targetUrl),
+        '--dir',
+        workDirectory,
+        '--table-jobs',
+        jobs,
+        '--index-jobs',
+        jobs,
+        '--restore-jobs',
+        jobs,
+        noOwnerArg,
+        noAclArg,
+        '--skip-large-objects',
+        '--filters',
+        filterFile,
+        '--fail-fast',
+        '--restart',
+      ],
+    },
+  };
+};
+
+export const buildSharedTableCopyPlan = (input: {
+  sourceSchema: string;
+  targetSchema: string;
+  table: string;
+  columns: string[];
+  whereSql: string;
+  sourceBindings?: unknown[];
+}): ISharedTableCopyPlan => {
+  if (!input.columns.length) {
+    throw new Error(`Shared table ${input.table} requires an explicit column list`);
+  }
+  if (!input.whereSql.trim()) {
+    throw new Error(`Shared table ${input.table} requires a scoped WHERE clause`);
+  }
+
+  const columns = input.columns.map(quoteIdent).join(', ');
+  return {
+    sourceSql: `COPY (SELECT ${columns} FROM ${qualify(input.sourceSchema, input.table)} WHERE ${
+      input.whereSql
+    }) TO STDOUT`,
+    sourceBindings: input.sourceBindings ?? [],
+    targetSql: `COPY ${qualify(input.targetSchema, input.table)} (${columns}) FROM STDIN`,
+  };
+};
+
+export const buildSharedTablePsqlCopyPlan = (input: {
+  sourceUrl: string;
+  targetUrl: string;
+  sourceSchema: string;
+  targetSchema: string;
+  table: string;
+  columns: string[];
+  whereSql: string;
+  targetWhereSql?: string;
+  targetResetSql?: string;
+  snapshotId?: string;
+}): ISharedTablePsqlCopyPlan => {
+  const plan = buildSharedTableCopyPlan(input);
+  const sourceSql = withExportedSnapshot(plan.sourceSql, input.snapshotId);
+  const targetResetSql =
+    input.targetResetSql ??
+    `DELETE FROM ${qualify(input.targetSchema, input.table)} WHERE ${
+      input.targetWhereSql ?? input.whereSql
+    }`;
+  return {
+    table: input.table,
+    label: `shared-table:${input.table}`,
+    sourceSql,
+    targetSql: plan.targetSql,
+    source: {
+      command: 'psql',
+      args: psqlArgs(input.sourceUrl, sourceSql),
+    },
+    target: {
+      command: 'psql',
+      args: psqlArgs(input.targetUrl, plan.targetSql),
+    },
+    targetReset: {
+      command: 'psql',
+      args: psqlArgs(input.targetUrl, targetResetSql),
+    },
+  };
+};
+
+export const buildSharedTablePostgresFdwCopyPlan = (input: {
+  sourceUrl: string;
+  targetUrl: string;
+  sourceSchema: string;
+  targetSchema: string;
+  table: string;
+  columns: string[];
+  whereSql: string;
+  targetWhereSql?: string;
+  targetResetSql?: string;
+  fdwSchema: string;
+  serverName: string;
+}): ISharedTablePostgresFdwCopyPlan => {
+  if (!input.columns.length) {
+    throw new Error(`Shared table ${input.table} requires an explicit column list`);
+  }
+  if (!input.whereSql.trim()) {
+    throw new Error(`Shared table ${input.table} requires a scoped WHERE clause`);
+  }
+
+  const source = parsePostgresUrl(input.sourceUrl);
+  const columns = input.columns.map(quoteIdent).join(', ');
+  const serverOptions = fdwOptions({
+    host: source.host,
+    port: source.port,
+    dbname: source.dbname,
+    sslmode: source.sslmode,
+  });
+  const userMappingOptions = fdwOptions({
+    user: source.user,
+    password: source.password,
+  });
+  const importLimit = quoteIdent(input.table);
+  const targetTable = qualify(input.targetSchema, input.table);
+  const foreignTable = qualify(input.fdwSchema, input.table);
+
+  const sql = [
+    'BEGIN',
+    'CREATE EXTENSION IF NOT EXISTS postgres_fdw',
+    `CREATE SCHEMA ${quoteIdent(input.fdwSchema)}`,
+    `CREATE SERVER ${quoteIdent(
+      input.serverName
+    )} FOREIGN DATA WRAPPER postgres_fdw OPTIONS (${serverOptions})`,
+    userMappingOptions
+      ? `CREATE USER MAPPING FOR CURRENT_USER SERVER ${quoteIdent(
+          input.serverName
+        )} OPTIONS (${userMappingOptions})`
+      : '',
+    `IMPORT FOREIGN SCHEMA ${quoteIdent(input.sourceSchema)} LIMIT TO (${importLimit}) FROM SERVER ${quoteIdent(
+      input.serverName
+    )} INTO ${quoteIdent(input.fdwSchema)}`,
+    // Scoped delete keeps FDW inserts restart-safe across per-table retries.
+    input.targetResetSql ??
+      `DELETE FROM ${targetTable} WHERE ${input.targetWhereSql ?? input.whereSql}`,
+    `INSERT INTO ${targetTable} (${columns}) SELECT ${columns} FROM ${foreignTable} WHERE ${input.whereSql}`,
+    `DROP SERVER ${quoteIdent(input.serverName)} CASCADE`,
+    `DROP SCHEMA ${quoteIdent(input.fdwSchema)} CASCADE`,
+    'COMMIT',
+  ]
+    .filter(Boolean)
+    .map((statement) => `${statement};`)
+    .join('\n');
+
+  return {
+    table: input.table,
+    sql,
+    target: {
+      command: 'psql',
+      args: psqlArgs(input.targetUrl, sql),
+    },
+  };
+};
+
+const computedOutboxColumns = [
+  'id',
+  'base_id',
+  'worker_lane',
+  'seed_table_id',
+  'seed_record_ids',
+  'change_type',
+  'steps',
+  'edges',
+  'status',
+  'attempts',
+  'max_attempts',
+  'next_run_at',
+  'locked_at',
+  'locked_by',
+  'last_error',
+  'estimated_complexity',
+  'plan_hash',
+  'dirty_stats',
+  'run_id',
+  'origin_run_ids',
+  'run_total_steps',
+  'run_completed_steps_before',
+  'affected_table_ids',
+  'affected_field_ids',
+  'sync_max_level',
+  'source_changed_at',
+  'stage_depth',
+  'predecessor_task_id',
+  'created_at',
+  'updated_at',
+];
+
+const computedRunHistoryColumns = [
+  'task_id',
+  'base_id',
+  'seed_table_id',
+  'change_type',
+  'run_id',
+  'origin_run_ids',
+  'steps',
+  'edges',
+  'affected_table_ids',
+  'affected_field_ids',
+  'source_field_ids',
+  'seed_record_count',
+  'stage_depth',
+  'predecessor_task_id',
+  'run_total_steps',
+  'run_completed_steps_before',
+  'sync_max_level',
+  'estimated_complexity',
+  'attempts',
+  'outcome',
+  'source_changed_at',
+  'enqueued_at',
+  'started_at',
+  'completed_at',
+  'duration_ms',
+];
+
+const recordHistoryColumns = [
+  'id',
+  'table_id',
+  'record_id',
+  'field_id',
+  'before',
+  'after',
+  'created_time',
+  'created_by',
+];
+
+const buildMigrationSharedTableDefinitions = (input: {
+  sourceSchema: string;
+  targetSchema: string;
+  spaceId: string;
+  spaceIds?: string[];
+  baseIds: string[];
+  tableIds: string[];
+  sharedTableIds?: string[];
+  /**
+   * When true, include computed_update_pause_scope.
+   * Defaults to false: space migration must not copy source pause scopes or
+   * they freeze computed updates on the target after switch. Base moves opt in.
+   */
+  includePauseScopes?: boolean;
+  /** When false, only base/table pause scopes are copied (base move). Default true. */
+  includeSpacePauseScopes?: boolean;
+  sourceHasDeadLetterSeed?: boolean;
+}) => {
+  const sharedTableIds = input.sharedTableIds?.length ? input.sharedTableIds : input.tableIds;
+  const tablePredicate = textArrayPredicate('table_id', sharedTableIds);
+  const basePredicate = textArrayPredicate('base_id', input.baseIds);
+  const spaceIds = input.spaceIds?.length ? input.spaceIds : [input.spaceId];
+  const outboxSeedPredicate = [
+    textArrayPredicate('table_id', input.tableIds),
+    `"task_id" IN (SELECT "id" FROM ${qualify(
+      input.sourceSchema,
+      'computed_update_outbox'
+    )} WHERE ${basePredicate})`,
+  ].join(' AND ');
+  const targetOutboxSeedPredicate = [
+    textArrayPredicate('table_id', input.tableIds),
+    `"task_id" IN (SELECT "id" FROM ${qualify(
+      input.targetSchema,
+      'computed_update_outbox'
+    )} WHERE ${basePredicate})`,
+  ].join(' AND ');
+  const undoPredicate = `split_part("table_name", '.', 1) = ANY(${textArray(input.baseIds)})`;
+
+  const definitions: Array<{
+    table: string;
+    columns: string[];
+    whereSql: string;
+    targetWhereSql?: string;
+    targetResetSql?: string;
+  }> = [
+    {
+      table: 'record_history',
+      columns: recordHistoryColumns,
+      whereSql: tablePredicate,
+    },
+    {
+      table: 'table_trash',
+      columns: ['id', 'table_id', 'resource_type', 'snapshot', 'created_time', 'created_by'],
+      whereSql: tablePredicate,
+    },
+    {
+      table: 'record_trash',
+      columns: [
+        'id',
+        'table_id',
+        'record_id',
+        'snapshot',
+        'created_time',
+        'created_by',
+        'reason',
+        'record_created_time',
+        'record_created_by',
+        'record_last_modified_time',
+        'record_last_modified_by',
+        'operation_id',
+      ],
+      whereSql: tablePredicate,
+    },
+    {
+      // Cell attachment refs are written with records on dataDb. Copy leftover
+      // pre-bind rows from the source meta db so export/usage see a complete index.
+      table: 'attachments_table',
+      columns: [
+        'id',
+        'attachment_id',
+        'token',
+        'name',
+        'table_id',
+        'record_id',
+        'field_id',
+        'created_time',
+        'created_by',
+      ],
+      whereSql: tablePredicate,
+    },
+  ];
+
+  if (input.includePauseScopes === true) {
+    const pauseScopeParts = [
+      `("scope_type" = 'base' AND "scope_id" = ANY(${textArray(input.baseIds)}))`,
+      `("scope_type" = 'table' AND "scope_id" = ANY(${textArray(sharedTableIds)}))`,
+    ];
+    if (input.includeSpacePauseScopes !== false) {
+      pauseScopeParts.unshift(
+        `("scope_type" = 'space' AND "scope_id" = ANY(${textArray(spaceIds)}))`
+      );
+    }
+    definitions.push({
+      table: 'computed_update_pause_scope',
+      columns: [
+        'id',
+        'scope_type',
+        'scope_id',
+        'paused_at',
+        'paused_by',
+        'resume_at',
+        'reason',
+        'updated_at',
+        'updated_by',
+      ],
+      whereSql: pauseScopeParts.join(' OR '),
+    });
+  }
+
+  const reliabilityIssuePredicate = (schema: string) =>
+    `"issue_id" IN (SELECT "id" FROM ${qualify(schema, 'computed_reliability_issue')} WHERE ${basePredicate})`;
+  definitions.push(
+    {
+      table: 'computed_update_outbox',
+      columns: computedOutboxColumns,
+      whereSql: basePredicate,
+    },
+    {
+      table: 'computed_update_dead_letter',
+      columns: [...computedOutboxColumns, 'trace_data', 'failed_at'],
+      whereSql: basePredicate,
+      targetResetSql: `SELECT ${qualify(
+        input.targetSchema,
+        'computed_outbox_discard_base'
+      )}(${textArray(input.baseIds)})`,
+    },
+    {
+      table: 'computed_update_dead_letter_seed',
+      columns: ['task_id', 'table_id', 'record_id'],
+      whereSql: `"task_id" IN (SELECT "id" FROM ${qualify(
+        input.sourceSchema,
+        'computed_update_dead_letter'
+      )} WHERE ${basePredicate})`,
+      targetWhereSql: `"task_id" IN (SELECT "id" FROM ${qualify(
+        input.targetSchema,
+        'computed_update_dead_letter'
+      )} WHERE ${basePredicate})`,
+    },
+    {
+      table: 'computed_update_run_history',
+      columns: computedRunHistoryColumns,
+      whereSql: basePredicate,
+    },
+    {
+      table: 'computed_update_outbox_seed',
+      columns: ['id', 'task_id', 'table_id', 'record_id'],
+      whereSql: outboxSeedPredicate,
+      targetWhereSql: targetOutboxSeedPredicate,
+    },
+    {
+      table: '__undo_log',
+      // old_tuple is database-local physical evidence. Omission deliberately leaves it NULL
+      // on the target; never copy source xmin/ctid/relation identity into a new database.
+      columns: [
+        'id',
+        'batch_id',
+        'operation',
+        'table_name',
+        'record_id',
+        'old_row',
+        'new_row',
+        'created_at',
+      ],
+      whereSql: undoPredicate,
+    },
+    {
+      table: 'record_removal_tombstone',
+      columns: ['id', 'table_id', 'record_id', 'type', 'created_time'],
+      whereSql: tablePredicate,
+    },
+    {
+      table: 'domain_event_outbox',
+      columns: [
+        'id',
+        'base_id',
+        'table_id',
+        'message_name',
+        'schema_version',
+        'aggregate_id',
+        'payload',
+        'payload_bytes',
+        'catalog_generation',
+        'required_consumers',
+        'binding_id',
+        'storage_epoch',
+        'unpublished',
+        'settled',
+        'settled_at',
+        'created_at',
+      ],
+      whereSql: basePredicate,
+    },
+    {
+      table: 'domain_event_delivery',
+      columns: [
+        'id',
+        'event_id',
+        'consumer_id',
+        'status',
+        'attempts',
+        'max_attempts',
+        'lease_token',
+        'lease_expires_at',
+        'next_attempt_at',
+        'last_error',
+        'created_at',
+      ],
+      whereSql: `"event_id" IN (SELECT "id" FROM ${qualify(input.sourceSchema, 'domain_event_outbox')} WHERE ${basePredicate})`,
+      targetWhereSql: `"event_id" IN (SELECT "id" FROM ${qualify(input.targetSchema, 'domain_event_outbox')} WHERE ${basePredicate})`,
+    },
+    {
+      table: 'domain_event_inbox',
+      columns: ['consumer_id', 'event_id', 'created_at'],
+      whereSql: `"event_id" IN (SELECT "id" FROM ${qualify(input.sourceSchema, 'domain_event_outbox')} WHERE ${basePredicate})`,
+      targetWhereSql: `"event_id" IN (SELECT "id" FROM ${qualify(input.targetSchema, 'domain_event_outbox')} WHERE ${basePredicate})`,
+    }
+  );
+
+  definitions.push(
+    {
+      table: 'computed_reliability_issue',
+      columns: [
+        'failure_kind',
+        'failure_phase',
+        'error_code',
+        'id',
+        'task_id',
+        'base_id',
+        'source_table_id',
+        'error',
+        'status',
+        'scope_complete',
+        'occurrences',
+        'first_seen_at',
+        'last_seen_at',
+        'closed_at',
+        'confirmed_by',
+        'confirmation_reason',
+      ],
+      whereSql: basePredicate,
+    },
+    {
+      table: 'computed_reliability_scope',
+      columns: ['issue_id', 'table_id', 'field_id'],
+      whereSql: reliabilityIssuePredicate(input.sourceSchema),
+      targetWhereSql: reliabilityIssuePredicate(input.targetSchema),
+    }
+  );
+
+  return input.sourceHasDeadLetterSeed === false
+    ? definitions.filter((item) => item.table !== 'computed_update_dead_letter_seed')
+    : definitions;
+};
+
+export const buildMigrationSharedTableSqlCopyPlans = (input: {
+  sourceSchema: string;
+  targetSchema: string;
+  spaceId: string;
+  spaceIds?: string[];
+  baseIds: string[];
+  tableIds: string[];
+  sharedTableIds?: string[];
+  sourceHasDeadLetterSeed?: boolean;
+  includePauseScopes?: boolean;
+  includeSpacePauseScopes?: boolean;
+}): Array<{ table: string; resetSql: string; copySql: string }> => {
+  return buildMigrationSharedTableDefinitions(input).map((item) => {
+    const columns = item.columns.map(quoteIdent).join(', ');
+    const targetTable = qualify(input.targetSchema, item.table);
+    const sourceTable = qualify(input.sourceSchema, item.table);
+    return {
+      table: item.table,
+      resetSql:
+        item.targetResetSql ??
+        `DELETE FROM ${targetTable} WHERE ${item.targetWhereSql ?? item.whereSql}`,
+      copySql: `INSERT INTO ${targetTable} (${columns}) SELECT ${columns} FROM ${sourceTable} WHERE ${item.whereSql}`,
+    };
+  });
+};
+
+export const buildMigrationSharedTablePsqlCopyPlans = (input: {
+  sourceUrl: string;
+  targetUrl: string;
+  sourceSchema: string;
+  targetSchema: string;
+  spaceId: string;
+  spaceIds?: string[];
+  baseIds: string[];
+  tableIds: string[];
+  sharedTableIds?: string[];
+  snapshotId?: string;
+  sourceHasDeadLetterSeed?: boolean;
+  includePauseScopes?: boolean;
+  includeSpacePauseScopes?: boolean;
+}): ISharedTablePsqlCopyPlan[] => {
+  const shared = buildMigrationSharedTableDefinitions(input);
+
+  return shared.map((item) =>
+    buildSharedTablePsqlCopyPlan({
+      sourceUrl: input.sourceUrl,
+      targetUrl: input.targetUrl,
+      sourceSchema: input.sourceSchema,
+      targetSchema: input.targetSchema,
+      table: item.table,
+      columns: item.columns,
+      whereSql: item.whereSql,
+      targetWhereSql: item.targetWhereSql,
+      targetResetSql: item.targetResetSql,
+      snapshotId: input.snapshotId,
+    })
+  );
+};
+
+export const buildMigrationSharedTablePostgresFdwCopyPlans = (input: {
+  sourceUrl: string;
+  targetUrl: string;
+  sourceSchema: string;
+  targetSchema: string;
+  spaceId: string;
+  spaceIds?: string[];
+  baseIds: string[];
+  tableIds: string[];
+  sharedTableIds?: string[];
+  fdwSchemaPrefix: string;
+  serverNamePrefix: string;
+  sourceHasDeadLetterSeed?: boolean;
+  includePauseScopes?: boolean;
+  includeSpacePauseScopes?: boolean;
+}): ISharedTablePostgresFdwCopyPlan[] => {
+  const shared = buildMigrationSharedTableDefinitions(input);
+
+  return shared.map((_item, index) => {
+    const fdwSchema = `${input.fdwSchemaPrefix}_${index}`;
+    const item = buildMigrationSharedTableDefinitions({ ...input, sourceSchema: fdwSchema })[index];
+    return buildSharedTablePostgresFdwCopyPlan({
+      sourceUrl: input.sourceUrl,
+      targetUrl: input.targetUrl,
+      sourceSchema: input.sourceSchema,
+      targetSchema: input.targetSchema,
+      table: item.table,
+      columns: item.columns,
+      // A child's source predicate may reference its parent, but the FDW schema
+      // imports only this relation. The target parent is already copied in plan
+      // order, so its scoped predicate is valid against the foreign child table.
+      whereSql: item.targetWhereSql ?? item.whereSql,
+      targetWhereSql: item.targetWhereSql,
+      targetResetSql: item.targetResetSql,
+      fdwSchema,
+      serverName: `${input.serverNamePrefix}_${index}`,
+    });
+  });
+};

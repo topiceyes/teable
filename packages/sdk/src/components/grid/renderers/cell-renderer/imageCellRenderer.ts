@@ -15,33 +15,64 @@ import type {
 import { CellRegionType, CellType } from './interface';
 
 const imagePositionCache: LRUCache<string, (IRectangle & { id: string })[]> = new LRUCache({
-  max: 10,
+  max: 200,
 });
 
 const INNER_PADDING = 4;
 
 const { cellHorizontalPadding, cellVerticalPaddingXS } = GRID_DEFAULT;
 
-const getImageCollection = (
-  data: IImageData[],
-  loadImg: (url: string) => HTMLImageElement | ImageBitmap | undefined
+const drawImagePlaceholder = (
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  fill: string
 ) => {
-  const collection: { id: string; img: HTMLImageElement | ImageBitmap }[] = [];
+  drawRect(ctx, {
+    x,
+    y,
+    width,
+    height,
+    radius: INNER_PADDING,
+    fill,
+  });
+};
 
-  for (let index = 0; index < data.length; index++) {
-    const { id, url } = data[index];
-    const img = loadImg(url);
-
-    if (img !== undefined) {
-      collection.push({ id, img });
-    }
+// A plain placeholder while the image is in flight; once the load has failed,
+// the file icon (with the placeholder for the frames until the icon is ready).
+const drawImageFallback = (
+  ctx: CanvasRenderingContext2D,
+  props: IRectangle & { fallbackImg?: HTMLImageElement | ImageBitmap; fill: string }
+) => {
+  const { fallbackImg, x, y, width, height, fill } = props;
+  if (!fallbackImg) {
+    drawImagePlaceholder(ctx, x, y, width, height, fill);
+    return;
   }
-
-  return collection;
+  // The file icon is square: fit it into the slot instead of stretching it.
+  const side = Math.min(width, height);
+  ctx.drawImage(fallbackImg, x + (width - side) / 2, y + (height - side) / 2, side, side);
 };
 
 const generateCacheKey = (data: IImageData[], width: number) => {
   return `${String(width)}-${data.map(({ id }) => id).join(',')}`;
+};
+
+const getImageWidth = (
+  imageItem: IImageData,
+  img: HTMLImageElement | ImageBitmap | undefined,
+  imgHeight: number
+) => {
+  const imageRatio = img?.height ? img.width / img.height : undefined;
+  const { width, height } = imageItem;
+  const metadataRatio =
+    typeof width === 'number' && typeof height === 'number' && width > 0 && height > 0
+      ? width / height
+      : undefined;
+  const ratio = imageRatio ?? metadataRatio ?? 1;
+  return imgHeight * ratio;
 };
 
 export const imageCellRenderer: IInternalCellRenderer<IImageCell> = {
@@ -51,16 +82,12 @@ export const imageCellRenderer: IInternalCellRenderer<IImageCell> = {
   draw: (cell: IImageCell, props: ICellRenderProps) => {
     const { rect, columnIndex, rowIndex, theme, ctx, imageManager, isActive, spriteManager } =
       props;
-    const { iconSizeSM, cellLineColor } = theme;
+    const { iconSizeSM, cellLineColor, cellOptionBgHighlight } = theme;
     const { data, readonly } = cell;
     const { x, y, width, height } = rect;
     const editable = !readonly && isActive;
     const initPadding = editable ? iconSizeSM + 2 : 0;
     const imgHeight = height - cellVerticalPaddingXS * 2;
-
-    const imageCollection = getImageCollection(data, (url) =>
-      imageManager.loadOrGetImage(url, columnIndex, rowIndex)
-    );
 
     if (editable) {
       spriteManager.drawSprite(ctx, {
@@ -72,7 +99,7 @@ export const imageCellRenderer: IInternalCellRenderer<IImageCell> = {
       });
     }
 
-    if (!imageCollection.length) return;
+    if (!data.length) return;
 
     ctx.save();
     ctx.beginPath();
@@ -84,10 +111,11 @@ export const imageCellRenderer: IInternalCellRenderer<IImageCell> = {
 
     let drawX = x + cellHorizontalPadding + initPadding;
 
-    for (const imgItem of imageCollection) {
+    for (const imageItem of data) {
       if (drawX > x + width) break;
-      const { id, img } = imgItem;
-      const imgWidth = img.width * (imgHeight / img.height);
+      const { id, url, fallbackUrl } = imageItem;
+      const img = imageManager.loadOrGetImage(url, columnIndex, rowIndex);
+      const imgWidth = getImageWidth(imageItem, img, imgHeight);
       drawRect(ctx, {
         x: drawX,
         y: y + cellVerticalPaddingXS,
@@ -97,17 +125,31 @@ export const imageCellRenderer: IInternalCellRenderer<IImageCell> = {
         stroke: cellLineColor,
       });
 
-      ctx.save();
-      drawRect(ctx, {
-        x: drawX,
-        y: y + cellVerticalPaddingXS,
-        width: imgWidth,
-        height: imgHeight,
-        radius: INNER_PADDING,
-      });
-      ctx.clip();
-      ctx.drawImage(img, drawX, y + cellVerticalPaddingXS, imgWidth, imgHeight);
-      ctx.restore();
+      if (img) {
+        ctx.save();
+        drawRect(ctx, {
+          x: drawX,
+          y: y + cellVerticalPaddingXS,
+          width: imgWidth,
+          height: imgHeight,
+          radius: INNER_PADDING,
+        });
+        ctx.clip();
+        ctx.drawImage(img, drawX, y + cellVerticalPaddingXS, imgWidth, imgHeight);
+        ctx.restore();
+      } else {
+        drawImageFallback(ctx, {
+          fallbackImg:
+            fallbackUrl && imageManager.hasFailed(url)
+              ? imageManager.loadOrGetImage(fallbackUrl, columnIndex, rowIndex)
+              : undefined,
+          x: drawX,
+          y: y + cellVerticalPaddingXS,
+          width: imgWidth,
+          height: imgHeight,
+          fill: cellOptionBgHighlight,
+        });
+      }
 
       positions.push({
         id,
@@ -127,7 +169,6 @@ export const imageCellRenderer: IInternalCellRenderer<IImageCell> = {
     const { data, readonly } = cell;
     const { width, height, theme, isActive, hoverCellPosition } = props;
     const editable = !readonly && isActive;
-    if (!editable) return { type: CellRegionType.Blank };
 
     const { iconSizeSM } = theme;
     const [hoverX, hoverY] = hoverCellPosition;
@@ -135,6 +176,7 @@ export const imageCellRenderer: IInternalCellRenderer<IImageCell> = {
     const startY = (height - iconSizeSM) / 2;
 
     if (
+      editable &&
       isPointInsideRectangle(
         [hoverX, hoverY],
         [startX, startY],
@@ -166,7 +208,8 @@ export const imageCellRenderer: IInternalCellRenderer<IImageCell> = {
     const cellRegion = imageCellRenderer.checkRegion?.(cell, props, true);
     if (!cellRegion || cellRegion.type === CellRegionType.Blank) return;
     if (cellRegion.type === CellRegionType.Preview) {
-      return cell?.onPreview?.(cellRegion.data as string);
+      cell?.onPreview?.(cellRegion.data as string);
+      return callback(cellRegion);
     }
     callback(cellRegion);
   },

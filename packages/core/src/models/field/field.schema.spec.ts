@@ -1,8 +1,12 @@
+import type { IFilter } from '../view/filter';
 import { Colors } from './colors';
-import { CellValueType, FieldType } from './constant';
+import { CellValueType, DbFieldType, FieldType, Relationship } from './constant';
 import { RollupFieldCore, SingleLineTextFieldCore } from './derivate';
-import { createFieldRoSchema, unionFieldOptionsRoSchema } from './field.schema';
+import { unionFieldOptionsRoSchema } from './field-unions.schema';
+import type { IFieldRo } from './field.schema';
+import { convertFieldRoSchema, createFieldRoSchema, fieldVoSchema } from './field.schema';
 import { NumberFormattingType } from './formatting';
+import type { ILookupConditionalOptions } from './lookup-options-base.schema';
 import type { IUnionShowAs } from './show-as';
 import { SingleNumberDisplayType } from './show-as';
 
@@ -14,6 +18,7 @@ describe('field Schema Test', () => {
         type: NumberFormattingType.Decimal,
         precision: 2,
       },
+      timeZone: 'Asia/Shanghai',
     };
 
     const result = unionFieldOptionsRoSchema.safeParse(options);
@@ -29,6 +34,87 @@ describe('field Schema Test', () => {
 
     const result = createFieldRoSchema.safeParse(fieldRo);
     expect(result.success).toBe(true);
+  });
+
+  describe('conditional rollup creation defaults', () => {
+    const options = {
+      foreignTableId: 'tblForeign000000001',
+      lookupFieldId: 'fldAmount0000000001',
+      filter: {
+        conjunction: 'and',
+        filterSet: [{ fieldId: 'fldAmount0000000001', operator: 'isGreater', value: 15 }],
+      },
+    };
+
+    it('defaults an omitted expression to countall without mutating the input', () => {
+      const input = { type: FieldType.ConditionalRollup, options };
+      const result = createFieldRoSchema.parse(input);
+      expect(result.options).toEqual({ ...options, expression: 'countall({values})' });
+      expect(input.options).not.toHaveProperty('expression');
+    });
+
+    it('preserves explicit expressions and rejects invalid expressions', () => {
+      const input = { type: FieldType.ConditionalRollup, options };
+      expect(
+        createFieldRoSchema.parse({
+          ...input,
+          options: { ...options, expression: 'sum({values})' },
+        }).options
+      ).toEqual({ ...options, expression: 'sum({values})' });
+      for (const expression of ['', null, 'invalid({values})']) {
+        expect(
+          createFieldRoSchema.safeParse({ ...input, options: { ...options, expression } }).success
+        ).toBe(false);
+      }
+    });
+
+    it('does not default conversion requests or bypass required filters', () => {
+      expect(
+        convertFieldRoSchema.safeParse({ type: FieldType.ConditionalRollup, options }).success
+      ).toBe(false);
+      expect(
+        createFieldRoSchema.safeParse({
+          type: FieldType.ConditionalRollup,
+          options: { ...options, filter: null },
+        }).success
+      ).toBe(false);
+    });
+  });
+
+  // T6606: a defaulted passthrough union member must not inject a phantom
+  // `expression` into other field types' options (e.g. longText showAs).
+  it('should not inject a default expression into longText options', () => {
+    const options = { showAs: { type: 'markdown' } };
+
+    for (const schema of [createFieldRoSchema, convertFieldRoSchema]) {
+      const result = schema.safeParse({ type: FieldType.LongText, options });
+      expect(result.success).toBe(true);
+      result.success && expect(result.data.options).toEqual(options);
+    }
+  });
+
+  it('ignores forged formula safety metadata in ordinary create and convert requests', () => {
+    for (const schema of [createFieldRoSchema, convertFieldRoSchema]) {
+      const result = schema.parse({
+        type: FieldType.Formula,
+        options: { expression: '1' },
+        meta: { persistedAsGeneratedColumn: true, formulaSafetyVersion: 1 },
+      });
+      expect(result).not.toHaveProperty('meta');
+      expect(result.options).toEqual({ expression: '1' });
+    }
+  });
+
+  it('should parse lastModifiedTime options without requiring expression', () => {
+    const result = unionFieldOptionsRoSchema.safeParse({
+      formatting: {
+        date: 'YYYY-MM-DD',
+        time: 'HH:mm',
+        timeZone: 'Asia/Shanghai',
+      },
+    });
+    expect(result.success).toBe(true);
+    result.success && expect(result.data).not.toHaveProperty('expression');
   });
 
   it('should return true when isLookup with lookupOptions', () => {
@@ -120,5 +206,317 @@ describe('field Schema Test', () => {
 
     const result2 = createFieldRoSchema.safeParse(lookUpFieldRo);
     expect(result2.success).toBe(true);
+  });
+
+  it('should return false when conditional lookup missing filter', () => {
+    const fieldRo = {
+      type: FieldType.SingleLineText,
+      isLookup: true,
+      isConditionalLookup: true,
+      lookupOptions: {
+        foreignTableId: 'tblForeign',
+        lookupFieldId: 'fldForeign',
+      } as ILookupConditionalOptions,
+    } satisfies IFieldRo;
+
+    const result = createFieldRoSchema.safeParse(fieldRo);
+    expect(result.success).toBe(false);
+  });
+
+  it('should return true when conditional lookup has filter', () => {
+    const filter = {
+      conjunction: 'and',
+      filterSet: [
+        {
+          fieldId: 'fldFilter',
+          operator: 'is',
+          value: 'foo',
+        },
+      ],
+    } as IFilter;
+
+    const fieldRo: IFieldRo = {
+      type: FieldType.SingleLineText,
+      isLookup: true,
+      isConditionalLookup: true,
+      lookupOptions: {
+        foreignTableId: 'tblForeign',
+        lookupFieldId: 'fldForeign',
+        filter,
+      },
+    };
+
+    const result = createFieldRoSchema.safeParse(fieldRo);
+    expect(result.success).toBe(true);
+  });
+
+  it('should allow omitted options for simple text field', () => {
+    const fieldRo: IFieldRo = {
+      type: FieldType.SingleLineText,
+      name: 'Title',
+    };
+
+    const result = createFieldRoSchema.safeParse(fieldRo);
+    expect(result.success).toBe(true);
+  });
+
+  it('should return false when isConditionalLookup true without isLookup flag', () => {
+    const fieldRo: IFieldRo = {
+      type: FieldType.SingleLineText,
+      isConditionalLookup: true,
+      lookupOptions: {
+        foreignTableId: 'tblForeign',
+        lookupFieldId: 'fldForeign',
+        filter: {
+          conjunction: 'and',
+          filterSet: [
+            {
+              fieldId: 'fldFilter',
+              operator: 'is',
+              value: 'foo',
+            },
+          ],
+        } as IFilter,
+      },
+    };
+
+    const result = createFieldRoSchema.safeParse(fieldRo);
+    expect(result.success).toBe(false);
+  });
+
+  it('should normalize realtime-cleared optional field shape props from null to undefined', () => {
+    const fieldVo = {
+      id: 'fldRealtimeLink',
+      name: 'Link Field',
+      type: FieldType.Link,
+      options: {
+        relationship: Relationship.ManyOne,
+        foreignTableId: 'tblForeign',
+        lookupFieldId: 'fldLookup',
+      },
+      description: null,
+      meta: null,
+      isLookup: null,
+      isConditionalLookup: null,
+      lookupOptions: null,
+      isComputed: null,
+      isMultipleCellValue: null,
+      recordRead: null,
+      recordCreate: null,
+      cellValueType: CellValueType.String,
+      dbFieldType: DbFieldType.Json,
+      dbFieldName: 'Link_Field',
+    };
+
+    const result = fieldVoSchema.safeParse(fieldVo);
+    expect(result.success).toBe(true);
+    if (!result.success) {
+      return;
+    }
+
+    expect(result.data.description).toBeUndefined();
+    expect(result.data.meta).toBeUndefined();
+    expect(result.data.isLookup).toBeUndefined();
+    expect(result.data.isConditionalLookup).toBeUndefined();
+    expect(result.data.lookupOptions).toBeUndefined();
+    expect(result.data.isComputed).toBeUndefined();
+    expect(result.data.isMultipleCellValue).toBeUndefined();
+    expect(result.data.recordRead).toBeUndefined();
+    expect(result.data.recordCreate).toBeUndefined();
+  });
+
+  it('should parse lookup field VO with link display config in lookupOptions', () => {
+    const fieldVo = {
+      id: 'fldLookupDisplayCfg',
+      name: 'Lookup Field',
+      type: FieldType.SingleLineText,
+      options: SingleLineTextFieldCore.defaultOptions(),
+      isLookup: true,
+      lookupOptions: {
+        foreignTableId: 'tblForeign',
+        lookupFieldId: 'fldForeign',
+        linkFieldId: 'fldLink',
+        relationship: Relationship.ManyOne,
+        fkHostTableName: 'table_foreign',
+        selfKeyName: 'self_id',
+        foreignKeyName: 'foreign_id',
+        filterByViewId: 'viwForeign',
+        visibleFieldIds: ['fldForeign', 'fldAnother'],
+      },
+      cellValueType: CellValueType.String,
+      dbFieldType: DbFieldType.Text,
+      dbFieldName: 'lookup_field',
+    };
+
+    const result = fieldVoSchema.safeParse(fieldVo);
+    expect(result.success).toBe(true);
+    if (!result.success) {
+      return;
+    }
+
+    expect(result.data.lookupOptions).toMatchObject({
+      filterByViewId: 'viwForeign',
+      visibleFieldIds: ['fldForeign', 'fldAnother'],
+    });
+  });
+
+  it('should parse persisted lookup formula field VO with extended link metadata', () => {
+    const fieldVo = {
+      id: 'fldLookupFormulaCfg',
+      name: '正式坐席数量',
+      type: FieldType.Formula,
+      options: {
+        expression: '1',
+        timeZone: 'Asia/Shanghai',
+        formatting: {
+          type: 'decimal',
+          precision: 0,
+        },
+      },
+      isLookup: true,
+      lookupOptions: {
+        baseId: 'bseForeign',
+        relationship: Relationship.OneMany,
+        foreignTableId: 'tblForeign',
+        lookupFieldId: 'fldForeign',
+        fkHostTableName: 'bseForeign.table_foreign',
+        selfKeyName: '__fk_lookup',
+        foreignKeyName: '__id',
+        filterByViewId: 'viwForeign',
+        isOneWay: false,
+        symmetricFieldId: 'fldSymmetric',
+        filter: {
+          conjunction: 'and',
+          filterSet: [{ fieldId: 'fldStatus', operator: 'is', value: '有效' }],
+        },
+        linkFieldId: 'fldLink',
+      },
+      unique: false,
+      isComputed: true,
+      cellValueType: CellValueType.Number,
+      isMultipleCellValue: true,
+      dbFieldType: DbFieldType.Json,
+      dbFieldName: 'lookup_formula',
+      recordRead: false,
+      recordCreate: false,
+    };
+
+    const result = fieldVoSchema.safeParse(fieldVo);
+    expect(result.success).toBe(true);
+    if (!result.success) {
+      return;
+    }
+
+    expect(result.data.isLookup).toBe(true);
+    expect(result.data.type).toBe(FieldType.Formula);
+    expect(result.data.lookupOptions).toMatchObject({
+      isOneWay: false,
+      symmetricFieldId: 'fldSymmetric',
+      linkFieldId: 'fldLink',
+    });
+  });
+
+  it('should parse representative persisted field VOs for other system field types', () => {
+    const fieldVos = [
+      {
+        id: 'fldAttachmentField',
+        name: 'Files',
+        type: FieldType.Attachment,
+        options: {},
+        cellValueType: CellValueType.String,
+        isMultipleCellValue: true,
+        dbFieldType: DbFieldType.Json,
+        dbFieldName: 'files',
+      },
+      {
+        id: 'fldAutoNumberField',
+        name: 'ID',
+        type: FieldType.AutoNumber,
+        options: {
+          expression: 'AUTO_NUMBER()',
+        },
+        meta: {
+          persistedAsGeneratedColumn: true,
+        },
+        isComputed: true,
+        cellValueType: CellValueType.Number,
+        dbFieldType: DbFieldType.Integer,
+        dbFieldName: 'id_auto',
+      },
+      {
+        id: 'fldCreatedTime',
+        name: 'Created Time',
+        type: FieldType.CreatedTime,
+        options: {
+          expression: 'CREATED_TIME()',
+          formatting: {
+            date: 'YYYY-MM-DD',
+            time: 'HH:mm',
+            timeZone: 'UTC',
+          },
+        },
+        meta: {
+          persistedAsGeneratedColumn: true,
+        },
+        isComputed: true,
+        cellValueType: CellValueType.DateTime,
+        dbFieldType: DbFieldType.DateTime,
+        dbFieldName: 'created_time',
+      },
+      {
+        id: 'fldLastModifiedTime',
+        name: 'Last Modified Time',
+        type: FieldType.LastModifiedTime,
+        options: {
+          expression: 'LAST_MODIFIED_TIME()',
+          formatting: {
+            date: 'YYYY-MM-DD',
+            time: 'HH:mm',
+            timeZone: 'UTC',
+          },
+          trackedFieldIds: ['fldTracked'],
+        },
+        meta: {
+          persistedAsGeneratedColumn: true,
+        },
+        isComputed: true,
+        cellValueType: CellValueType.DateTime,
+        dbFieldType: DbFieldType.DateTime,
+        dbFieldName: 'last_modified_time',
+      },
+      {
+        id: 'fldCreatedBy',
+        name: 'Created By',
+        type: FieldType.CreatedBy,
+        options: {},
+        meta: {
+          persistedAsGeneratedColumn: false,
+        },
+        isComputed: true,
+        cellValueType: CellValueType.String,
+        dbFieldType: DbFieldType.Text,
+        dbFieldName: 'created_by',
+      },
+      {
+        id: 'fldLastModifiedBy',
+        name: 'Last Modified By',
+        type: FieldType.LastModifiedBy,
+        options: {
+          trackedFieldIds: ['fldTracked'],
+        },
+        meta: {
+          persistedAsGeneratedColumn: false,
+        },
+        isComputed: true,
+        cellValueType: CellValueType.String,
+        dbFieldType: DbFieldType.Text,
+        dbFieldName: 'last_modified_by',
+      },
+    ];
+
+    fieldVos.forEach((fieldVo) => {
+      const result = fieldVoSchema.safeParse(fieldVo);
+      expect(result.success).toBe(true);
+    });
   });
 });

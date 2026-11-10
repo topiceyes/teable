@@ -1,10 +1,10 @@
 /* eslint-disable sonarjs/no-duplicate-string */
 import type { INestApplication } from '@nestjs/common';
-import type { ITableFullVo } from '@teable/core';
 import { FieldKeyType } from '@teable/core';
 import { PrismaService } from '@teable/db-main-prisma';
+import type { ITableFullVo } from '@teable/openapi';
 import { createBase, createSpace, deleteBase, deleteSpace } from '@teable/openapi';
-import { createRecords, createTable, deleteTable, initApp } from './utils/init-app';
+import { createRecords, createTable, permanentDeleteTable, initApp } from './utils/init-app';
 
 describe('Credit limit (e2e)', () => {
   let app: INestApplication;
@@ -38,7 +38,7 @@ describe('Credit limit (e2e)', () => {
     });
 
     afterEach(async () => {
-      await deleteTable(baseId, table.id);
+      await permanentDeleteTable(baseId, table.id);
       await deleteBase(baseId);
       await deleteSpace(spaceId);
     });
@@ -62,7 +62,7 @@ describe('Credit limit (e2e)', () => {
     });
 
     it('should create a record with credit', async () => {
-      prisma.space.update({
+      await prisma.space.update({
         where: {
           id: spaceId,
         },

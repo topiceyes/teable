@@ -1,0 +1,251 @@
+/**
+ * User-facing error message keys in the frontend `sdk` locale namespace
+ * (common-i18n `sdk.json`). A v2 error attaches one of these (plus its
+ * interpolation context) as `localization` at the site where the error is
+ * created; every layer up to HTTP passes it through untouched.
+ */
+export const sdkErrorI18nKeys = {
+  custom: {
+    recordFieldValueNotNull: 'httpErrors.custom.recordFieldValueNotNull',
+    recordFieldValueDuplicate: 'httpErrors.custom.recordFieldValueDuplicate',
+    recordDeleteBlockedByRequiredLink: 'httpErrors.custom.recordDeleteBlockedByRequiredLink',
+    recordDeleteBlockedByRequiredLinkGeneric:
+      'httpErrors.custom.recordDeleteBlockedByRequiredLinkGeneric',
+    recordDeleteBlockedByLink: 'httpErrors.custom.recordDeleteBlockedByLink',
+    linkBatchDuplicate: 'httpErrors.custom.linkBatchDuplicate',
+    linkOneManyDuplicate: 'httpErrors.custom.linkOneManyDuplicate',
+    linkOneOneDuplicate: 'httpErrors.custom.linkOneOneDuplicate',
+    fieldMaxColumnLimit: 'httpErrors.custom.fieldMaxColumnLimit',
+    fieldRequiredExistingValues: 'httpErrors.custom.fieldRequiredExistingValues',
+    fieldUniqueExistingValues: 'httpErrors.custom.fieldUniqueExistingValues',
+  },
+  field: {
+    cycleDetectedCreateFieldGeneric: 'httpErrors.field.cycleDetectedCreateFieldGeneric',
+    lookupFieldNotBelongToTable: 'httpErrors.field.lookupFieldNotBelongToTable',
+    choiceNameAlreadyExists: 'httpErrors.field.choiceNameAlreadyExists',
+    dbFieldNameAlreadyExists: 'httpErrors.field.dbFieldNameAlreadyExists',
+  },
+  user: {
+    notFound: 'httpErrors.user.notFound',
+  },
+  view: {
+    versionConflict: 'httpErrors.view.versionConflict',
+  },
+  limit: {
+    fieldOptionsMaxBytes: 'httpErrors.limit.fieldOptionsMaxBytes',
+    selectChoicesMax: 'httpErrors.limit.selectChoicesMax',
+    selectChoiceNameMaxLength: 'httpErrors.limit.selectChoiceNameMaxLength',
+    selectDefaultValuesMax: 'httpErrors.limit.selectDefaultValuesMax',
+    cellValueMaxBytes: 'httpErrors.limit.cellValueMaxBytes',
+    recordFieldsMaxBytes: 'httpErrors.limit.recordFieldsMaxBytes',
+    recordsPerMutationMax: 'httpErrors.limit.recordsPerMutationMax',
+    computedCellValueMaxBytes: 'httpErrors.limit.computedCellValueMaxBytes',
+    formulaMaxLength: 'httpErrors.limit.formulaMaxLength',
+    formulaCompileNodesMax: 'httpErrors.limit.formulaCompileNodesMax',
+    formulaCompileDepthMax: 'httpErrors.limit.formulaCompileDepthMax',
+    formulaReferenceDepthMax: 'httpErrors.limit.formulaReferenceDepthMax',
+    formulaBindingsMax: 'httpErrors.limit.formulaBindingsMax',
+    formulaCompileBytesMax: 'httpErrors.limit.formulaCompileBytesMax',
+    formulaSqlBytesMax: 'httpErrors.limit.formulaSqlBytesMax',
+    tablesPerBaseMax: 'httpErrors.limit.tablesPerBaseMax',
+    fieldsPerTableMax: 'httpErrors.limit.fieldsPerTableMax',
+    rowsPerTableMax: 'httpErrors.limit.rowsPerTableMax',
+    viewsPerTableMax: 'httpErrors.limit.viewsPerTableMax',
+    createTableFieldsMax: 'httpErrors.limit.createTableFieldsMax',
+    createTableViewsMax: 'httpErrors.limit.createTableViewsMax',
+    createTableRecordsMax: 'httpErrors.limit.createTableRecordsMax',
+    viewFilterItemsMax: 'httpErrors.limit.viewFilterItemsMax',
+    viewFilterDepthMax: 'httpErrors.limit.viewFilterDepthMax',
+    viewSortItemsMax: 'httpErrors.limit.viewSortItemsMax',
+    viewGroupItemsMax: 'httpErrors.limit.viewGroupItemsMax',
+    viewOptionsMaxBytes: 'httpErrors.limit.viewOptionsMaxBytes',
+    nameMaxLength: 'httpErrors.limit.nameMaxLength',
+    descriptionMaxLength: 'httpErrors.limit.descriptionMaxLength',
+  },
+} as const;
+
+export type SdkErrorI18nKey =
+  | 'httpErrors.custom.recordFieldValueNotNull'
+  | 'httpErrors.user.notFound'
+  | 'httpErrors.custom.recordFieldValueDuplicate'
+  | 'httpErrors.custom.recordDeleteBlockedByRequiredLink'
+  | 'httpErrors.custom.recordDeleteBlockedByRequiredLinkGeneric'
+  | 'httpErrors.custom.recordDeleteBlockedByLink'
+  | 'httpErrors.custom.linkBatchDuplicate'
+  | 'httpErrors.custom.linkOneManyDuplicate'
+  | 'httpErrors.custom.linkOneOneDuplicate'
+  | 'httpErrors.custom.fieldMaxColumnLimit'
+  | 'httpErrors.custom.fieldRequiredExistingValues'
+  | 'httpErrors.custom.fieldUniqueExistingValues'
+  | 'httpErrors.field.cycleDetectedCreateFieldGeneric'
+  | 'httpErrors.field.lookupFieldNotBelongToTable'
+  | 'httpErrors.field.choiceNameAlreadyExists'
+  | 'httpErrors.field.dbFieldNameAlreadyExists'
+  | 'httpErrors.view.versionConflict'
+  | 'httpErrors.attachment.notFound'
+  | 'httpErrors.computed.pausedWriteBlocked'
+  | 'httpErrors.field.buttonClickConflict'
+  | 'httpErrors.field.buttonUndoConflict'
+  | 'httpErrors.field.conditionalRollupFormattingMismatch'
+  | 'httpErrors.field.conditionalRollupLookupFieldUnavailable'
+  | 'httpErrors.field.cycleDetected'
+  | 'httpErrors.field.fieldNameAlreadyExists'
+  | 'httpErrors.field.formulaCompileFailed'
+  | 'httpErrors.field.formulaParamNumberOrDateRequired'
+  | 'httpErrors.field.formulaParamTextNotAllowed'
+  | 'httpErrors.field.formulaParamTextRequired'
+  | 'httpErrors.field.formulaReferenceNotFound'
+  | 'httpErrors.field.linkTitleFillLimitExceeded'
+  | 'httpErrors.field.linkTitlePrimaryNotText'
+  | 'httpErrors.field.nameRequired'
+  | 'httpErrors.field.notFoundInTable'
+  | 'httpErrors.field.rollupFormattingMismatch'
+  | 'httpErrors.field.selectDefaultValueNotInChoices'
+  | 'httpErrors.field.timeZoneInvalid'
+  | 'httpErrors.import.columnIndexOutOfRange'
+  | 'httpErrors.import.csvNoColumns'
+  | 'httpErrors.import.csvParseError'
+  | 'httpErrors.import.excelSheetNoColumns'
+  | 'httpErrors.import.invalidDotteaStructure'
+  | 'httpErrors.integrity.linkTargetTableMissing'
+  | 'httpErrors.record.fieldValueInvalid'
+  | 'httpErrors.record.linkedRecordNotExist'
+  | 'httpErrors.selection.linkAutoCreateComputedPrimaryUnsupported'
+  | 'httpErrors.selection.linkAutoCreateMissingRequiredFields'
+  | 'httpErrors.selection.linkAutoCreateRequiresPrimaryLookup'
+  | 'httpErrors.selection.linkAutoCreateRequiresTextPrimary'
+  | 'httpErrors.selection.linkAutoCreateSelfLinkUnsupported'
+  | 'httpErrors.table.nameRequired'
+  | 'httpErrors.tableQueryOps.tableTaskConflict'
+  | 'httpErrors.trash.restoreFieldInvalidSnapshot'
+  | 'httpErrors.undoRedo.busy'
+  | 'httpErrors.undoRedo.inProgress'
+  | 'httpErrors.undoRedo.unsupportedCommandVersion'
+  | 'httpErrors.view.filterInvalidOperator'
+  | 'httpErrors.view.formRequiredFieldsMissing'
+  | 'httpErrors.view.manualSortUnsupportedViewType'
+  | 'httpErrors.view.nameAlreadyExists'
+  | 'httpErrors.limit.fieldOptionsMaxBytes'
+  | 'httpErrors.limit.selectChoicesMax'
+  | 'httpErrors.limit.selectChoiceNameMaxLength'
+  | 'httpErrors.limit.selectDefaultValuesMax'
+  | 'httpErrors.limit.cellValueMaxBytes'
+  | 'httpErrors.limit.recordFieldsMaxBytes'
+  | 'httpErrors.limit.recordsPerMutationMax'
+  | 'httpErrors.limit.computedCellValueMaxBytes'
+  | 'httpErrors.limit.formulaMaxLength'
+  | 'httpErrors.limit.formulaCompileNodesMax'
+  | 'httpErrors.limit.formulaCompileDepthMax'
+  | 'httpErrors.limit.formulaReferenceDepthMax'
+  | 'httpErrors.limit.formulaBindingsMax'
+  | 'httpErrors.limit.formulaCompileBytesMax'
+  | 'httpErrors.limit.formulaSqlBytesMax'
+  | 'httpErrors.limit.tablesPerBaseMax'
+  | 'httpErrors.limit.fieldsPerTableMax'
+  | 'httpErrors.limit.rowsPerTableMax'
+  | 'httpErrors.limit.viewsPerTableMax'
+  | 'httpErrors.limit.createTableFieldsMax'
+  | 'httpErrors.limit.createTableViewsMax'
+  | 'httpErrors.limit.createTableRecordsMax'
+  | 'httpErrors.limit.viewFilterItemsMax'
+  | 'httpErrors.limit.viewFilterDepthMax'
+  | 'httpErrors.limit.viewSortItemsMax'
+  | 'httpErrors.limit.viewGroupItemsMax'
+  | 'httpErrors.limit.viewOptionsMaxBytes'
+  | 'httpErrors.limit.nameMaxLength'
+  | 'httpErrors.limit.descriptionMaxLength';
+
+export const tableI18nKeys = {
+  field: {
+    default: {
+      singleLineText: {
+        title: 'field.default.singleLineText.title',
+      },
+      longText: {
+        title: 'field.default.longText.title',
+      },
+      number: {
+        title: 'field.default.number.title',
+      },
+      rating: {
+        title: 'field.default.rating.title',
+      },
+      singleSelect: {
+        title: 'field.default.singleSelect.title',
+      },
+      multipleSelect: {
+        title: 'field.default.multipleSelect.title',
+      },
+      checkbox: {
+        title: 'field.default.checkbox.title',
+      },
+      attachment: {
+        title: 'field.default.attachment.title',
+      },
+      user: {
+        title: 'field.default.user.title',
+      },
+      date: {
+        title: 'field.default.date.title',
+      },
+      createdTime: {
+        title: 'field.default.createdTime.title',
+      },
+      lastModifiedTime: {
+        title: 'field.default.lastModifiedTime.title',
+      },
+      createdBy: {
+        title: 'field.default.createdBy.title',
+      },
+      lastModifiedBy: {
+        title: 'field.default.lastModifiedBy.title',
+      },
+      autoNumber: {
+        title: 'field.default.autoNumber.title',
+      },
+      button: {
+        title: 'field.default.button.title',
+      },
+      formula: {
+        title: 'field.default.formula.title',
+      },
+      lookup: {
+        title: 'field.default.lookup.title',
+      },
+      conditionalLookup: {
+        title: 'field.default.conditionalLookup.title',
+      },
+      rollup: {
+        title: 'field.default.rollup.title',
+        rollup: 'field.default.rollup.rollup',
+      },
+      conditionalRollup: {
+        title: 'field.default.conditionalRollup.title',
+      },
+    },
+  },
+} as const;
+
+export type TableI18nKey =
+  | 'field.default.singleLineText.title'
+  | 'field.default.longText.title'
+  | 'field.default.number.title'
+  | 'field.default.rating.title'
+  | 'field.default.singleSelect.title'
+  | 'field.default.multipleSelect.title'
+  | 'field.default.checkbox.title'
+  | 'field.default.attachment.title'
+  | 'field.default.user.title'
+  | 'field.default.date.title'
+  | 'field.default.createdTime.title'
+  | 'field.default.lastModifiedTime.title'
+  | 'field.default.createdBy.title'
+  | 'field.default.lastModifiedBy.title'
+  | 'field.default.autoNumber.title'
+  | 'field.default.button.title'
+  | 'field.default.formula.title'
+  | 'field.default.lookup.title'
+  | 'field.default.conditionalLookup.title'
+  | 'field.default.rollup.title'
+  | 'field.default.rollup.rollup'
+  | 'field.default.conditionalRollup.title';

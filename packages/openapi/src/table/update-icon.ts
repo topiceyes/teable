@@ -6,7 +6,7 @@ import { z } from '../zod';
 export const TABLE_ICON = '/base/{baseId}/table/{tableId}/icon';
 
 export const tableIconRoSchema = z.object({
-  icon: z.string().emoji(),
+  icon: z.string().emoji().nullable(),
 });
 
 export type ITableIconRo = z.infer<typeof tableIconRoSchema>;
@@ -14,7 +14,9 @@ export type ITableIconRo = z.infer<typeof tableIconRoSchema>;
 export const updateTableIconRoute: RouteConfig = registerRoute({
   method: 'put',
   path: TABLE_ICON,
-  description: 'Update table icon',
+  summary: 'Update table tcon',
+  description:
+    'Update or remove the emoji icon of a table. The icon must be a valid emoji character. Set to null to remove the icon.',
   request: {
     params: z.object({
       baseId: z.string(),
@@ -30,7 +32,7 @@ export const updateTableIconRoute: RouteConfig = registerRoute({
   },
   responses: {
     200: {
-      description: 'Successfully update.',
+      description: 'Table icon successfully updated.',
     },
   },
   tags: ['table'],

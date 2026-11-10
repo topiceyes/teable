@@ -1,3 +1,4 @@
+import type { Active } from '@dnd-kit/core';
 import {
   DndContext,
   useSensors,
@@ -9,7 +10,7 @@ import {
 } from '@dnd-kit/core';
 import { useSortable, SortableContext, type SortableContextProps } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import React, { useMemo } from 'react';
+import React, { useEffect, useId, useMemo, useState, type JSX } from 'react';
 import { createPortal } from 'react-dom';
 
 type IProvidedProps = ReturnType<typeof useSortable> & {
@@ -19,10 +20,13 @@ type IProvidedProps = ReturnType<typeof useSortable> & {
 interface IDraggableContainerProps {
   id: string;
   style?: React.CSSProperties;
+  disabled?: boolean;
   children: (provided: IProvidedProps) => React.ReactElement;
 }
 
 const DndKitContext = (props: React.ComponentProps<typeof DndContext>) => {
+  // dnd-kit's own ids come from a counter, which the server and the browser count differently.
+  const id = useId();
   const sensors = useSensors(
     useSensor(TouchSensor, {
       activationConstraint: {
@@ -37,16 +41,22 @@ const DndKitContext = (props: React.ComponentProps<typeof DndContext>) => {
     })
   );
   return (
-    <DndContext sensors={sensors} {...props}>
+    <DndContext sensors={sensors} id={id} {...props}>
       {props.children}
     </DndContext>
   );
 };
 
-const Droppable = (props: SortableContextProps) => {
+const Droppable = (
+  props: SortableContextProps & { overlayRender?: (active: Active | null) => JSX.Element }
+) => {
   const context = useDndContext();
-  const { children } = props;
+  const { overlayRender, ...rest } = props;
+  const children = props.children;
   const { active } = context;
+  // The overlay's portal needs the document: none on the server, where the list still renders.
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
 
   const customerOverLay = useMemo(() => {
     if (Array.isArray(children)) {
@@ -62,7 +72,9 @@ const Droppable = (props: SortableContextProps) => {
     if (active?.id) {
       // customer dragoverlay
       const listChildren = customerOverLay ? (children[0] as React.ReactElement[]) : children;
-      const draggingOverLayElement = listChildren.find(({ props: { id } }) => id === active.id);
+      const draggingOverLayElement = overlayRender
+        ? overlayRender(active)
+        : listChildren.find(({ props: { id } }) => id === active.id);
       const defaultDragOverLay = (
         <div
           style={{
@@ -77,21 +89,26 @@ const Droppable = (props: SortableContextProps) => {
       return customerOverLay ? null : defaultDragOverLay;
     }
     return null;
-  }, [active?.id, children, customerOverLay]);
+  }, [active, children, customerOverLay, overlayRender]);
 
   return (
-    <SortableContext {...props}>
-      {props.children}
-      {!customerOverLay && createPortal(<DragOverlay>{dragOverRender}</DragOverlay>, document.body)}
+    <SortableContext {...rest}>
+      {children}
+      {mounted && !customerOverLay
+        ? (createPortal(
+            <DragOverlay>{dragOverRender}</DragOverlay>,
+            document.body
+          ) as unknown as React.ReactNode)
+        : null}
     </SortableContext>
   );
 };
 
 const Draggable = (props: IDraggableContainerProps) => {
-  const { id, children, style: injectStyle } = props;
-
+  const { id, disabled, children, style: injectStyle } = props;
   const sortProps = useSortable({
-    id: id,
+    id,
+    disabled,
   });
   const { transform, transition } = sortProps;
   const customTransform = transform ? { ...transform, scaleX: 1, scaleY: 1 } : null;
@@ -109,7 +126,7 @@ const Draggable = (props: IDraggableContainerProps) => {
   return <>{children(provided)}</>;
 };
 
-export { DndKitContext as DndKitContext, Droppable, Draggable };
+export { DndKitContext, Droppable, Draggable };
 
 export * from '@dnd-kit/core';
 

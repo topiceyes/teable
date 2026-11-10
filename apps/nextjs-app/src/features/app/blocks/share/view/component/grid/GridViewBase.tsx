@@ -1,246 +1,60 @@
-import { useMutation } from '@tanstack/react-query';
-import type { IGridViewOptions, IFilter, IGetRecordsRo } from '@teable/core';
-import { RowHeightLevel, mergeFilter } from '@teable/core';
-import type { IRangesRo } from '@teable/openapi';
-import { shareViewCopy } from '@teable/openapi';
-import type {
-  CombinedSelection,
-  ICell,
-  ICellItem,
-  IGridRef,
-  IGroupPoint,
-  IRectangle,
-} from '@teable/sdk/components';
-import {
-  DraggableType,
-  Grid,
-  useGridAsyncRecords,
-  useGridColumnResize,
-  useGridColumnStatistics,
-  useGridColumns,
-  useGridIcons,
-  useGridTheme,
-  RowControlType,
-  CellType,
-  useGridGroupCollection,
-  useGridCollapsedGroup,
-  RowCounter,
-  useGridColumnOrder,
-  generateLocalId,
-} from '@teable/sdk/components';
-import {
-  useGroupPoint,
-  useIsHydrated,
-  useIsTouchDevice,
-  useRowCount,
-  useSSRRecord,
-  useSSRRecords,
-  useTableId,
-  useView,
-} from '@teable/sdk/hooks';
-import { Skeleton, useToast } from '@teable/ui-lib/shadcn';
-import { useRouter } from 'next/router';
-import { useCallback, useEffect, useMemo, useRef } from 'react';
-import { useClickAway } from 'react-use';
-import { StatisticMenu } from '@/features/app/blocks/view/grid/components';
-import { ExpandRecordContainer } from '@/features/app/components/ExpandRecordContainer';
-import type { IExpandRecordContainerRef } from '@/features/app/components/ExpandRecordContainer/types';
-import { GIRD_ROW_HEIGHT_DEFINITIONS } from '../../../../view/grid/const';
-import { useCopy } from '../../../../view/grid/hooks';
-import { useGridViewStore } from '../../../../view/grid/store/gridView';
+import { isAnonymous } from '@teable/core';
+import type { IGroupPointsVo } from '@teable/openapi';
+import type { GridView } from '@teable/sdk';
+import { useGridColumns } from '@teable/sdk';
+import { ShareViewContext } from '@teable/sdk/context';
+import { useIsHydrated, useSession, useUndoRedo, useView, useViewId } from '@teable/sdk/hooks';
+import { Skeleton } from '@teable/ui-lib';
+import React, { useContext } from 'react';
+import { useHotkeys } from 'react-hotkeys-hook';
+import { GridViewBaseInner } from '@/features/app/blocks/view/grid/GridViewBaseInner';
 
-export const GridViewBase = () => {
-  const view = useView();
-  const tableId = useTableId();
-  const router = useRouter();
+interface IGridViewProps {
+  groupPointsServerData?: IGroupPointsVo | null;
+}
+
+// Reuses the workspace grid renderer end-to-end. ShareContext (provided in
+// ShareViewPage) toggles share-aware branches inside GridViewBaseInner; the
+// share-edit permission set (record|create/update/delete via header sandbox)
+// surfaces the right UI affordances. Workspace-only features (field config,
+// view config, comments, history) stay hidden because the share permission
+// provider keeps those actions false.
+//
+// We deliberately omit onRowExpand so GridViewBaseInner's default
+// router-based expand flow (and its built-in ExpandRecordContainer render)
+// fires — passing our own callback would suppress that internal render.
+export const GridViewBase: React.FC<IGridViewProps> = ({ groupPointsServerData }) => {
+  const activeViewId = useViewId();
+  const view = useView(activeViewId) as GridView | undefined;
+  const { columns } = useGridColumns();
+  const isLoading = !view || !columns.length;
   const isHydrated = useIsHydrated();
-  const groupPoints = useGroupPoint();
-  const prepare = isHydrated && view;
-  const gridRef = useRef<IGridRef>(null);
-  const container = useRef<HTMLDivElement>(null);
-  const expandRecordRef = useRef<IExpandRecordContainerRef>(null);
-  const { toast } = useToast();
-  const theme = useGridTheme();
-  const rowCount = useRowCount();
-  const ssrRecords = useSSRRecords();
-  const ssrRecord = useSSRRecord();
-  const isTouchDevice = useIsTouchDevice();
-  const { setSelection, openStatisticMenu } = useGridViewStore();
-  const { columns: originalColumns, cellValue2GridDisplay } = useGridColumns();
-  const { columns, onColumnResize } = useGridColumnResize(originalColumns);
-  const { columnStatistics } = useGridColumnStatistics(columns);
-  const { onColumnOrdered } = useGridColumnOrder();
 
-  const customIcons = useGridIcons();
-  const { mutateAsync: copy } = useMutation({
-    mutationFn: (copyRo: IRangesRo) => shareViewCopy(router.query.shareId as string, copyRo),
-  });
-  const copyMethod = useCopy({ copyReq: copy });
-  const { filter, sort, group } = view ?? {};
-  const realRowCount = rowCount ?? ssrRecords?.length ?? 0;
+  // Workspace Table.tsx wires Cmd+Z / Cmd+Shift+Z hotkeys, but share view
+  // never mounts Table.tsx — wire them here so share editors get the same
+  // undo/redo affordance. Gated on (allowEdit + signed-in) so anonymous
+  // viewers and read-only links don't burn requests against an empty stack
+  // every time someone reflexively hits Cmd+Z.
+  const { shareMeta } = useContext(ShareViewContext);
+  const { user } = useSession();
+  const canEdit = Boolean(shareMeta?.allowEdit) && !isAnonymous(user?.id);
+  const { undo, redo } = useUndoRedo();
+  useHotkeys('mod+z', () => undo(), { preventDefault: true, enabled: canEdit });
+  useHotkeys(['mod+shift+z', 'mod+y'], () => redo(), { preventDefault: true, enabled: canEdit });
 
-  const groupCollection = useGridGroupCollection();
-
-  const { viewGroupQuery, collapsedGroupIds, onCollapsedGroupChanged } = useGridCollapsedGroup(
-    generateLocalId(tableId, view?.id),
-    groupPoints
-  );
-
-  const viewQuery = useMemo(() => {
-    const mergedFilter = mergeFilter(filter, viewGroupQuery?.filter);
-    return {
-      filter: mergedFilter as IFilter,
-      orderBy: sort?.sortObjs as IGetRecordsRo['orderBy'],
-      groupBy: group as IGetRecordsRo['groupBy'],
-    };
-  }, [filter, sort?.sortObjs, group, viewGroupQuery]);
-
-  const { onVisibleRegionChanged, recordMap } = useGridAsyncRecords(
-    ssrRecords,
-    undefined,
-    viewQuery
-  );
-
-  useClickAway(container, () => {
-    gridRef.current?.resetState();
-  });
-
-  useEffect(() => {
-    const recordIds = Object.keys(recordMap)
-      .sort((a, b) => Number(a) - Number(b))
-      .map((key) => recordMap[key]?.id)
-      .filter(Boolean);
-    expandRecordRef.current?.updateRecordIds?.(recordIds);
-  }, [expandRecordRef, recordMap]);
-
-  const onRowExpandInner = (rowIndex: number) => {
-    const recordId = recordMap[rowIndex]?.id;
-    if (!recordId) {
-      return;
-    }
-    router.push(
-      {
-        pathname: router.pathname,
-        query: { ...router.query, recordId },
-      },
-      undefined,
-      {
-        shallow: true,
-      }
-    );
-  };
-
-  const rowHeightLevel = useMemo(() => {
-    if (view == null) return RowHeightLevel.Short;
-    return (view.options as IGridViewOptions)?.rowHeight || RowHeightLevel.Short;
-  }, [view]);
-
-  const onSelectionChanged = useCallback(
-    (selection: CombinedSelection) => {
-      setSelection(selection);
-    },
-    [setSelection]
-  );
-
-  const rowControls = useMemo(
-    () => [
-      {
-        type: RowControlType.Checkbox,
-        icon: RowControlType.Checkbox,
-      },
-      {
-        type: RowControlType.Expand,
-        icon: RowControlType.Expand,
-      },
-    ],
-    []
-  );
-
-  const getCellContent = useCallback<(cell: ICellItem) => ICell>(
-    (cell) => {
-      const [colIndex, rowIndex] = cell;
-      const record = recordMap[rowIndex];
-      if (record !== undefined) {
-        const fieldId = columns[colIndex]?.id;
-        if (!fieldId) return { type: CellType.Loading };
-        return cellValue2GridDisplay(record, colIndex);
-      }
-      return { type: CellType.Loading };
-    },
-    [recordMap, columns, cellValue2GridDisplay]
-  );
-
-  const onCopy = useCallback(
-    async (selection: CombinedSelection) => {
-      const allowCopy = view?.shareMeta?.allowCopy;
-      if (!allowCopy) {
-        toast({ title: "Sorry, the table's owner has disabled copying" });
-        return;
-      }
-      const toaster = toast({
-        title: 'Copying...',
-      });
-      await copyMethod(selection);
-      toaster.update({ id: toaster.id, title: 'Copied success!' });
-    },
-    [copyMethod, view?.shareMeta?.allowCopy, toast]
-  );
-
-  const onColumnStatisticClick = useCallback(
-    (colIndex: number, bounds: IRectangle) => {
-      const { x, y, width, height } = bounds;
-      const fieldId = columns[colIndex].id;
-      openStatisticMenu({ fieldId, position: { x, y, width, height } });
-    },
-    [columns, openStatisticMenu]
-  );
-
-  return (
-    <div ref={container} className="relative size-full overflow-hidden">
-      {prepare ? (
-        <>
-          <Grid
-            ref={gridRef}
-            theme={theme}
-            draggable={DraggableType.Column}
-            isTouchDevice={isTouchDevice}
-            rowCount={realRowCount}
-            rowHeight={GIRD_ROW_HEIGHT_DEFINITIONS[rowHeightLevel]}
-            columnStatistics={columnStatistics}
-            freezeColumnCount={isTouchDevice ? 0 : 1}
-            columns={columns}
-            customIcons={customIcons}
-            rowControls={rowControls}
-            style={{
-              width: '100%',
-              height: '100%',
-            }}
-            collapsedGroupIds={collapsedGroupIds}
-            groupCollection={groupCollection}
-            groupPoints={groupPoints as unknown as IGroupPoint[]}
-            getCellContent={getCellContent}
-            onVisibleRegionChanged={onVisibleRegionChanged}
-            onSelectionChanged={onSelectionChanged}
-            onCopy={onCopy}
-            onRowExpand={onRowExpandInner}
-            onColumnResize={onColumnResize}
-            onColumnOrdered={onColumnOrdered}
-            onColumnStatisticClick={onColumnStatisticClick}
-            onCollapsedGroupChanged={onCollapsedGroupChanged}
-          />
-          <RowCounter rowCount={realRowCount} className="absolute bottom-3 left-0" />
-        </>
-      ) : (
-        <div className="flex w-full items-center space-x-4">
+  if (!isHydrated || isLoading) {
+    return (
+      <div className="relative size-full overflow-hidden">
+        <div className="flex w-full items-center space-x-4 rtl:space-x-reverse">
           <div className="w-full space-y-3 px-2">
-            <Skeleton className="h-6 w-full" />
-            <Skeleton className="h-6 w-full" />
-            <Skeleton className="h-6 w-full" />
+            <Skeleton className="h-7 w-full" />
+            <Skeleton className="h-7 w-full" />
+            <Skeleton className="h-7 w-full" />
           </div>
         </div>
-      )}
-      <StatisticMenu />
-      <ExpandRecordContainer ref={expandRecordRef} recordServerData={ssrRecord} />
-    </div>
-  );
+      </div>
+    );
+  }
+
+  return <GridViewBaseInner groupPointsServerData={groupPointsServerData} />;
 };

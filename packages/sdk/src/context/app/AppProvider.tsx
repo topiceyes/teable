@@ -1,53 +1,78 @@
-import { Hydrate, QueryClientProvider } from '@tanstack/react-query';
-import type { DriverClient } from '@teable/core';
-import { isObject } from 'lodash';
-import { useEffect, useMemo } from 'react';
+import type { DehydratedState } from '@tanstack/react-query';
+import type { IGetBaseVo } from '@teable/openapi';
+import { ThemeProvider } from '@teable/ui-lib';
+import { isObject, merge } from 'lodash';
+import { useMemo } from 'react';
+import { isRtlLang, setContentDirectionEnabled } from '../../utils/text-direction';
 import { AppContext } from '../app/AppContext';
-import type { ILocale, ILocalePartial } from './i18n';
+import { ConnectionProvider } from './ConnectionProvider';
+import type { ILocalePartial } from './i18n';
 import { defaultLocale } from './i18n';
-import { createQueryClient } from './queryClient';
-import { useConnection } from './useConnection';
-import { useTheme } from './useTheme';
-
-const queryClient = createQueryClient();
+import { QueryClientProvider } from './QueryClientProvider';
 
 interface IAppProviderProps {
+  forcedTheme?: string;
   children: React.ReactNode;
   wsPath?: string;
   lang?: string;
   locale?: ILocalePartial;
-  driver: DriverClient;
-  dehydratedState?: unknown;
+  dehydratedState?: DehydratedState;
+  disabledWs?: boolean;
+  template?: IGetBaseVo['template'];
+  shareId?: string;
+  maxSearchFieldCount?: number;
 }
 
 export const AppProvider = (props: IAppProviderProps) => {
-  const { children, wsPath, lang, locale, driver, dehydratedState } = props;
+  const {
+    forcedTheme,
+    children,
+    wsPath,
+    lang,
+    locale,
+    disabledWs,
+    dehydratedState,
+    template,
+    shareId,
+    maxSearchFieldCount,
+  } = props;
+  // Canvas renderers read the gate from a module-level flag rather than from
+  // context, so it has to be in place before children paint — an effect would
+  // land a frame too late. Guarded to the client because the module is shared
+  // across requests during SSR.
+  if (typeof window !== 'undefined') {
+    setContentDirectionEnabled(isRtlLang(lang));
+  }
 
-  const { connected, connection } = useConnection(wsPath);
-  const themeProps = useTheme();
-
-  useEffect(() => {
-    if (!connection) {
-      return;
-    }
-  }, [connection]);
-
-  const value = useMemo(() => {
-    return {
-      connection,
-      connected,
-      driver,
+  const value = useMemo(
+    () => ({
       lang,
-      locale: isObject(locale) ? ({ ...defaultLocale, ...locale } as ILocale) : defaultLocale,
-      ...themeProps,
-    };
-  }, [connection, connected, driver, lang, locale, themeProps]);
+      locale: isObject(locale) ? merge(defaultLocale, locale) : defaultLocale,
+      template,
+      shareId,
+      maxSearchFieldCount,
+    }),
+    [lang, locale, template, shareId, maxSearchFieldCount]
+  );
 
+  if (disabledWs) {
+    return (
+      <ThemeProvider attribute="class" forcedTheme={forcedTheme}>
+        <AppContext.Provider value={value}>
+          <QueryClientProvider dehydratedState={dehydratedState}>{children}</QueryClientProvider>
+        </AppContext.Provider>
+      </ThemeProvider>
+    );
+  }
+
+  // forcedTheme is not work as expected https://github.com/pacocoursey/next-themes/issues/252
   return (
-    <AppContext.Provider value={value}>
-      <QueryClientProvider client={queryClient}>
-        <Hydrate state={dehydratedState}>{children}</Hydrate>
-      </QueryClientProvider>
-    </AppContext.Provider>
+    <ThemeProvider attribute="class" forcedTheme={forcedTheme}>
+      <AppContext.Provider value={value}>
+        <ConnectionProvider wsPath={wsPath}>
+          <QueryClientProvider dehydratedState={dehydratedState}>{children}</QueryClientProvider>
+        </ConnectionProvider>
+      </AppContext.Provider>
+    </ThemeProvider>
   );
 };

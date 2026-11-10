@@ -1,0 +1,61 @@
+PASS create isolated pilot space
+PASS create isolated pilot base
+PASS bind test employee 0 through administrator API
+PASS bind test employee 1 through administrator API
+PASS bind test employee 2 through administrator API
+PASS stale binding edit rejected without overwriting identity
+PASS ordinary employee cannot change directory binding
+PASS administrator sees correct parent-child department tree
+PASS administrator saves role revision 0
+PASS role member preview matches 2 active bindings
+PASS create department pilot table
+PASS department binding alone does not grant record creation
+PASS save department data scope revision 0
+PASS direct department mapping excludes child department employee
+PASS administrator saves role revision 1
+PASS role member preview matches 3 active bindings
+PASS matrix grants scoped creation to employee 0
+PASS employee 0 writes through requested v1 engine
+PASS matrix grants scoped creation to employee 1
+PASS employee 1 writes through requested v1 engine
+PASS matrix grants scoped creation to employee 2
+PASS employee 2 writes through requested v1 engine
+PASS administrator creates outsider record for isolation checks
+PASS parent employee reads own and direct department peer rows
+PASS peer sees symmetric direct department scope
+PASS child employee receives role grant but only child department rows
+PASS sensitive field absent from department list
+PASS read-only cell permissions exposed to grid
+PASS department writer can update an in-scope peer row
+PASS parent role descendants do not expand department row scope
+PASS read-only field write rejected
+PASS hidden field write rejected
+PASS department count equals permitted rows
+PASS mixed-department snapshot request rejected
+PASS save own data scope revision 1
+PASS own scope removes department peers without new login
+PASS save department data scope revision 2
+PASS administrator unbinds employee through API
+PASS unbound employee has empty department scope in existing session
+PASS unbinding immediately removes derived write permission
+PASS administrator rebinds employee through API
+PASS rebinding restores current department scope
+PASS parent subscribes to in-scope peer before departure
+PASS departed peer records removed from active colleague scope
+PASS departed employee cannot read department rows with old session
+PASS departed employee loses matrix writes
+PASS inactive employee cannot be rebound
+PASS administrator can update archived employee record
+PASS existing peer socket closes before post-departure data delivery
+PASS role member preview matches 3 active bindings
+PASS administrator saves role revision 2
+PASS disabled role removes derived writes in current session
+PASS manual editor survives derived role revocation
+PASS manual editor remains subject to department row restriction
+PASS administrator saves role revision 3
+PASS disabled enterprise connection fails closed for department scope
+PASS disabled enterprise removes matrix write grant
+PASS inactive local account creator removed from colleague scope
+PASS inactive local account cannot use old HTTP session
+PASS administrator preview matches department role and row scope
+{"passed":60,"database":"teable_dev_20261109","mode":"v1","success":true,"fixtures":{"spaces":0,"users":0,"connections":0},"realEmployeesModified":false}

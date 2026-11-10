@@ -1,195 +1,182 @@
-import type { IAttachmentItem, IAttachmentCellValue } from '@teable/core';
-import { generateAttachmentId } from '@teable/core';
-import { X, Download } from '@teable/icons';
-import { UploadType, type INotifyVo } from '@teable/openapi';
-import { Button, FilePreviewItem, FilePreviewProvider, Progress, cn } from '@teable/ui-lib';
-import { map, omit } from 'lodash';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { getFileCover, isSystemFileIcon } from '../utils';
-import { DragAndCopy } from './DragAndCopy';
-import { FileInput } from './FileInput';
-import type { IFile } from './uploadManage';
+import { forwardRef, useContext, useImperativeHandle, useRef } from 'react';
+import { usePendingUploadContext } from '../../../../context/pending-upload';
+import { ShareViewContext } from '../../../../context/table/ShareViewContext';
+import { useBaseId } from '../../../../hooks';
+import {
+  useLocalAttachmentUpload,
+  useCellAttachmentUpload,
+  usePendingAttachmentUpload,
+} from './hooks';
+import type {
+  IUploadAttachment,
+  IUploadAttachmentRef,
+  UploadAttachmentCellProps,
+  UploadAttachmentLocalProps,
+  UploadAttachmentViewRef,
+} from './types';
+import { UploadAttachmentView } from './UploadAttachmentView';
 import { AttachmentManager } from './uploadManage';
 
-export interface IUploadAttachment {
-  className?: string;
-  attachments: IAttachmentCellValue;
-  attachmentManager?: AttachmentManager;
-  onChange?: (attachment: IAttachmentCellValue | null) => void;
-  readonly?: boolean;
-}
+export type { IUploadAttachment, IUploadAttachmentRef, IUploadingFile } from './types';
+export type { UploadAttachmentMode } from './types';
 
-type IUploadFileMap = { [key: string]: { progress: number; file: File } };
-
+const cellAttachmentUpload = new AttachmentManager(4);
 const defaultAttachmentManager = new AttachmentManager(2);
 
-export const UploadAttachment = (props: IUploadAttachment) => {
-  const {
-    className,
-    attachments,
-    onChange,
-    readonly,
-    attachmentManager = defaultAttachmentManager,
-  } = props;
-  const [uploadingFiles, setUploadingFiles] = useState<IUploadFileMap>({});
-  const listRef = useRef<HTMLDivElement>(null);
-  const attachmentsRef = useRef<IAttachmentCellValue>(attachments);
-  const [newAttachments, setNewAttachments] = useState<IAttachmentCellValue>([]);
-
-  attachmentsRef.current = attachments;
-
-  useEffect(() => {
-    if (newAttachments.length && newAttachments.length === Object.keys(uploadingFiles).length) {
-      onChange?.(attachmentsRef.current.concat(newAttachments));
-      setNewAttachments([]);
-      setUploadingFiles({});
+export const UploadAttachment = forwardRef<IUploadAttachmentRef, IUploadAttachment>(
+  (props, ref) => {
+    if (props.mode === 'local') {
+      return <LocalUploadAttachment {...props} ref={ref} />;
     }
-  }, [newAttachments, onChange, uploadingFiles]);
+    return <CellUploadAttachment {...props} ref={ref} />;
+  }
+);
 
-  const onDelete = (id: string) => {
-    const finalAttachments = attachments.filter((attachment) => attachment.id !== id);
-    onChange?.(!finalAttachments.length ? null : finalAttachments);
-  };
+const LocalUploadAttachment = forwardRef<IUploadAttachmentRef, UploadAttachmentLocalProps>(
+  (props, ref) => {
+    const pendingCtx = usePendingUploadContext();
 
-  const downloadFile = ({ presignedUrl, name }: IAttachmentItem) => {
-    const downloadLink = document.createElement('a');
-    downloadLink.href = presignedUrl || '';
-    downloadLink.target = '_blank';
-    downloadLink.download = name;
-    downloadLink.click();
-  };
+    // When inside a PendingUploadContext, delegate to PendingUploadAttachment
+    if (pendingCtx) {
+      return <PendingUploadAttachment {...props} pendingCtx={pendingCtx} ref={ref} />;
+    }
 
-  const handleSuccess = useCallback((file: IFile, attachment: INotifyVo) => {
-    const { id, instance } = file;
-    const newAttachment: IAttachmentItem = {
-      id,
-      name: instance.name,
-      ...omit(attachment, ['url']),
-    };
-    setNewAttachments((pre) => [...pre, newAttachment]);
-  }, []);
+    return <PureLocalUploadAttachment {...props} ref={ref} />;
+  }
+);
 
-  const uploadAttachment = useCallback(
-    (files: File[]) => {
-      const uploadList = files.map((v) => ({ instance: v, id: generateAttachmentId() }));
+LocalUploadAttachment.displayName = 'LocalUploadAttachment';
 
-      const newUploadMap = uploadList.reduce((acc: IUploadFileMap, file) => {
-        acc[file.id] = { progress: 0, file: file.instance };
-        return acc;
-      }, {});
-      attachmentManager.upload(uploadList, UploadType.Table, {
-        successCallback: handleSuccess,
-        progressCallback: (file, progress) => {
-          setUploadingFiles((pre) => ({ ...pre, [file.id]: { progress, file: file.instance } }));
-        },
+const PureLocalUploadAttachment = forwardRef<IUploadAttachmentRef, UploadAttachmentLocalProps>(
+  (props, ref) => {
+    const { attachments, onChange, attachmentManager = defaultAttachmentManager } = props;
+    const baseId = useBaseId();
+
+    const { uploadingFiles, onUpload, onCancelUpload, setUploadingFiles } =
+      useLocalAttachmentUpload({
+        attachments,
+        onChange,
+        attachmentManager,
+        baseId,
       });
-      setUploadingFiles((pre) => ({ ...pre, ...newUploadMap }));
-      setTimeout(() => {
-        scrollBottom();
-      }, 100);
-    },
-    [attachmentManager, handleSuccess]
-  );
 
-  const scrollBottom = () => {
-    if (listRef.current) {
-      const scrollHeight = listRef.current.scrollHeight;
-      const height = listRef.current.clientHeight;
-      const maxScrollTop = scrollHeight - height;
-      listRef.current.scrollTop = maxScrollTop > 0 ? maxScrollTop : 0;
-    }
-  };
+    const viewRef = useRef<UploadAttachmentViewRef>(null);
 
-  const len = useMemo(() => {
-    return attachments.length + Object.keys(uploadingFiles).length;
-  }, [attachments, uploadingFiles]);
+    useImperativeHandle(ref, () => ({
+      uploadAttachment: (files) => {
+        onUpload(files);
+        viewRef.current?.scrollToBottom();
+      },
+      setUploadingFiles,
+    }));
 
-  const fileCover = useCallback(({ mimetype, presignedUrl }: IAttachmentItem) => {
-    if (!presignedUrl) return '';
-    return getFileCover(mimetype, presignedUrl);
-  }, []);
+    return (
+      <UploadAttachmentView
+        ref={viewRef}
+        {...props}
+        uploadingFiles={uploadingFiles}
+        onUpload={onUpload}
+        onCancelUpload={onCancelUpload}
+      />
+    );
+  }
+);
 
-  const uploadingFilesList = map(uploadingFiles, (value, key) => ({ id: key, ...value }));
+PureLocalUploadAttachment.displayName = 'PureLocalUploadAttachment';
 
-  return (
-    <div className={cn('flex h-full flex-col overflow-hidden', className)}>
-      <div className="relative flex-1 overflow-y-auto" ref={listRef}>
-        <DragAndCopy onChange={uploadAttachment} disabled={readonly}>
-          {len > 0 && (
-            <ul className="-right-2 flex size-full flex-wrap">
-              <FilePreviewProvider>
-                {attachments.map((attachment) => (
-                  <li key={attachment.id} className="mb-2 flex h-32 w-28 flex-col pr-3">
-                    <div
-                      className={cn(
-                        'group relative flex-1 cursor-pointer overflow-hidden rounded-md border border-border',
-                        {
-                          'border-none': isSystemFileIcon(attachment.mimetype),
-                        }
-                      )}
-                    >
-                      <FilePreviewItem
-                        className="flex items-center justify-center"
-                        src={attachment.presignedUrl || ''}
-                        name={attachment.name}
-                        mimetype={attachment.mimetype}
-                        size={attachment.size}
-                      >
-                        <img
-                          className="size-full object-contain"
-                          src={fileCover(attachment)}
-                          alt={attachment.name}
-                        />
-                      </FilePreviewItem>
-                      <ul className="absolute right-0 top-0 hidden w-full justify-end space-x-1 bg-black/40 p-1 group-hover:flex">
-                        {/* <li>
-                      <button className="btn btn-xs btn-circle bg-neutral/50 border-none">
-                        <FullscreenIcon />
-                      </button>
-                    </li> */}
-                        <li>
-                          <Button
-                            variant={'ghost'}
-                            className="size-5 rounded-full p-0 text-white focus-visible:ring-transparent focus-visible:ring-offset-0"
-                            onClick={() => downloadFile(attachment)}
-                          >
-                            <Download />
-                          </Button>
-                        </li>
-                        <li>
-                          <Button
-                            variant={'ghost'}
-                            className="size-5 rounded-full p-0 text-white focus-visible:ring-transparent focus-visible:ring-offset-0"
-                            onClick={() => onDelete(attachment.id)}
-                            disabled={readonly}
-                          >
-                            <X />
-                          </Button>
-                        </li>
-                      </ul>
-                    </div>
-                    <span className="mt-1 w-full truncate text-center" title={attachment.name}>
-                      {attachment.name}
-                    </span>
-                  </li>
-                ))}
-              </FilePreviewProvider>
-              {uploadingFilesList.map(({ id, progress, file }) => (
-                <li key={id} className="mb-2 flex h-32 w-28 flex-col pr-3">
-                  <div className="relative flex w-full flex-1 cursor-pointer flex-col items-center justify-center overflow-hidden rounded-md border border-border px-2">
-                    <Progress value={progress} />
-                    {progress}%
-                  </div>
-                  <span className="w-full truncate text-center" title={file.name}>
-                    {file.name}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          )}
-        </DragAndCopy>
-      </div>
-      {!readonly && <FileInput onChange={uploadAttachment} />}
-    </div>
-  );
-};
+interface IPendingUploadAttachmentProps extends UploadAttachmentLocalProps {
+  pendingCtx: { tempRecordId: string; tableId: string };
+}
+
+const PendingUploadAttachment = forwardRef<IUploadAttachmentRef, IPendingUploadAttachmentProps>(
+  (props, ref) => {
+    const { pendingCtx, fieldId, ...localProps } = props;
+    const baseId = useBaseId();
+    const { shareId } = useContext(ShareViewContext);
+
+    const { uploadingFiles, onUpload, onCancelUpload, onChange } = usePendingAttachmentUpload({
+      tableId: pendingCtx.tableId,
+      tempRecordId: pendingCtx.tempRecordId,
+      fieldId: fieldId ?? '',
+      baseId,
+      shareId,
+      attachments: localProps.attachments,
+      onChange: localProps.onChange,
+    });
+
+    const viewRef = useRef<UploadAttachmentViewRef>(null);
+
+    useImperativeHandle(ref, () => ({
+      uploadAttachment: (files) => {
+        onUpload(files);
+        viewRef.current?.scrollToBottom();
+      },
+      setUploadingFiles: () => {
+        // no-op: pending uploads are managed by the global store
+      },
+    }));
+
+    return (
+      <UploadAttachmentView
+        ref={viewRef}
+        {...localProps}
+        onChange={onChange}
+        uploadingFiles={uploadingFiles}
+        onUpload={onUpload}
+        onCancelUpload={onCancelUpload}
+      />
+    );
+  }
+);
+
+PendingUploadAttachment.displayName = 'PendingUploadAttachment';
+
+const CellUploadAttachment = forwardRef<IUploadAttachmentRef, UploadAttachmentCellProps>(
+  (props, ref) => {
+    const { attachments, onChange } = props;
+    const baseId = useBaseId();
+    const { shareId } = useContext(ShareViewContext);
+
+    const localUpload = useLocalAttachmentUpload({
+      attachments,
+      onChange,
+      attachmentManager: cellAttachmentUpload,
+      baseId,
+    });
+
+    const cellUpload = useCellAttachmentUpload({
+      tableId: props.tableId,
+      recordId: props.recordId,
+      fieldId: props.fieldId,
+      attachments,
+      baseId,
+      shareId,
+      enabled: true,
+    });
+
+    const uploadingFiles = cellUpload.uploadingFiles;
+
+    const viewRef = useRef<UploadAttachmentViewRef>(null);
+
+    useImperativeHandle(ref, () => ({
+      uploadAttachment: (files) => {
+        cellUpload.onUpload(files);
+        viewRef.current?.scrollToBottom();
+      },
+      setUploadingFiles: localUpload.setUploadingFiles,
+    }));
+    return (
+      <UploadAttachmentView
+        {...props}
+        uploadingFiles={uploadingFiles}
+        onUpload={cellUpload.onUpload}
+        onCancelUpload={cellUpload.onCancelUpload}
+      />
+    );
+  }
+);
+CellUploadAttachment.displayName = 'CellUploadAttachment';
+
+UploadAttachment.displayName = 'UploadAttachment';
+
+export default UploadAttachment;

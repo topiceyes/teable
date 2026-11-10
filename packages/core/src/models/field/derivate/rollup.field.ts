@@ -2,34 +2,16 @@ import { z } from 'zod';
 import { EvalVisitor } from '../../../formula/visitor';
 import type { CellValueType, FieldType } from '../constant';
 import type { FieldCore } from '../field';
-import type { ILookupOptionsVo } from '../field.schema';
-import { getDefaultFormatting, getFormattingSchema, unionFormattingSchema } from '../formatting';
-import { getShowAsSchema, unionShowAsSchema } from '../show-as';
+import type { IFieldVisitor } from '../field-visitor.interface';
+import { getDefaultFormatting, getFormattingSchema } from '../formatting';
+import type { ILookupOptionsVo } from '../lookup-options-base.schema';
+import { getShowAsSchema } from '../show-as';
 import { FormulaAbstractCore } from './abstract/formula.field.abstract';
-
-export const ROLLUP_FUNCTIONS = [
-  'countall({values})',
-  'counta({values})',
-  'count({values})',
-  'sum({values})',
-  'max({values})',
-  'min({values})',
-  'and({values})',
-  'or({values})',
-  'xor({values})',
-  'array_join({values})',
-  'array_unique({values})',
-  'array_compact({values})',
-  'concatenate({values})',
-] as const;
-
-export const rollupFieldOptionsSchema = z.object({
-  expression: z.enum(ROLLUP_FUNCTIONS),
-  formatting: unionFormattingSchema.optional(),
-  showAs: unionShowAsSchema.optional(),
-});
-
-export type IRollupFieldOptions = z.infer<typeof rollupFieldOptionsSchema>;
+import {
+  ROLLUP_FUNCTIONS,
+  rollupFieldOptionsSchema,
+  type IRollupFieldOptions,
+} from './rollup-option.schema';
 
 export const rollupCelValueSchema = z.any();
 
@@ -39,6 +21,7 @@ export class RollupFieldCore extends FormulaAbstractCore {
   static defaultOptions(cellValueType: CellValueType): IRollupFieldOptions {
     return {
       expression: ROLLUP_FUNCTIONS[0],
+      timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone as string,
       formatting: getDefaultFormatting(cellValueType),
     };
   }
@@ -70,6 +53,8 @@ export class RollupFieldCore extends FormulaAbstractCore {
 
   declare options: IRollupFieldOptions;
 
+  meta?: undefined;
+
   declare lookupOptions: ILookupOptionsVo;
 
   validateOptions() {
@@ -80,5 +65,16 @@ export class RollupFieldCore extends FormulaAbstractCore {
         showAs: getShowAsSchema(this.cellValueType, this.isMultipleCellValue),
       })
       .safeParse(this.options);
+  }
+
+  /**
+   * Override to return the foreign table ID for rollup fields
+   */
+  getForeignTableId(): string | undefined {
+    return this.lookupOptions?.foreignTableId;
+  }
+
+  accept<T>(visitor: IFieldVisitor<T>): T {
+    return visitor.visitRollupField(this);
   }
 }

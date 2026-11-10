@@ -58,7 +58,6 @@ export class If extends LogicalFunc {
     params: TypedValue<string | number | boolean | (string | number | boolean | null)[]>[]
   ): string | number | boolean | null | (string | number | boolean | null)[] {
     const condition = params[0].value;
-
     return condition ? params[1]?.value : params[2]?.value;
   }
 }
@@ -172,7 +171,7 @@ export class And extends LogicalFunc {
         if (!Array.isArray(param.value) || param.value == null) {
           return false;
         }
-        return result && (param.value as unknown[]).every((v) => Boolean(v));
+        return result && (param.value as unknown[]).every(Boolean);
       }
       return result && Boolean(param.value);
     }, true);
@@ -203,7 +202,7 @@ export class Or extends LogicalFunc {
         if (!Array.isArray(param.value) || param.value == null) {
           return result;
         }
-        return result || (param.value as unknown[]).some((v) => Boolean(v));
+        return result || (param.value as unknown[]).some(Boolean);
       }
       return result || Boolean(param.value);
     }, false);

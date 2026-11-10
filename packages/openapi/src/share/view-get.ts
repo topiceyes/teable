@@ -1,19 +1,40 @@
 import type { RouteConfig } from '@asteasolutions/zod-to-openapi';
 import { fieldVoSchema, recordSchema, shareViewMetaSchema, viewVoSchema } from '@teable/core';
+import { groupPointsVoSchema } from '../aggregation';
 import { axios } from '../axios';
 import { registerRoute, urlBuilder } from '../utils';
+import { getViewInstallPluginVoSchema } from '../view/plugin-get';
 import { z } from '../zod';
 
 export const SHARE_VIEW_GET = '/share/{shareId}/view';
 
+const shareViewPluginSchema = getViewInstallPluginVoSchema.omit({ baseId: true });
+export type IShareViewPlugin = z.infer<typeof shareViewPluginSchema>;
+
 export const shareViewGetVoSchema = z.object({
-  viewId: z.string(),
+  viewId: z.string().optional(),
   tableId: z.string(),
-  shareId: z.string(),
-  shareMeta: shareViewMetaSchema.optional(),
-  view: viewVoSchema,
+  shareId: z
+    .string()
+    .describe(
+      'The share id of the view. Use it to access the shared view at `${endpoint}/share/{shareId}/view` (e.g. https://app.teable.ai/share/shrH7kunpHv8U9kfZyD/view).'
+    ),
+  // The share password never leaves the server; the guard answers 401 until the
+  // visitor authenticates, so the client does not need to know it exists.
+  shareMeta: shareViewMetaSchema.omit({ password: true }).optional(),
+  view: viewVoSchema
+    .extend({ shareMeta: shareViewMetaSchema.omit({ password: true }).optional() })
+    .optional(),
   fields: fieldVoSchema.array(),
-  records: recordSchema.array().openapi('first 50 records'),
+  records: recordSchema.array().meta({ description: 'first 50 records' }),
+  extra: z
+    .object({
+      groupPoints: groupPointsVoSchema.optional().meta({
+        description: 'Group points for the view',
+      }),
+      plugin: shareViewPluginSchema.optional(),
+    })
+    .optional(),
 });
 
 export type ShareViewGetVo = z.infer<typeof shareViewGetVoSchema>;
@@ -40,6 +61,6 @@ export const ShareViewGetRouter: RouteConfig = registerRoute({
   tags: ['share'],
 });
 
-export const shareViewGet = (shareId: string) => {
+export const getShareView = (shareId: string) => {
   return axios.get<ShareViewGetVo>(urlBuilder(SHARE_VIEW_GET, { shareId }));
 };

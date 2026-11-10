@@ -1,0 +1,304 @@
+import { generateSharePassword } from '@teable/core';
+import { Qrcode, RefreshCcw } from '@teable/icons';
+import { Spin } from '@teable/ui-lib';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  Button,
+  cn,
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+  Input,
+  Label,
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+  Separator,
+  Switch,
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@teable/ui-lib/shadcn';
+import { Check, ChevronDown, ChevronRight } from 'lucide-react';
+import { useTranslation } from 'next-i18next';
+import { QRCodeSVG } from 'qrcode.react';
+import type { ReactNode } from 'react';
+import { useState } from 'react';
+import { CopyButton } from '@/features/app/components/CopyButton';
+import { SharePasswordReveal } from '@/features/app/components/SharePasswordReveal';
+import { EmbedConfigPopover } from './EmbedConfigPopover';
+
+interface IPermissionOption {
+  active: boolean;
+  label: string;
+  desc: string;
+  onClick: () => void;
+}
+
+export interface IBaseShareData {
+  allowEdit?: boolean | null;
+  allowSave?: boolean | null;
+  allowCopy?: boolean | null;
+  password?: string | boolean | null;
+}
+
+export interface IBaseShareContentProps {
+  className?: string;
+  header?: ReactNode;
+  share: IBaseShareData | null;
+  shareUrl: string;
+  embedUrl: string;
+  isCreateLoading?: boolean;
+  isDeleteLoading?: boolean;
+  isRefreshLoading?: boolean;
+  isUpdateLoading?: boolean;
+  disabled?: boolean;
+  permissionOptions: IPermissionOption[];
+  onToggleShare: (enabled: boolean) => void;
+  onUpdateSetting: (data: Record<string, unknown>) => Promise<boolean>;
+  onDeleteShare: () => void;
+  onRefreshShare: () => void;
+}
+
+export const BaseShareContent = ({
+  className,
+  header,
+  share,
+  shareUrl,
+  embedUrl,
+  isCreateLoading,
+  isDeleteLoading,
+  isRefreshLoading,
+  isUpdateLoading,
+  disabled,
+  permissionOptions,
+  onToggleShare,
+  onUpdateSetting,
+  onDeleteShare,
+  onRefreshShare,
+}: IBaseShareContentProps) => {
+  const { t } = useTranslation(['common']);
+
+  const [revealedPassword, setRevealedPassword] = useState<string>();
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+
+  const handleToggleShare = (enabled: boolean) => {
+    if (enabled) {
+      onToggleShare(true);
+    } else {
+      setShowDeleteConfirm(true);
+    }
+  };
+
+  const savePassword = async (password: string) => {
+    if (await onUpdateSetting({ password })) setRevealedPassword(password);
+  };
+
+  const handlePasswordSwitchChange = (checked: boolean) => {
+    if (checked) {
+      savePassword(generateSharePassword());
+    } else {
+      setRevealedPassword(undefined);
+      onUpdateSetting({ password: null });
+    }
+  };
+
+  const isShareEnabled = !!share;
+
+  const activePermission = permissionOptions.find((o) => o.active);
+
+  return (
+    <div className={cn('flex w-full flex-col gap-4', className)}>
+      {header}
+
+      <div className="flex items-center gap-2">
+        {isCreateLoading ? (
+          <Spin className="size-5" />
+        ) : disabled ? (
+          <TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                {/* Focusable so keyboard users can reach the tooltip; the disabled switch itself can't take focus */}
+                {/* eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex */}
+                <span className="inline-flex items-center" tabIndex={0}>
+                  <Switch id="share-switch" checked={isShareEnabled} disabled />
+                </span>
+              </TooltipTrigger>
+              <TooltipContent side="bottom">
+                <p>{t('baseShare.noPermissionTip')}</p>
+              </TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+        ) : (
+          <Switch id="share-switch" checked={isShareEnabled} onCheckedChange={handleToggleShare} />
+        )}
+        <Label htmlFor="share-switch" className="text-sm">
+          {t('baseShare.shareToWeb')}
+        </Label>
+      </div>
+
+      {isShareEnabled && share && (
+        <>
+          <div className="flex flex-col gap-2">
+            <div className="flex items-center gap-1.5 text-sm">
+              <span className="text-muted-foreground">{t('baseShare.linkHolderLabel')}</span>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild disabled={disabled}>
+                  <button
+                    disabled={disabled}
+                    className="inline-flex items-center gap-0.5 font-medium text-blue-500 hover:text-blue-600 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {activePermission?.label}
+                    <ChevronDown className="size-3.5" />
+                  </button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="start" className="w-64">
+                  {permissionOptions.map((item) => (
+                    <DropdownMenuItem
+                      key={item.label}
+                      className={item.active ? 'font-medium' : ''}
+                      onClick={item.onClick}
+                    >
+                      <div className="flex items-start gap-1.5">
+                        {item.active ? (
+                          <Check className="mt-0.5 size-4 shrink-0" />
+                        ) : (
+                          <span className="mt-0.5 size-4 shrink-0" />
+                        )}
+                        <div className="flex flex-col gap-1">
+                          <span>{item.label}</span>
+                          <span className="text-xs font-normal text-muted-foreground">
+                            {item.desc}
+                          </span>
+                        </div>
+                      </div>
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </div>
+            <div className="flex items-center gap-2">
+              <Input className="min-w-0 flex-1" value={shareUrl} readOnly />
+              <CopyButton text={shareUrl} variant="outline" size="icon-sm" className="shrink-0" />
+              <Popover>
+                <PopoverTrigger asChild>
+                  <Button variant="outline" size="icon-sm" className="shrink-0">
+                    <Qrcode className="size-4 shrink-0" />
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent className="size-48 bg-white p-2">
+                  <QRCodeSVG value={shareUrl} className="size-full" />
+                </PopoverContent>
+              </Popover>
+              <TooltipProvider>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="outline"
+                      size="icon-sm"
+                      className="shrink-0"
+                      aria-label={t('baseShare.refreshLink')}
+                      onClick={onRefreshShare}
+                      disabled={isRefreshLoading || disabled}
+                    >
+                      {isRefreshLoading ? (
+                        <Spin className="size-4" />
+                      ) : (
+                        <RefreshCcw className="size-4 shrink-0" />
+                      )}
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom">
+                    <p>{t('baseShare.refreshLink')}</p>
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+            </div>
+          </div>
+
+          <Separator />
+
+          <Collapsible className="flex flex-col gap-3">
+            <CollapsibleTrigger className="flex items-center gap-1 text-sm font-medium">
+              {t('baseShare.advanced')}
+              <ChevronRight className="size-4 transition-transform duration-200 rtl:-scale-x-100 [[data-state=open]>&]:rotate-90" />
+            </CollapsibleTrigger>
+            <CollapsibleContent className="flex flex-col gap-3">
+              <div className="flex items-center gap-2">
+                <Switch
+                  id="share-allowCopy"
+                  checked={Boolean(share.allowCopy)}
+                  disabled={disabled}
+                  onCheckedChange={(checked) => onUpdateSetting({ allowCopy: checked })}
+                />
+                <Label className="text-sm font-normal" htmlFor="share-allowCopy">
+                  {t('baseShare.allowCopyData')}
+                </Label>
+              </div>
+
+              <div className="flex flex-col gap-2">
+                <div className="flex items-center gap-2">
+                  <Switch
+                    id="share-password"
+                    checked={Boolean(share.password)}
+                    disabled={disabled || isUpdateLoading}
+                    onCheckedChange={handlePasswordSwitchChange}
+                  />
+                  <Label className="text-sm font-normal" htmlFor="share-password">
+                    {t('baseShare.restrictByPassword')}
+                  </Label>
+                </div>
+                {Boolean(share.password) && !disabled && (
+                  <SharePasswordReveal
+                    shareUrl={shareUrl}
+                    password={revealedPassword}
+                    onSave={savePassword}
+                  />
+                )}
+              </div>
+
+              {embedUrl && <EmbedConfigPopover shareUrl={embedUrl} />}
+            </CollapsibleContent>
+          </Collapsible>
+        </>
+      )}
+
+      <AlertDialog open={showDeleteConfirm} onOpenChange={setShowDeleteConfirm}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t('baseShare.deleteConfirmTitle')}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {t('baseShare.deleteConfirmDescription')}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{t('common:actions.cancel')}</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={() => {
+                onDeleteShare();
+                setShowDeleteConfirm(false);
+              }}
+              disabled={isDeleteLoading}
+            >
+              {isDeleteLoading && <Spin className="me-2 size-4" />}
+              {t('common:actions.confirm')}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </div>
+  );
+};

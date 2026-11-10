@@ -1,6 +1,7 @@
 import type { IUserCellValue } from '@teable/core';
 import type { ForwardRefRenderFunction } from 'react';
 import { useRef, useImperativeHandle, forwardRef } from 'react';
+import { useTranslation } from '../../../context/app/i18n';
 import type { UserField } from '../../../model';
 import type { IEditorRef } from '../../editor/type';
 import { UserEditorMain } from '../../editor/user';
@@ -12,7 +13,8 @@ const GridUserEditorBase: ForwardRefRenderFunction<
   IEditorRef<string>,
   IWrapperEditorProps & IEditorProps
 > = (props, ref) => {
-  const { field, record, rect, style, isEditing } = props;
+  const { field, record, rect, style, isEditing, initialSearch, setEditing } = props;
+  const { t } = useTranslation();
   const { id: fieldId, options } = field as UserField;
   const cellValue = record.getCellValue(field.id) as IUserCellValue | IUserCellValue[];
 
@@ -25,7 +27,10 @@ const GridUserEditorBase: ForwardRefRenderFunction<
 
   const attachStyle = useGridPopupPosition(rect, 340);
   const onChange = (value?: IUserCellValue | IUserCellValue[]) => {
-    record.updateCell(fieldId, value);
+    record.updateCell(fieldId, value, { t });
+    if (!options.isMultiple) {
+      setTimeout(() => setEditing?.(false));
+    }
   };
 
   return (
@@ -41,7 +46,8 @@ const GridUserEditorBase: ForwardRefRenderFunction<
           }}
           className="absolute rounded-sm border shadow-sm"
           value={cellValue}
-          options={options}
+          isMultiple={options.isMultiple}
+          initialSearch={initialSearch}
           onChange={onChange}
         />
       ) : (

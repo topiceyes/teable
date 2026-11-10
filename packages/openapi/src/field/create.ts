@@ -7,10 +7,23 @@ import { z } from '../zod';
 
 export const CREATE_FIELD = '/table/{tableId}/field';
 
+export const createFieldRequestSchema = z.preprocess((input, ctx) => {
+  if (input && typeof input === 'object' && 'isPrimary' in input && input.isPrimary === true) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['isPrimary'],
+      message: 'Cannot create another primary field in an existing table.',
+    });
+  }
+  return input;
+}, createFieldRoSchema);
+
 export const CreateFieldRoute: RouteConfig = registerRoute({
   method: 'post',
   path: CREATE_FIELD,
-  description: 'Create a field',
+  summary: 'Create field',
+  description:
+    'Create a new field in the specified table. Setting isPrimary to true is rejected; primary fields are established when creating the table.',
   request: {
     params: z.object({
       tableId: z.string(),
@@ -18,7 +31,7 @@ export const CreateFieldRoute: RouteConfig = registerRoute({
     body: {
       content: {
         'application/json': {
-          schema: createFieldRoSchema,
+          schema: createFieldRequestSchema,
         },
       },
     },

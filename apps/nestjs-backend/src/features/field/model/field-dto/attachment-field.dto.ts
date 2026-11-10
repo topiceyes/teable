@@ -1,9 +1,13 @@
 import type { IAttachmentCellValue, IAttachmentItem } from '@teable/core';
 import { AttachmentFieldCore, generateAttachmentId } from '@teable/core';
 import { omit } from 'lodash';
-import type { IFieldBase } from '../field-base';
+import type { FieldBase } from '../field-base';
 
-export class AttachmentFieldDto extends AttachmentFieldCore implements IFieldBase {
+export class AttachmentFieldDto extends AttachmentFieldCore implements FieldBase {
+  get isStructuredCellValue() {
+    return false;
+  }
+
   static getTokenAndNameByString(value: string): { token: string; name: string } | undefined {
     const openParenIndex = value.lastIndexOf('(');
 
@@ -18,7 +22,11 @@ export class AttachmentFieldDto extends AttachmentFieldCore implements IFieldBas
   convertCellValue2DBValue(value: unknown): unknown {
     return (
       value &&
-      JSON.stringify((value as IAttachmentCellValue).map((item) => omit(item, ['presignedUrl'])))
+      JSON.stringify(
+        (value as IAttachmentCellValue).map((item) =>
+          omit(item, ['presignedUrl', 'smThumbnailUrl', 'lgThumbnailUrl'])
+        )
+      )
     );
   }
 

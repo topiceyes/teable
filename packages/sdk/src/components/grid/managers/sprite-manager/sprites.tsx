@@ -1,5 +1,4 @@
 import {
-  AlertCircle,
   DraggableHandle,
   Maximize2,
   Plus,
@@ -7,6 +6,8 @@ import {
   ChevronDown,
   ChevronRight,
   Lock,
+  EyeOff,
+  Info,
 } from '@teable/icons';
 import { renderToString } from 'react-dom/server';
 
@@ -32,7 +33,7 @@ const add = (props: ISpriteProps) => {
 
 const description = (props: ISpriteProps) => {
   const { fgColor } = props;
-  return renderToString(<AlertCircle style={{ color: fgColor }} />);
+  return renderToString(<Info style={{ color: fgColor }} />);
 };
 
 const close = (props: ISpriteProps) => {
@@ -55,6 +56,11 @@ const lock = (props: ISpriteProps) => {
   return renderToString(<Lock style={{ color: fgColor }} />);
 };
 
+export const eyeOff = (props: ISpriteProps) => {
+  const { fgColor } = props;
+  return renderToString(<EyeOff style={{ color: fgColor }} />);
+};
+
 export const sprites = {
   add,
   drag,
@@ -64,6 +70,7 @@ export const sprites = {
   expand,
   collapse,
   lock,
+  eyeOff,
 };
 
 export enum GridInnerIcon {
@@ -75,4 +82,5 @@ export enum GridInnerIcon {
   Expand = 'expand',
   Collapse = 'collapse',
   Lock = 'lock',
+  EyeOff = 'eyeOff',
 }

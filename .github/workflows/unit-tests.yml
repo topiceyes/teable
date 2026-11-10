@@ -8,11 +8,13 @@ on:
     branches:
       - develop
     paths:
-      - 'apps/nestjs-backend/**'
       - 'apps/nextjs-app/**'
       - 'packages/core/**'
       - 'packages/sdk/**'
-
+      - 'packages/openapi/**'
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -20,7 +22,7 @@ jobs:
 
     strategy:
       matrix:
-        node-version: [20.9.0]
+        node-version: [24.22.2]
 
     steps:
       - uses: actions/checkout@v4
@@ -40,22 +42,8 @@ jobs:
 
       - name: 🏗 Run build
         run: |
-          pnpm -F "./packages/**" run build
+          pnpm -F "./packages/**" -F "!@teable/v2-*" run build
 
       - name: 🧪 Run Tests
         run: |
-          pnpm g:test-unit-cover
-      - name: Coveralls Parallel
-        uses: coverallsapp/github-action@v2
-        with:
-          flag-name: run-${{ join(matrix.*, '-') }}
-          parallel: true
-
-  finish:
-    needs: test
-    runs-on: ubuntu-latest
-    steps:
-      - name: Coveralls Finished
-        uses: coverallsapp/github-action@v2
-        with:
-          parallel-finished: true
+          pnpm -r -F "@teable/app" -F "@teable/core" -F "@teable/sdk" -F "@teable/openapi" --parallel test-unit

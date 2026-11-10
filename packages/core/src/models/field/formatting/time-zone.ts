@@ -1,7 +1,18 @@
+import dayjs from 'dayjs';
+import timezone from 'dayjs/plugin/timezone';
+import utc from 'dayjs/plugin/utc';
 import { z } from '../../../zod';
+dayjs.extend(utc);
+dayjs.extend(timezone);
+
+/** Human-readable UTC offset of an IANA zone, e.g. `UTC+8` — for picker labels. */
+export const getUTCOffset = (timeZone: string): string => {
+  const offsetHours = dayjs().tz(timeZone).utcOffset() / 60;
+  return offsetHours >= 0 ? `UTC+${offsetHours}` : `UTC${offsetHours}`;
+};
 
 export const TIME_ZONE_LIST = [
-  'utc',
+  'UTC',
   'Africa/Abidjan',
   'Africa/Accra',
   'Africa/Addis_Ababa',
@@ -434,6 +445,20 @@ export const TIME_ZONE_LIST = [
   'Pacific/Wallis',
 ] as const;
 
-export const timeZoneStringSchema = z.enum(TIME_ZONE_LIST).openapi({
-  description: 'The time zone that should be used to format dates',
-});
+export const timeZoneStringSchema = z
+  .string()
+  .refine(
+    (value) => {
+      try {
+        dayjs().tz(value);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    { message: 'Invalid timezone, please use iso 8601 format' }
+  )
+  .meta({
+    type: 'string',
+    description: 'The time zone that should be used to format dates',
+  });

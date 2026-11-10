@@ -1,0 +1,149 @@
+import { InjectQueue, WorkerHost } from '@nestjs/bullmq';
+import { Injectable, Logger } from '@nestjs/common';
+import { isHeic, isImage, isPdf } from '@teable/core';
+import { PrismaService } from '@teable/db-main-prisma';
+import { Queue } from 'bullmq';
+import type { Job } from 'bullmq';
+import sharp from 'sharp';
+import { EventEmitterService } from '../../event-emitter/event-emitter.service';
+import { Events } from '../../event-emitter/events';
+import type { NestWorkerOptions } from '../../utils/nest-worker-options';
+import { Processor } from '../../utils/queue-processor';
+import { AttachmentsStorageService } from '../attachments/attachments-storage.service';
+import { renderHeicAsPng } from './heic-thumbnail';
+import { renderPdfFirstPageAsImage } from './pdf-thumbnail';
+import StorageAdapter from './plugins/adapter';
+import { InjectStorageAdapter } from './plugins/storage';
+
+interface IRecordImageJob {
+  bucket: string;
+  token: string;
+  path: string;
+  mimetype: string;
+  height?: number | null;
+}
+
+export const ATTACHMENTS_CROP_QUEUE = 'attachments-crop-queue';
+
+const queueOptions: NestWorkerOptions = {
+  removeOnComplete: {
+    count: 2000,
+  },
+  removeOnFail: {
+    count: 2000,
+  },
+};
+@Injectable()
+@Processor(ATTACHMENTS_CROP_QUEUE, queueOptions)
+export class AttachmentsCropQueueProcessor extends WorkerHost {
+  private readonly logger = new Logger(AttachmentsCropQueueProcessor.name);
+
+  constructor(
+    private readonly prismaService: PrismaService,
+    private readonly attachmentsStorageService: AttachmentsStorageService,
+    private readonly eventEmitterService: EventEmitterService,
+    @InjectStorageAdapter() private readonly storageAdapter: StorageAdapter,
+    @InjectQueue(ATTACHMENTS_CROP_QUEUE) public readonly queue: Queue<IRecordImageJob>
+  ) {
+    super();
+  }
+
+  public async process(job: Job<IRecordImageJob>) {
+    await this.handleCropImage(job);
+    await this.eventEmitterService.emitAsync(Events.CROP_IMAGE_COMPLETE, {
+      token: job.data.token,
+    });
+  }
+
+  private async handleCropImage(job: Job<IRecordImageJob>) {
+    const { bucket, token, path, mimetype, height } = job.data;
+
+    const existing = await this.prismaService.attachments.findUnique({
+      where: { token },
+      select: { thumbnailPath: true },
+    });
+    if (!existing) {
+      this.logger.log(`Attachment with token(${token}) does not exist.`);
+      return;
+    }
+    if (existing.thumbnailPath) {
+      this.logger.log(`path(${path}) already has thumbnail`);
+      return;
+    }
+
+    let lgThumbnailPath: string | undefined;
+    let smThumbnailPath: string | undefined;
+
+    if (isHeic(mimetype)) {
+      // Sharp cannot decode HEVC, so height is unknown at upload time and the
+      // whole file goes through the WASM decoder instead of cropTableImage.
+      try {
+        const heicBuffer = await this.downloadToBuffer(bucket, path);
+        const { buffer } = await renderHeicAsPng(heicBuffer);
+        ({ lgThumbnailPath, smThumbnailPath } =
+          await this.attachmentsStorageService.uploadTableImageThumbnailsFromBuffer(
+            bucket,
+            path,
+            buffer
+          ));
+      } catch (error) {
+        this.logger.error(`HEIC thumbnail failed for ${path}`, error);
+        // Non-fatal: frontend falls back to file icon
+        return;
+      }
+    } else if (isImage(mimetype) && height) {
+      ({ lgThumbnailPath, smThumbnailPath } = await this.attachmentsStorageService.cropTableImage(
+        bucket,
+        path,
+        height
+      ));
+    } else if (isPdf(mimetype)) {
+      try {
+        const pdfBuffer = await this.downloadToBuffer(bucket, path);
+        const { buffer } = await renderPdfFirstPageAsImage(pdfBuffer);
+
+        const isBlank = await this.isBlankImage(buffer);
+        if (isBlank) {
+          this.logger.warn(`PDF thumbnail for ${path} is blank, skipping storage`);
+          return;
+        }
+
+        ({ lgThumbnailPath, smThumbnailPath } =
+          await this.attachmentsStorageService.uploadTableImageThumbnailsFromBuffer(
+            bucket,
+            path,
+            buffer
+          ));
+      } catch (error) {
+        this.logger.error(`PDF thumbnail failed for ${path}`, error);
+        // Non-fatal: frontend falls back to PDF icon
+        return;
+      }
+    } else {
+      this.logger.log(`path(${path}) is not a supported type for thumbnails`);
+      return;
+    }
+
+    await this.prismaService.attachments.update({
+      where: { token },
+      data: {
+        thumbnailPath: JSON.stringify({ lg: lgThumbnailPath, sm: smThumbnailPath }),
+      },
+    });
+    this.logger.log(`path(${path}) crop thumbnails success`);
+  }
+
+  private async downloadToBuffer(bucket: string, path: string): Promise<Buffer> {
+    const stream = await this.storageAdapter.downloadFile(bucket, path);
+    const chunks: Buffer[] = [];
+    for await (const chunk of stream as AsyncIterable<Buffer>) {
+      chunks.push(Buffer.from(chunk));
+    }
+    return Buffer.concat(chunks);
+  }
+
+  private async isBlankImage(pngBuffer: Buffer): Promise<boolean> {
+    const { channels } = await sharp(pngBuffer).stats();
+    return channels.slice(0, 3).every((ch) => ch.min >= 250);
+  }
+}

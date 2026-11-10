@@ -1,10 +1,11 @@
 import type { INestApplication } from '@nestjs/common';
-import type { IFieldRo, IFieldVo, IRecordsVo } from '@teable/core';
+import type { IFieldRo, IFieldVo } from '@teable/core';
 import { FieldType, NumberFormattingType } from '@teable/core';
+import type { IRecordsVo } from '@teable/openapi';
 import {
   createField,
   createTable,
-  deleteTable,
+  permanentDeleteTable,
   getFields,
   getRecords,
   initApp,
@@ -27,7 +28,7 @@ describe('OpenAPI Field calculation (e2e)', () => {
   });
 
   afterAll(async () => {
-    await deleteTable(baseId, tableId);
+    await permanentDeleteTable(baseId, tableId);
     await app.close();
   });
 
@@ -73,5 +74,28 @@ describe('OpenAPI Field calculation (e2e)', () => {
     expect(recordsVoAfter.records[0].fields[fieldVo.name]).toEqual('A1');
     expect(recordsVoAfter.records[1].fields[fieldVo.name]).toEqual('A2');
     expect(recordsVoAfter.records[2].fields[fieldVo.name]).toEqual('A3');
+  });
+
+  it('should create formula referencing text * 2 and compute via numeric coercion', async () => {
+    // Create an isolated table to avoid interference with seeded data
+    const t = await createTable(baseId, {
+      name: 'text-mul',
+      fields: [{ name: 'T', type: FieldType.SingleLineText } as IFieldRo],
+      records: [{ fields: { T: '3' } }],
+    });
+
+    const textId = t.fields.find((f) => f.name === 'T')!.id;
+
+    // Create formula that multiplies text by 2; should succeed and coerce to number
+    const f = await createField(t.id, {
+      name: 'Mul2',
+      type: FieldType.Formula,
+      options: { expression: `{${textId}} * 2` },
+    } as IFieldRo);
+
+    const recs = await getRecords(t.id);
+    expect(recs.records[0].fields[f.name]).toBe(6);
+
+    await permanentDeleteTable(baseId, t.id);
   });
 });

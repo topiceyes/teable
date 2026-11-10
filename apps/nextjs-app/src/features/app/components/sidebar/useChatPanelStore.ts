@@ -1,0 +1,90 @@
+import { LocalStorageKeys } from '@teable/sdk/config';
+import { create } from 'zustand';
+import { persist } from 'zustand/middleware';
+
+/**
+ * Chat panel visibility states:
+ * - 'open'     — panel visible at normal width (side panel)
+ * - 'close'    — panel hidden, only cuppy icon shown
+ * - 'expanded' — panel takes up most of the screen
+ *
+ * State is persisted to localStorage so the user's preference
+ * survives page navigations and browser refreshes.
+ *
+ * Default is 'open' — first-time visitors see the panel.
+ * Once a user explicitly closes the panel, 'close' is persisted
+ * and respected on subsequent visits.
+ *
+ * NOTE: Some pages force-open the panel for specific UX flows:
+ * - AppPage calls open() because app builder requires the chat panel
+ * - ChatContainer calls expand() for the empty-base welcome screen
+ * These are intentional overrides, not default-state logic.
+ */
+interface IChatPanelState {
+  status: 'open' | 'close' | 'expanded';
+  /**
+   * Every ask to show the panel, counted even while it is already showing: a shell that draws
+   * the chat elsewhere (the chat-first dock) brings it on screen on each one.
+   */
+  openRequests: number;
+  panelType: 'general' | 'app-builder';
+  /** Advances when add-to-chat must open the mobile sheet, not only the desktop panel. */
+  mobileOpenSignal: number;
+  setPanelType: (type: 'general' | 'app-builder') => void;
+  close: () => void;
+  open: () => void;
+  /** Ask for the panel without shrinking an expanded one: 'close' becomes 'open', the rest stays. */
+  ensureOpen: () => void;
+  requestMobileOpen: () => void;
+  expand: () => void;
+  toggleVisible: () => void;
+  toggleExpanded: () => void;
+}
+
+/**
+ * Shrink an 'expanded' (page-covering) panel back to the normal side panel;
+ * 'open' and 'close' are left untouched. For click handlers that navigate to
+ * content the expanded panel would otherwise keep hidden.
+ */
+export const collapseChatPanelIfExpanded = () => {
+  const { status, open } = useChatPanelStore.getState();
+  if (status === 'expanded') {
+    open();
+  }
+};
+
+export const useChatPanelStore = create<IChatPanelState>()(
+  persist(
+    (set) => ({
+      status: 'open',
+      openRequests: 0,
+      panelType: 'app-builder',
+      mobileOpenSignal: 0,
+      setPanelType: (type: 'general' | 'app-builder') => set({ panelType: type }),
+      close: () =>
+        set(() => ({
+          status: 'close',
+        })),
+      open: () => set((state) => ({ status: 'open', openRequests: state.openRequests + 1 })),
+      ensureOpen: () =>
+        set((state) => ({
+          status: state.status === 'close' ? 'open' : state.status,
+          openRequests: state.openRequests + 1,
+        })),
+      requestMobileOpen: () => set((state) => ({ mobileOpenSignal: state.mobileOpenSignal + 1 })),
+      expand: () => set((state) => ({ status: 'expanded', openRequests: state.openRequests + 1 })),
+      toggleVisible: () =>
+        set((state) => ({
+          status: state.status !== 'close' ? 'close' : 'open',
+        })),
+      toggleExpanded: () =>
+        set((state) => ({ status: state.status === 'expanded' ? 'open' : 'expanded' })),
+    }),
+    {
+      name: LocalStorageKeys.ChatPanel,
+      partialize: (state) => ({
+        status: state.status,
+      }),
+    }
+  )
+);

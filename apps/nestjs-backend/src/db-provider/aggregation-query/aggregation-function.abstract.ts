@@ -1,26 +1,48 @@
-import { InternalServerErrorException, Logger } from '@nestjs/common';
+import { InternalServerErrorException } from '@nestjs/common';
+import type { FieldCore } from '@teable/core';
 import { StatisticsFunc } from '@teable/core';
 import type { Knex } from 'knex';
-import type { IFieldInstance } from '../../features/field/model/factory';
+import type { IRecordQueryAggregateContext } from '../../features/record/query-builder/record-query-builder.interface';
 import type { IAggregationFunctionInterface } from './aggregation-function.interface';
 
 export abstract class AbstractAggregationFunction implements IAggregationFunctionInterface {
-  private logger = new Logger(AbstractAggregationFunction.name);
-
   protected tableColumnRef: string;
 
   constructor(
     protected readonly knex: Knex,
-    protected readonly dbTableName: string,
-    protected readonly field: IFieldInstance
+    protected readonly field: FieldCore,
+    readonly context?: IRecordQueryAggregateContext
   ) {
-    const { dbFieldName } = this.field;
+    const { dbFieldName, id } = field;
 
-    this.tableColumnRef = `${this.dbTableName}.${dbFieldName}`;
+    const selection = context?.selectionMap.get(id);
+    if (selection) {
+      this.tableColumnRef = selection as string;
+    } else if (dbFieldName.startsWith('"')) {
+      this.tableColumnRef = dbFieldName;
+    } else {
+      this.tableColumnRef = this.buildColumnRef(dbFieldName);
+    }
   }
 
-  compiler(builderClient: Knex.QueryBuilder, aggFunc: StatisticsFunc) {
+  /** knex.ref() only builds an identifier reference; nothing is executed or awaited. */
+  private buildColumnRef(dbFieldName: string): string {
+    const columnRef = this.knex.ref(dbFieldName);
+    const tableAlias = this.tableAlias;
+    return (tableAlias ? columnRef.withSchema(tableAlias) : columnRef).toQuery();
+  }
+
+  get dbTableName() {
+    return this.context?.tableDbName;
+  }
+
+  get tableAlias() {
+    return this.context?.tableAlias;
+  }
+
+  compiler(builderClient: Knex.QueryBuilder, aggFunc: StatisticsFunc, alias: string | undefined) {
     const functionHandlers = {
+      [StatisticsFunc.Count]: this.count,
       [StatisticsFunc.Empty]: this.empty,
       [StatisticsFunc.Filled]: this.filled,
       [StatisticsFunc.Unique]: this.unique,
@@ -52,6 +74,7 @@ export abstract class AbstractAggregationFunction implements IAggregationFunctio
     let rawSql: string = chosenHandler();
 
     const ignoreMcvFunc = [
+      StatisticsFunc.Count,
       StatisticsFunc.Empty,
       StatisticsFunc.UnChecked,
       StatisticsFunc.Filled,
@@ -60,6 +83,8 @@ export abstract class AbstractAggregationFunction implements IAggregationFunctio
       StatisticsFunc.PercentUnChecked,
       StatisticsFunc.PercentFilled,
       StatisticsFunc.PercentChecked,
+      // Special-case: compute per-row then sum across group without MCV join
+      StatisticsFunc.TotalAttachmentSize,
     ];
 
     if (isMultipleCellValue && !ignoreMcvFunc.includes(aggFunc)) {
@@ -71,35 +96,41 @@ export abstract class AbstractAggregationFunction implements IAggregationFunctio
       rawSql = `MAX(${this.knex.ref(`${joinTable}.value`)})`;
     }
 
-    return builderClient.select(this.knex.raw(`${rawSql} AS ??`, [`${fieldId}_${aggFunc}`]));
+    return builderClient.select(
+      this.knex.raw(`${rawSql} AS ??`, [alias ?? `${fieldId}_${aggFunc}`])
+    );
+  }
+
+  count(): string {
+    return this.knex.raw(`COUNT(*)`).toQuery();
   }
 
   empty(): string {
-    return this.knex.raw(`COUNT(*) - COUNT(??)`, [this.tableColumnRef]).toQuery();
+    return this.knex.raw(`COUNT(*) - COUNT(${this.tableColumnRef})`).toQuery();
   }
 
   filled(): string {
-    return this.knex.raw(`COUNT(??)`, [this.tableColumnRef]).toQuery();
+    return this.knex.raw(`COUNT(${this.tableColumnRef})`).toQuery();
   }
 
   unique(): string {
-    return this.knex.raw(`COUNT(DISTINCT ??)`, [this.tableColumnRef]).toQuery();
+    return this.knex.raw(`COUNT(DISTINCT ${this.tableColumnRef})`).toQuery();
   }
 
   max(): string {
-    return this.knex.raw(`MAX(??)`, [this.tableColumnRef]).toQuery();
+    return this.knex.raw(`MAX(${this.tableColumnRef})`).toQuery();
   }
 
   min(): string {
-    return this.knex.raw(`MIN(??)`, [this.tableColumnRef]).toQuery();
+    return this.knex.raw(`MIN(${this.tableColumnRef})`).toQuery();
   }
 
   sum(): string {
-    return this.knex.raw(`SUM(??)`, [this.tableColumnRef]).toQuery();
+    return this.knex.raw(`SUM(${this.tableColumnRef})`).toQuery();
   }
 
   average(): string {
-    return this.knex.raw(`AVG(??)`, [this.tableColumnRef]).toQuery();
+    return this.knex.raw(`AVG(${this.tableColumnRef})`).toQuery();
   }
 
   checked(): string {
@@ -110,29 +141,15 @@ export abstract class AbstractAggregationFunction implements IAggregationFunctio
     return this.empty();
   }
 
-  percentEmpty(): string {
-    return this.knex
-      .raw(`((COUNT(*) - COUNT(??)) * 1.0 / COUNT(*)) * 100`, [this.tableColumnRef])
-      .toQuery();
-  }
+  abstract percentEmpty(): string;
 
-  percentFilled(): string {
-    return this.knex.raw(`(COUNT(??) * 1.0 / COUNT(*)) * 100`, [this.tableColumnRef]).toQuery();
-  }
+  abstract percentFilled(): string;
 
-  percentUnique(): string {
-    return this.knex
-      .raw(`(COUNT(DISTINCT ??) * 1.0 / COUNT(*)) * 100`, [this.tableColumnRef])
-      .toQuery();
-  }
+  abstract percentUnique(): string;
 
-  percentChecked(): string {
-    return this.percentFilled();
-  }
+  abstract percentChecked(): string;
 
-  percentUnChecked(): string {
-    return this.percentEmpty();
-  }
+  abstract percentUnChecked(): string;
 
   earliestDate(): string {
     return this.min();

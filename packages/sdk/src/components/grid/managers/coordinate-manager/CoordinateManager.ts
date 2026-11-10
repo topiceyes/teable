@@ -109,6 +109,7 @@ export class CoordinateManager implements ICoordinate {
     return this.columnWidthMap[index] ?? this.defaultColumnWidth;
   }
 
+  /* eslint-disable sonarjs/cognitive-complexity */
   protected getCellMetaData(index: number, itemType: ItemType): ICellMetaData {
     let cellMetadataMap, itemSize, lastMeasuredIndex, offset;
     const isColumnType = itemType === ItemType.Column;
@@ -125,8 +126,8 @@ export class CoordinateManager implements ICoordinate {
       cellMetadataMap = this.rowMetaDataMap;
     }
     if (index > lastMeasuredIndex) {
-      if (lastMeasuredIndex >= 0) {
-        const itemMetadata = cellMetadataMap[lastMeasuredIndex];
+      const itemMetadata = cellMetadataMap?.[lastMeasuredIndex];
+      if (lastMeasuredIndex >= 0 && itemMetadata) {
         offset = itemMetadata.offset + itemMetadata.size;
       }
 
@@ -196,7 +197,10 @@ export class CoordinateManager implements ICoordinate {
       itemMetadataMap = this.rowMetaDataMap;
       lastIndex = this.lastRowIndex;
     }
-    const lastMeasuredItemOffset = lastIndex > 0 ? itemMetadataMap[lastIndex].offset : 0;
+    if (lastIndex > 0 && itemMetadataMap[lastIndex] == null) {
+      console.warn('lastIndex is not found in itemMetadataMap', lastIndex, itemMetadataMap);
+    }
+    const lastMeasuredItemOffset = lastIndex > 0 ? (itemMetadataMap[lastIndex]?.offset ?? 0) : 0;
 
     if (lastMeasuredItemOffset >= offset) {
       return this.findNearestCellIndexBinary(offset, 0, lastIndex, itemType);

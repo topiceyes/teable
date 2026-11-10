@@ -3,6 +3,7 @@ import type { ChangeEvent, ForwardRefRenderFunction, KeyboardEvent, RefObject } 
 import { useState, useRef, useImperativeHandle, forwardRef, useMemo } from 'react';
 import AutoSizeTextarea from 'react-textarea-autosize';
 import { Key } from 'ts-keycode-enum';
+import { useContentDir } from '../../../../hooks/use-content-dir';
 import { GRID_DEFAULT } from '../../configs';
 import type { ILinkCell, INumberCell, ITextCell } from '../../renderers';
 import { CellType } from '../../renderers';
@@ -21,6 +22,7 @@ const TextEditorBase: ForwardRefRenderFunction<
   const needWrap = (cell as ITextCell)?.isWrap;
   const inputRef = useRef<HTMLInputElement | HTMLTextAreaElement>(null);
   const [value, setValueInner] = useState(displayData);
+  const contentDir = useContentDir();
 
   useImperativeHandle(ref, () => ({
     focus: () => inputRef.current?.focus(),
@@ -30,7 +32,11 @@ const TextEditorBase: ForwardRefRenderFunction<
 
   const saveValue = () => {
     if (value === displayData || !isEditing) return;
-    onChange?.(type === CellType.Number ? Number(value) : value);
+    if (type === CellType.Number) {
+      onChange?.(Number(value));
+    } else {
+      onChange?.(typeof value === 'string' ? value.trim() : value);
+    }
   };
 
   const onChangeInner = (e: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
@@ -51,10 +57,11 @@ const TextEditorBase: ForwardRefRenderFunction<
   const attachStyle = useMemo(() => {
     const style: React.CSSProperties = {
       width: width + 4,
+      minHeight: height + 4,
       height: needWrap ? 'auto' : height + 4,
       marginLeft: -2,
-      marginTop: -2.5,
-      textAlign: type === CellType.Number ? 'right' : 'left',
+      marginTop: -2,
+      textAlign: type === CellType.Number ? 'right' : 'start',
     };
     if (height > defaultRowHeight) {
       style.paddingBottom = height - defaultRowHeight;
@@ -76,7 +83,8 @@ const TextEditorBase: ForwardRefRenderFunction<
         >
           <AutoSizeTextarea
             ref={inputRef as RefObject<HTMLTextAreaElement>}
-            className="w-full resize-none rounded border-none bg-background px-2 pt-2 text-sm leading-6 focus-visible:outline-none"
+            dir={contentDir}
+            className="w-full resize-none rounded border-none bg-background px-2 pt-1 text-[13px] leading-[1.4rem] focus-visible:outline-none"
             value={value}
             minRows={2}
             maxRows={5}
@@ -84,20 +92,21 @@ const TextEditorBase: ForwardRefRenderFunction<
             onKeyDown={onKeyDown}
             onChange={onChangeInner}
           />
-          <div className="absolute bottom-[2px] left-0 w-full rounded-b-md bg-background pb-[2px] pr-1 text-right text-xs text-slate-400 dark:text-slate-600">
+          <div className="absolute bottom-[2px] start-0 w-full rounded-b-md bg-background pb-[2px] pe-1 text-end text-xs text-slate-400 dark:text-slate-600">
             Shift + Enter
           </div>
         </div>
       ) : (
         <Input
           ref={inputRef as RefObject<HTMLInputElement>}
+          dir={contentDir}
           style={{
             border: `2px solid ${cellLineColorActived}`,
             ...style,
             ...attachStyle,
           }}
           value={value}
-          className="cursor-text border-2 px-2 shadow-none focus-visible:ring-transparent"
+          className="cursor-text border-2 text-[13px]"
           onChange={onChangeInner}
           onBlur={saveValue}
           onMouseDown={(e) => e.stopPropagation()}

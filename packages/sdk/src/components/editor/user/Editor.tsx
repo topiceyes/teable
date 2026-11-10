@@ -1,31 +1,44 @@
-import type { IUserCellValue } from '@teable/core';
+import type { IUserFieldOptions, IUserCellValue } from '@teable/core';
 import { X } from '@teable/icons';
-import {
-  Avatar,
-  AvatarFallback,
-  AvatarImage,
-  Button,
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from '@teable/ui-lib';
-import classNames from 'classnames';
-import React, { useRef, useState } from 'react';
-import { convertNextImageUrl } from '../../grid-enhancements';
+import { Button, Popover, PopoverContent, PopoverTrigger, cn } from '@teable/ui-lib';
+import { useEffect, useRef, useState } from 'react';
+import { UserTag } from '../../cell-value';
+import { useModalRefElement } from '../../expand-record/useModalRefElement';
 import type { IUserEditorMainProps } from './EditorMain';
 import { UserEditorMain } from './EditorMain';
 
-export const UserEditor = (props: IUserEditorMainProps) => {
-  const { value, options, onChange, className, style, readonly } = props;
+interface IUserEditorProps extends Omit<IUserEditorMainProps, 'isMultiple'> {
+  options: IUserFieldOptions;
+}
+
+export const UserEditor = (props: IUserEditorProps) => {
+  const { value, options, onChange, className, style, readonly, ...reset } = props;
   const [open, setOpen] = useState(false);
   const selectRef = useRef<HTMLButtonElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const modalRef = useModalRefElement();
+
+  // See SelectEditor: nested modal Popover traps expand-record pointer events (T7102).
+  useEffect(() => {
+    if (!open) return;
+
+    const handlePointerDown = (e: PointerEvent) => {
+      const target = e.target as Node | null;
+      if (target && !contentRef.current?.contains(target) && !selectRef.current?.contains(target)) {
+        setOpen(false);
+      }
+    };
+
+    document.addEventListener('pointerdown', handlePointerDown, true);
+    return () => document.removeEventListener('pointerdown', handlePointerDown, true);
+  }, [open]);
 
   const { isMultiple } = options;
   const arrayValue = (isMultiple ? value : value ? [value] : null) as IUserCellValue[];
 
-  const onDelete = (val: IUserCellValue) => {
-    const newValue = arrayValue?.filter((v) => v.id !== val.id);
-    onChange?.(newValue);
+  const onDelete = (id: string) => {
+    const newValue = arrayValue?.filter((v) => v.id !== id);
+    onChange?.(isMultiple ? newValue : newValue?.[0]);
   };
 
   const onChangeInner = (val?: IUserCellValue | IUserCellValue[]) => {
@@ -41,37 +54,26 @@ export const UserEditor = (props: IUserEditorMainProps) => {
       variant="outline"
       role="combobox"
       aria-expanded={open}
-      className={classNames(
-        'w-full h-auto min-h-[40px] sm:min-h-[40px] flex flex-wrap justify-start hover:bg-transparent gap-2',
+      className={cn(
+        'w-full h-auto min-h-9 py-0.5 flex flex-wrap justify-start dark:bg-[color-mix(in_oklab,white_5%,hsl(var(--background)))] hover:border-primary/30 hover:bg-background dark:hover:bg-[color-mix(in_oklab,white_5%,hsl(var(--background)))] gap-1.5',
         className
       )}
     >
       {arrayValue?.map(({ id, title, avatarUrl }) => (
-        <div key={id} className="flex items-center">
-          <Avatar className="box-content size-6 cursor-pointer border">
-            <AvatarImage
-              src={convertNextImageUrl({
-                url: avatarUrl as string,
-                w: 64,
-                q: 75,
-              })}
-              alt={title}
+        <UserTag
+          key={id}
+          name={title}
+          avatar={avatarUrl}
+          suffix={
+            <X
+              className="size-3 cursor-pointer opacity-50 hover:opacity-100"
+              onClick={(e) => {
+                e.preventDefault();
+                onDelete(id);
+              }}
             />
-            <AvatarFallback className="text-sm">{title?.slice(0, 1)}</AvatarFallback>
-          </Avatar>
-          <div className="-ml-3 flex items-center overflow-hidden rounded-[6px] bg-secondary pl-4 pr-2 text-sm text-secondary-foreground">
-            <p className="flex-1 truncate">{title}</p>
-            {!readonly && (
-              <X
-                className="ml-[2px] cursor-pointer opacity-50 hover:opacity-100"
-                onClick={(e) => {
-                  e.preventDefault();
-                  onDelete({ id, title });
-                }}
-              />
-            )}
-          </div>
-        </div>
+          }
+        />
       ))}
     </Button>
   );
@@ -81,12 +83,23 @@ export const UserEditor = (props: IUserEditorMainProps) => {
       {readonly ? (
         triggerContent
       ) : (
-        <Popover open={open} onOpenChange={setOpen} modal>
+        <Popover open={open} onOpenChange={setOpen}>
           <PopoverTrigger ref={selectRef} asChild>
             {triggerContent}
           </PopoverTrigger>
-          <PopoverContent className="p-0" style={{ width: selectRef.current?.offsetWidth || 0 }}>
-            <UserEditorMain {...props} onChange={onChangeInner} />
+          <PopoverContent
+            ref={contentRef}
+            container={modalRef.current}
+            className="p-0"
+            style={{ width: selectRef.current?.offsetWidth || 0 }}
+            onEscapeKeyDown={(e) => e.stopPropagation()}
+          >
+            <UserEditorMain
+              {...reset}
+              value={value}
+              isMultiple={isMultiple}
+              onChange={onChangeInner}
+            />
           </PopoverContent>
         </Popover>
       )}

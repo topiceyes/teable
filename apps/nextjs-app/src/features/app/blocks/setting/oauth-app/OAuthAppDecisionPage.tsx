@@ -1,0 +1,148 @@
+import { useQuery } from '@tanstack/react-query';
+import { HelpCircle } from '@teable/icons';
+import { decisionInfoGet } from '@teable/openapi';
+import { useSession } from '@teable/sdk/hooks';
+import { Spin } from '@teable/ui-lib/base';
+import { Button, Card, Separator, cn } from '@teable/ui-lib/shadcn';
+import Link from 'next/link';
+import { useRouter } from 'next/router';
+import { useTranslation } from 'next-i18next';
+import { useMemo } from 'react';
+import { TeableLogo } from '@/components/TeableLogo';
+import { OAuthScope } from '@/features/app/components/oauth/OAuthScope';
+import { UserAvatar } from '@/features/app/components/user/UserAvatar';
+import { usePreviewUrl } from '@/features/app/hooks/usePreviewUrl';
+import { isSafeWebUrl } from '@/features/app/utils/is-safe-web-url';
+import { oauthAppConfig } from '@/features/i18n/oauth-app.config';
+import { BrandFooter } from '../../view/form/components/BrandFooter';
+import { McpDecisionCard } from './McpDecisionCard';
+
+export const OAuthAppDecisionPage = () => {
+  const router = useRouter();
+  const { user } = useSession();
+  const transactionId = router.query.transaction_id as string;
+  const getPreviewUrl = usePreviewUrl();
+  const { t } = useTranslation(oauthAppConfig.i18nNamespaces);
+  const { data, error } = useQuery({
+    queryKey: ['oauth-app-decision-info', transactionId],
+    queryFn: ({ queryKey }) => decisionInfoGet(queryKey[1]).then((data) => data.data),
+    enabled: !!transactionId,
+    refetchOnWindowFocus: false,
+  });
+
+  const decisionInfo = data;
+
+  const scopesTypeLen = useMemo(() => {
+    if (!decisionInfo?.scopes) {
+      return 0;
+    }
+    const types: string[] = [];
+    decisionInfo.scopes.forEach((scope) => {
+      const type = scope.split('|')[0];
+      if (!types.includes(type)) {
+        types.push(type);
+      }
+    });
+    return types.length;
+  }, [decisionInfo?.scopes]);
+
+  if (!transactionId) {
+    return <div>Transaction ID is required</div>;
+  }
+
+  if (error) {
+    // Without this branch a failed fetch (expired transaction, lost session)
+    // left the page spinning forever.
+    const message = error instanceof Error && error.message ? error.message : undefined;
+    return (
+      <div className="flex h-screen w-full items-center justify-center px-4">
+        <Card className="max-w-md space-y-4 p-8 text-center">
+          <TeableLogo className="mx-auto size-8" />
+          <h2 className="text-lg font-semibold">{t('common:noun.unknownError')}</h2>
+          {message && <p className="text-sm text-muted-foreground">{message}</p>}
+        </Card>
+      </div>
+    );
+  }
+
+  if (!decisionInfo) {
+    return <Spin />;
+  }
+
+  // A client that registered itself (an MCP client) gets the plain-words card:
+  // no developer, homepage or scope matrix to show, and a redirect to confirm.
+  if (decisionInfo.dynamicRegistration) {
+    return (
+      <div className="flex min-h-screen w-full flex-col items-center justify-center gap-8 overflow-auto px-4 py-10">
+        <McpDecisionCard transactionId={transactionId} decisionInfo={decisionInfo} />
+        <BrandFooter />
+      </div>
+    );
+  }
+
+  return (
+    <div
+      className={cn('h-screen w-full overflow-auto px-4', {
+        'pt-8': scopesTypeLen && scopesTypeLen < 3,
+      })}
+    >
+      <Card className="mx-auto my-8 min-w-72 max-w-xl space-y-4">
+        <TeableLogo className="ms-8 mt-3 size-8" />
+        <div className="relative mx-auto size-28 overflow-hidden">
+          {decisionInfo.logo ? (
+            <img
+              src={getPreviewUrl(decisionInfo.logo)}
+              alt="card cover"
+              className="absolute inset-0 size-full object-contain"
+            />
+          ) : (
+            <HelpCircle className="size-28" />
+          )}
+        </div>
+        <h2 className="mt-4 px-2 text-center text-2xl">
+          {t('oauth:decision.title', { name: decisionInfo.name })}
+          <div className="flex items-center justify-center gap-2">
+            <UserAvatar user={user} />
+            <div className="text-sm text-muted-foreground">@{user?.name}</div>
+          </div>
+        </h2>
+
+        <Separator />
+        <OAuthScope scopes={decisionInfo.scopes} description={t('oauth:decision.scopes')} />
+        <div className="space-y-4 border-t p-8">
+          <form action="/api/oauth/decision" className="flex items-center gap-4" method="post">
+            <input name="transaction_id" type="hidden" value={transactionId} />
+            <Button
+              type="submit"
+              value={'Deny'}
+              name="cancel"
+              className="flex-1"
+              size={'xs'}
+              variant={'outline'}
+            >
+              {t('common:actions.cancel')}
+            </Button>
+            <Button type="submit" value={'Allow'} className="flex-1" size={'xs'}>
+              {t('oauth:decision.authorize')}
+            </Button>
+          </form>
+          <div className="text-center">
+            <p className="text-sm">{t('oauth:decision.redirectDescription')}</p>
+            {/* Only http(s) gets to be a link; a javascript:/data: homepage
+                renders as inert text. */}
+            {isSafeWebUrl(decisionInfo.homepage ?? '') ? (
+              <Button variant={'link'}>
+                <Link target="_blank" href={decisionInfo.homepage ?? ''}>
+                  {decisionInfo.homepage}
+                </Link>
+              </Button>
+            ) : (
+              <p className="text-sm text-muted-foreground">{decisionInfo.homepage}</p>
+            )}
+          </div>
+        </div>
+      </Card>
+      <BrandFooter />
+    </div>
+  );
+};

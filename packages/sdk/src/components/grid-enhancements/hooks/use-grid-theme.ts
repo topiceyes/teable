@@ -1,6 +1,5 @@
+import { useTheme } from '@teable/ui-lib';
 import colors from 'tailwindcss/colors';
-import { ThemeKey } from '../../../context';
-import { useTheme } from '../../../hooks/use-theme';
 import type { IGridTheme } from '../../grid/configs';
 import { hexToRGBA } from '../../grid/utils';
 
@@ -11,54 +10,68 @@ const darkTheme = {
   iconFgCommon: colors.slate[50],
 
   // Cell
-  cellBg: '#030712',
-  cellBgHovered: colors.zinc[900],
-  cellBgSelected: colors.gray[800],
-  cellBgLoading: colors.slate[800],
-  cellLineColor: colors.gray[700],
-  cellLineColorActived: colors.slate[400],
-  cellTextColor: colors.slate[50],
-  cellOptionBg: colors.gray[600],
-  cellOptionTextColor: colors.white,
+  cellBg: '#121314',
+  cellBgHovered: '#1C1E1F',
+  cellBgSelected: '#242426',
+  cellBgLoading: hexToRGBA(colors.white, 0.08),
+  cellLineColor: hexToRGBA(colors.white, 0.1),
+  cellLineColorActived: colors.zinc[400],
+  cellTextColor: colors.zinc[200],
+  cellOptionBg: colors.zinc[700],
+  cellOptionTextColor: colors.zinc[200],
 
   // Group Header
-  groupHeaderBgPrimary: colors.zinc[900],
-  groupHeaderBgSecondary: colors.zinc[800],
-  groupHeaderBgTertiary: colors.zinc[700],
+  groupHeaderBgPrimary: '#17181A',
+  groupHeaderBgSecondary: '#1D1D1F',
+  groupHeaderBgTertiary: '#252526',
 
   // Column Header
-  columnHeaderBg: colors.zinc[900],
-  columnHeaderBgHovered: colors.zinc[800],
-  columnHeaderBgSelected: colors.zinc[700],
-  columnHeaderNameColor: colors.slate[50],
-  columnResizeHandlerBg: colors.gray[400],
+  columnHeaderBg: '#1C1D1F',
+  columnHeaderBgHovered: '#242426',
+  columnHeaderBgSelected: '#2C2D2E',
+  columnHeaderNameColor: colors.zinc[200],
+  columnResizeHandlerBg: colors.zinc[500],
   columnDraggingPlaceholderBg: hexToRGBA(colors.white, 0.2),
 
+  // Column Statistic
+  columnStatisticBgHoveredPrimary: '#262729',
+  columnStatisticBgHoveredSecondary: '#2C2C2E',
+  columnStatisticBgHoveredTertiary: '#323233',
+
   // Row Header
-  rowHeaderTextColor: colors.slate[50],
+  rowHeaderTextColor: colors.zinc[200],
 
   // Append Row
   appendRowBg: colors.zinc[900],
   appendRowBgHovered: colors.zinc[800],
 
   // Avatar
-  avatarBg: colors.gray[800],
-  avatarTextColor: colors.gray[50],
+  avatarBg: colors.zinc[900],
+  avatarTextColor: colors.zinc[200],
   avatarSizeXS: 16,
   avatarSizeSM: 20,
   avatarSizeMD: 24,
 
-  themeKey: ThemeKey.Dark,
+  themeKey: 'dark',
 
   // ScrollBar
-  scrollBarBg: colors.gray[600],
+  scrollBarBg: colors.zinc[700],
 
   // interaction
-  interactionLineColorCommon: colors.gray[500],
-  interactionLineColorHighlight: colors.violet[700],
+  interactionLineColorCommon: colors.zinc[700],
+  interactionLineColorHighlight: colors.blue[500],
+
+  // search cursor
+  searchCursorBg: '#243854',
+  searchTargetIndexBg: '#172231',
+  searchTargetIndexSelectedBg: '#1E2D43',
+
+  // comment
+  commentCountBg: colors.orange[400],
+  commentCountTextColor: colors.zinc[900],
 } as IGridTheme;
 
 export function useGridTheme(): IGridTheme {
-  const { theme } = useTheme();
-  return theme === ThemeKey.Dark ? darkTheme : lightTheme;
+  const { resolvedTheme } = useTheme();
+  return resolvedTheme === 'dark' ? darkTheme : lightTheme;
 }

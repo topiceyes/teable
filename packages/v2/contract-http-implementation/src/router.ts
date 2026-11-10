@@ -1,0 +1,1744 @@
+import { ORPCError, implement } from '@orpc/server';
+import type { Router } from '@orpc/server';
+import type {
+  IComplexityService,
+  IExplainService,
+  IOperationPreviewService,
+  PreviewPlannerRegistry,
+} from '@teable/v2-command-explain';
+import { v2CommandExplainTokens } from '@teable/v2-command-explain';
+import type {
+  HttpErrorStatus,
+  IApiErrorResponseDto,
+  IHandlerResolver,
+  V2Contract,
+} from '@teable/v2-contract-http';
+import { v2Contract } from '@teable/v2-contract-http';
+import {
+  ActorId,
+  isTableProvisionPendingError,
+  type ICommandBus,
+  type IComputedActivityReader,
+  type IDomainErrorLocalization,
+  type IExecutionContext,
+  type IQueryBus,
+  v2CoreTokens,
+} from '@teable/v2-core';
+
+import { executeCreateBaseEndpoint } from './handlers/bases/createBase';
+import { executeDuplicateBaseEndpoint } from './handlers/bases/duplicateBase';
+import { executeListBasesEndpoint } from './handlers/bases/listBases';
+import { executeComplexityAssessEndpoint } from './handlers/complexity/assess';
+import { executeComplexityAssessMatrixEndpoint } from './handlers/complexity/assessMatrix';
+import {
+  executeOperationPreviewCapabilitiesEndpoint,
+  executeOperationPreviewEndpoint,
+} from './handlers/operationPreview';
+import { executeClearEndpoint } from './handlers/tables/clear';
+import { executeCreateFieldEndpoint } from './handlers/tables/createField';
+import { executeCreateRecordEndpoint } from './handlers/tables/createRecord';
+import { executeCreateRecordsEndpoint } from './handlers/tables/createRecords';
+import { executeCreateTableEndpoint } from './handlers/tables/createTable';
+import { executeCreateTablesEndpoint } from './handlers/tables/createTables';
+import { executeCreateViewEndpoint } from './handlers/tables/createView';
+import { executeDeleteByRangeEndpoint } from './handlers/tables/deleteByRange';
+import { executeDeleteFieldEndpoint } from './handlers/tables/deleteField';
+import { executeDeleteRecordsEndpoint } from './handlers/tables/deleteRecords';
+import { executeDeleteTableEndpoint } from './handlers/tables/deleteTable';
+import { executeDuplicateFieldEndpoint } from './handlers/tables/duplicateField';
+import { executeDuplicateRecordEndpoint } from './handlers/tables/duplicateRecord';
+import { executeDuplicateTableEndpoint } from './handlers/tables/duplicateTable';
+import {
+  executeExplainCreateFieldEndpoint,
+  executeExplainCreateRecordEndpoint,
+  executeExplainDeleteFieldEndpoint,
+  executeExplainDeleteTableEndpoint,
+  executeExplainDeleteRecordsEndpoint,
+  executeExplainUpdateFieldEndpoint,
+  executeExplainUpdateRecordEndpoint,
+} from './handlers/tables/explainCommand';
+import { executeGetComputeActivityEndpoint } from './handlers/tables/getComputeActivity';
+import { executeGetRecordByIdEndpoint } from './handlers/tables/getRecordById';
+import { executeGetTableByIdEndpoint } from './handlers/tables/getTableById';
+import { executeGetViewEndpoint } from './handlers/tables/getView';
+import { executeImportCsvEndpoint } from './handlers/tables/importCsv';
+import { executeImportRecordsEndpoint } from './handlers/tables/importRecords';
+import { executeListTableRecordsEndpoint } from './handlers/tables/listTableRecords';
+import { executeListTablesEndpoint } from './handlers/tables/listTables';
+import { executeListViewsEndpoint } from './handlers/tables/listViews';
+import { executePasteEndpoint } from './handlers/tables/paste';
+import { executeRenameTableEndpoint } from './handlers/tables/renameTable';
+import { executeReorderRecordsEndpoint } from './handlers/tables/reorderRecords';
+import { executeRestoreTableEndpoint } from './handlers/tables/restoreTable';
+import { executeSubmitRecordEndpoint } from './handlers/tables/submitRecord';
+import { executeUpdateFieldEndpoint } from './handlers/tables/updateField';
+import { executeUpdateRecordEndpoint } from './handlers/tables/updateRecord';
+import { executeUpdateRecordsEndpoint } from './handlers/tables/updateRecords';
+import { executeUpdateTablePropertiesEndpoint } from './handlers/tables/updateTableProperties';
+import {
+  executeApplyViewManualSortEndpoint,
+  executeDeleteViewEndpoint,
+  executeDisableViewShareEndpoint,
+  executeDuplicateViewEndpoint,
+  executeEnableViewShareEndpoint,
+  executeGetViewFilterLinkRecordsEndpoint,
+  executeGetViewPluginInstallEndpoint,
+  executeGetViewSnapshotsEndpoint,
+  executeInstallViewPluginEndpoint,
+  executeListViewDocIdsEndpoint,
+  executeRefreshViewShareIdEndpoint,
+  executeRenameViewEndpoint,
+  executeUpdateViewColumnMetaEndpoint,
+  executeUpdateViewDescriptionEndpoint,
+  executeUpdateViewFilterEndpoint,
+  executeUpdateViewGroupEndpoint,
+  executeUpdateViewLockedEndpoint,
+  executeUpdateViewOptionsEndpoint,
+  executeUpdateViewOrderEndpoint,
+  executeUpdateViewPluginStorageEndpoint,
+  executeUpdateViewShareMetaEndpoint,
+  executeUpdateViewSortEndpoint,
+} from './handlers/tables/viewOperations';
+
+export interface IV2OrpcRouterOptions {
+  createContainer?: () => IHandlerResolver | Promise<IHandlerResolver>;
+  createExecutionContext?: () => IExecutionContext | Promise<IExecutionContext>;
+}
+
+export type V2OrpcRouter = Router<V2Contract, Record<never, never>>;
+
+export const createV2OrpcRouter = (options: IV2OrpcRouterOptions = {}): V2OrpcRouter => {
+  let defaultContainerPromise: Promise<IHandlerResolver> | undefined;
+  const createDefaultContainer = async (): Promise<IHandlerResolver> => {
+    const { createV2NodePgContainer } = await import('@teable/v2-container-node');
+    return createV2NodePgContainer();
+  };
+  const createContainer =
+    options.createContainer ??
+    (() => {
+      if (!defaultContainerPromise) defaultContainerPromise = createDefaultContainer();
+      return defaultContainerPromise;
+    });
+  const createExecutionContext =
+    options.createExecutionContext ??
+    (() => {
+      const actorIdResult = ActorId.create('system');
+      if (actorIdResult.isErr()) {
+        throw new Error(actorIdResult.error.message);
+      }
+      return { actorId: actorIdResult.value };
+    });
+
+  const containerErrorMessage = 'Failed to create container';
+  const executionContextErrorMessage = 'Failed to resolve execution context';
+
+  const handleContainerError = (error: unknown): never => {
+    let detail: string;
+    if (error instanceof Error) {
+      detail = error.message || error.stack || String(error);
+    } else {
+      detail = JSON.stringify(error, null, 2);
+    }
+    const message = `${containerErrorMessage}: ${detail}`;
+    console.error(message, error);
+    throw new ORPCError('INTERNAL_SERVER_ERROR', { message });
+  };
+
+  const resolveContainer = async (): Promise<IHandlerResolver> => {
+    try {
+      return await Promise.resolve(createContainer());
+    } catch (error) {
+      return handleContainerError(error);
+    }
+  };
+
+  /**
+   * Maps HTTP error response body to ORPCError with domain error info preserved.
+   * Domain error code and tags are passed in the data property for extraction by the OpenAPI handler.
+   */
+  const throwDomainError = (
+    orpcCode:
+      | 'BAD_REQUEST'
+      | 'UNAUTHORIZED'
+      | 'FORBIDDEN'
+      | 'NOT_FOUND'
+      | 'CONFLICT'
+      | 'NOT_IMPLEMENTED'
+      | 'SERVICE_UNAVAILABLE'
+      | 'GATEWAY_TIMEOUT'
+      | 'INTERNAL_SERVER_ERROR',
+    errorBody: {
+      message: string;
+      code: string;
+      tags: readonly string[];
+      details?: Record<string, unknown>;
+      localization?: IDomainErrorLocalization;
+    }
+  ): never => {
+    throw new ORPCError(
+      isTableProvisionPendingError(errorBody) ? 'SERVICE_UNAVAILABLE' : orpcCode,
+      {
+        message: errorBody.message,
+        data: {
+          domainCode: errorBody.code,
+          domainTags: errorBody.tags,
+          details: errorBody.details,
+          localization: errorBody.localization,
+        },
+      }
+    );
+  };
+
+  const throwMappedDomainError = (
+    status: HttpErrorStatus,
+    errorBody: IApiErrorResponseDto['error']
+  ): never => {
+    if (status === 400) return throwDomainError('BAD_REQUEST', errorBody);
+    if (status === 401) return throwDomainError('UNAUTHORIZED', errorBody);
+    if (status === 403) return throwDomainError('FORBIDDEN', errorBody);
+    if (status === 404) return throwDomainError('NOT_FOUND', errorBody);
+    if (status === 409) return throwDomainError('CONFLICT', errorBody);
+    if (status === 501) return throwDomainError('NOT_IMPLEMENTED', errorBody);
+    if (status === 503) return throwDomainError('SERVICE_UNAVAILABLE', errorBody);
+    if (status === 504) return throwDomainError('GATEWAY_TIMEOUT', errorBody);
+    return throwDomainError('INTERNAL_SERVER_ERROR', errorBody);
+  };
+
+  const os = implement<V2Contract>(v2Contract);
+
+  type ViewRouteResult<TBody> =
+    | { status: 200; body: TBody }
+    | { status: HttpErrorStatus; body: IApiErrorResponseDto };
+
+  const unwrapViewRouteResult = <TBody>(result: ViewRouteResult<TBody>): TBody => {
+    if (result.status === 200) return result.body;
+    if (result.status === 400) return throwDomainError('BAD_REQUEST', result.body.error);
+    if (result.status === 403) return throwDomainError('FORBIDDEN', result.body.error);
+    if (result.status === 404) return throwDomainError('NOT_FOUND', result.body.error);
+    // A read that outran its budget is a dependency timeout, not an internal failure.
+    if (result.status === 504) return throwDomainError('GATEWAY_TIMEOUT', result.body.error);
+    return throwDomainError('INTERNAL_SERVER_ERROR', result.body.error);
+  };
+
+  const runViewCommandRoute = async <TInput, TBody>(
+    input: TInput,
+    execute: (
+      context: IExecutionContext,
+      input: TInput,
+      commandBus: ICommandBus
+    ) => Promise<ViewRouteResult<TBody>>
+  ): Promise<TBody> => {
+    const container = await resolveContainer();
+    let executionContext: IExecutionContext;
+    try {
+      executionContext = await createExecutionContext();
+    } catch {
+      throw new ORPCError('INTERNAL_SERVER_ERROR', {
+        message: executionContextErrorMessage,
+      });
+    }
+    const commandBus = container.resolve<ICommandBus>(v2CoreTokens.commandBus);
+    return unwrapViewRouteResult(await execute(executionContext, input, commandBus));
+  };
+
+  const runViewQueryRoute = async <TInput, TBody>(
+    input: TInput,
+    execute: (
+      context: IExecutionContext,
+      input: TInput,
+      queryBus: IQueryBus
+    ) => Promise<ViewRouteResult<TBody>>
+  ): Promise<TBody> => {
+    const container = await resolveContainer();
+    let executionContext: IExecutionContext;
+    try {
+      executionContext = await createExecutionContext();
+    } catch {
+      throw new ORPCError('INTERNAL_SERVER_ERROR', {
+        message: executionContextErrorMessage,
+      });
+    }
+    const queryBus = container.resolve<IQueryBus>(v2CoreTokens.queryBus);
+    return unwrapViewRouteResult(await execute(executionContext, input, queryBus));
+  };
+
+  const basesCreate = os.bases.create.handler(async ({ input }) => {
+    const container = await resolveContainer();
+
+    let executionContext: IExecutionContext;
+    try {
+      executionContext = await createExecutionContext();
+    } catch {
+      throw new ORPCError('INTERNAL_SERVER_ERROR', {
+        message: executionContextErrorMessage,
+      });
+    }
+
+    const commandBus = container.resolve<ICommandBus>(v2CoreTokens.commandBus);
+    const result = await executeCreateBaseEndpoint(executionContext, input, commandBus);
+
+    if (result.status === 201) return result.body;
+
+    if (result.status === 400) {
+      return throwDomainError('BAD_REQUEST', result.body.error);
+    }
+
+    return throwDomainError('INTERNAL_SERVER_ERROR', result.body.error);
+  });
+
+  const basesList = os.bases.list.handler(async ({ input }) => {
+    const container = await resolveContainer();
+
+    let executionContext: IExecutionContext;
+    try {
+      executionContext = await createExecutionContext();
+    } catch {
+      throw new ORPCError('INTERNAL_SERVER_ERROR', {
+        message: executionContextErrorMessage,
+      });
+    }
+
+    const queryBus = container.resolve<IQueryBus>(v2CoreTokens.queryBus);
+    const result = await executeListBasesEndpoint(executionContext, input, queryBus);
+
+    if (result.status === 200) return result.body;
+
+    if (result.status === 400) {
+      return throwDomainError('BAD_REQUEST', result.body.error);
+    }
+
+    return throwDomainError('INTERNAL_SERVER_ERROR', result.body.error);
+  });
+
+  const basesDuplicate = os.bases.duplicate.handler(async ({ input }) => {
+    const container = await resolveContainer();
+
+    let executionContext: IExecutionContext;
+    try {
+      executionContext = await createExecutionContext();
+    } catch {
+      throw new ORPCError('INTERNAL_SERVER_ERROR', {
+        message: executionContextErrorMessage,
+      });
+    }
+
+    const commandBus = container.resolve<ICommandBus>(v2CoreTokens.commandBus);
+    const result = await executeDuplicateBaseEndpoint(executionContext, input, commandBus);
+    if (result.status === 201) return result.body;
+    if (result.status === 400) return throwDomainError('BAD_REQUEST', result.body.error);
+    if (result.status === 403) return throwDomainError('FORBIDDEN', result.body.error);
+    if (result.status === 404) return throwDomainError('NOT_FOUND', result.body.error);
+    return throwDomainError('INTERNAL_SERVER_ERROR', result.body.error);
+  });
+
+  const tablesCreate = os.tables.create.handler(async ({ input }) => {
+    const container = await resolveContainer();
+
+    let executionContext: IExecutionContext;
+    try {
+      executionContext = await createExecutionContext();
+    } catch {
+      throw new ORPCError('INTERNAL_SERVER_ERROR', {
+        message: executionContextErrorMessage,
+      });
+    }
+
+    const commandBus = container.resolve<ICommandBus>(v2CoreTokens.commandBus);
+    const result = await executeCreateTableEndpoint(executionContext, input, commandBus);
+
+    if (result.status === 201) return result.body;
+
+    if (result.status === 400) {
+      return throwDomainError('BAD_REQUEST', result.body.error);
+    }
+
+    return throwDomainError('INTERNAL_SERVER_ERROR', result.body.error);
+  });
+
+  const tablesCreateTables = os.tables.createTables.handler(async ({ input }) => {
+    const container = await resolveContainer();
+
+    let executionContext: IExecutionContext;
+    try {
+      executionContext = await createExecutionContext();
+    } catch {
+      throw new ORPCError('INTERNAL_SERVER_ERROR', {
+        message: executionContextErrorMessage,
+      });
+    }
+
+    const commandBus = container.resolve<ICommandBus>(v2CoreTokens.commandBus);
+    const result = await executeCreateTablesEndpoint(executionContext, input, commandBus);
+
+    if (result.status === 201) return result.body;
+
+    if (result.status === 400) {
+      return throwDomainError('BAD_REQUEST', result.body.error);
+    }
+
+    return throwDomainError('INTERNAL_SERVER_ERROR', result.body.error);
+  });
+
+  const tablesCreateField = os.tables.createField.handler(async ({ input }) => {
+    const container = await resolveContainer();
+
+    let executionContext: IExecutionContext;
+    try {
+      executionContext = await createExecutionContext();
+    } catch {
+      throw new ORPCError('INTERNAL_SERVER_ERROR', {
+        message: executionContextErrorMessage,
+      });
+    }
+
+    const commandBus = container.resolve<ICommandBus>(v2CoreTokens.commandBus);
+    const result = await executeCreateFieldEndpoint(executionContext, input, commandBus);
+
+    if (result.status === 200) return result.body;
+
+    if (result.status === 400) {
+      return throwDomainError('BAD_REQUEST', result.body.error);
+    }
+
+    if (result.status === 404) {
+      return throwDomainError('NOT_FOUND', result.body.error);
+    }
+
+    return throwDomainError('INTERNAL_SERVER_ERROR', result.body.error);
+  });
+
+  const tablesCreateView = os.tables.createView.handler(async ({ input }) => {
+    const container = await resolveContainer();
+
+    let executionContext: IExecutionContext;
+    try {
+      executionContext = await createExecutionContext();
+    } catch {
+      throw new ORPCError('INTERNAL_SERVER_ERROR', {
+        message: executionContextErrorMessage,
+      });
+    }
+
+    const commandBus = container.resolve<ICommandBus>(v2CoreTokens.commandBus);
+    const result = await executeCreateViewEndpoint(executionContext, input, commandBus);
+
+    if (result.status === 200) return result.body;
+
+    if (result.status === 400) {
+      return throwDomainError('BAD_REQUEST', result.body.error);
+    }
+
+    if (result.status === 404) {
+      return throwDomainError('NOT_FOUND', result.body.error);
+    }
+
+    return throwDomainError('INTERNAL_SERVER_ERROR', result.body.error);
+  });
+
+  const tablesDuplicateTable = os.tables.duplicateTable.handler(async ({ input }) => {
+    const container = await resolveContainer();
+
+    let executionContext: IExecutionContext;
+    try {
+      executionContext = await createExecutionContext();
+    } catch {
+      throw new ORPCError('INTERNAL_SERVER_ERROR', {
+        message: executionContextErrorMessage,
+      });
+    }
+
+    const commandBus = container.resolve<ICommandBus>(v2CoreTokens.commandBus);
+    const result = await executeDuplicateTableEndpoint(executionContext, input, commandBus);
+
+    if (result.status === 201) return result.body;
+
+    if (result.status === 400) {
+      return throwDomainError('BAD_REQUEST', result.body.error);
+    }
+
+    if (result.status === 404) {
+      return throwDomainError('NOT_FOUND', result.body.error);
+    }
+
+    return throwDomainError('INTERNAL_SERVER_ERROR', result.body.error);
+  });
+
+  const tablesUpdateField = os.tables.updateField.handler(async ({ input }) => {
+    const container = await resolveContainer();
+
+    let executionContext: IExecutionContext;
+    try {
+      executionContext = await createExecutionContext();
+    } catch {
+      throw new ORPCError('INTERNAL_SERVER_ERROR', {
+        message: executionContextErrorMessage,
+      });
+    }
+
+    const commandBus = container.resolve<ICommandBus>(v2CoreTokens.commandBus);
+    const result = await executeUpdateFieldEndpoint(executionContext, input, commandBus);
+
+    if (result.status === 200) return result.body;
+
+    if (result.status === 400) {
+      return throwDomainError('BAD_REQUEST', result.body.error);
+    }
+
+    if (result.status === 404) {
+      return throwDomainError('NOT_FOUND', result.body.error);
+    }
+
+    return throwDomainError('INTERNAL_SERVER_ERROR', result.body.error);
+  });
+
+  const tablesCreateRecord = os.tables.createRecord.handler(async ({ input }) => {
+    const container = await resolveContainer();
+
+    let executionContext: IExecutionContext;
+    try {
+      executionContext = await createExecutionContext();
+    } catch {
+      throw new ORPCError('INTERNAL_SERVER_ERROR', {
+        message: executionContextErrorMessage,
+      });
+    }
+
+    const commandBus = container.resolve<ICommandBus>(v2CoreTokens.commandBus);
+    const result = await executeCreateRecordEndpoint(executionContext, input, commandBus);
+
+    if (result.status === 201) return result.body;
+
+    if (result.status === 400) {
+      return throwDomainError('BAD_REQUEST', result.body.error);
+    }
+    if (result.status === 403) {
+      return throwDomainError('FORBIDDEN', result.body.error);
+    }
+
+    if (result.status === 404) {
+      return throwDomainError('NOT_FOUND', result.body.error);
+    }
+
+    return throwDomainError('INTERNAL_SERVER_ERROR', result.body.error);
+  });
+
+  const tablesSubmitRecord = os.tables.submitRecord.handler(async ({ input }) => {
+    const container = await resolveContainer();
+
+    let executionContext: IExecutionContext;
+    try {
+      executionContext = await createExecutionContext();
+    } catch {
+      throw new ORPCError('INTERNAL_SERVER_ERROR', {
+        message: executionContextErrorMessage,
+      });
+    }
+
+    const commandBus = container.resolve<ICommandBus>(v2CoreTokens.commandBus);
+    const result = await executeSubmitRecordEndpoint(executionContext, input, commandBus);
+
+    if (result.status === 201) return result.body;
+
+    if (result.status === 400) {
+      return throwDomainError('BAD_REQUEST', result.body.error);
+    }
+    if (result.status === 403) {
+      return throwDomainError('FORBIDDEN', result.body.error);
+    }
+
+    if (result.status === 404) {
+      return throwDomainError('NOT_FOUND', result.body.error);
+    }
+
+    return throwDomainError('INTERNAL_SERVER_ERROR', result.body.error);
+  });
+
+  const tablesCreateRecords = os.tables.createRecords.handler(async ({ input }) => {
+    const container = await resolveContainer();
+
+    let executionContext: IExecutionContext;
+    try {
+      executionContext = await createExecutionContext();
+    } catch {
+      throw new ORPCError('INTERNAL_SERVER_ERROR', {
+        message: executionContextErrorMessage,
+      });
+    }
+
+    const commandBus = container.resolve<ICommandBus>(v2CoreTokens.commandBus);
+    const result = await executeCreateRecordsEndpoint(executionContext, input, commandBus);
+
+    if (result.status === 201) return result.body;
+
+    if (result.status === 400) {
+      return throwDomainError('BAD_REQUEST', result.body.error);
+    }
+    if (result.status === 403) {
+      return throwDomainError('FORBIDDEN', result.body.error);
+    }
+
+    if (result.status === 404) {
+      return throwDomainError('NOT_FOUND', result.body.error);
+    }
+
+    return throwDomainError('INTERNAL_SERVER_ERROR', result.body.error);
+  });
+
+  const tablesUpdateRecord = os.tables.updateRecord.handler(async ({ input }) => {
+    const container = await resolveContainer();
+
+    let executionContext: IExecutionContext;
+    try {
+      executionContext = await createExecutionContext();
+    } catch {
+      throw new ORPCError('INTERNAL_SERVER_ERROR', {
+        message: executionContextErrorMessage,
+      });
+    }
+
+    const commandBus = container.resolve<ICommandBus>(v2CoreTokens.commandBus);
+    const result = await executeUpdateRecordEndpoint(executionContext, input, commandBus);
+
+    if (result.status === 200) return result.body;
+
+    if (result.status === 400) {
+      return throwDomainError('BAD_REQUEST', result.body.error);
+    }
+    if (result.status === 403) {
+      return throwDomainError('FORBIDDEN', result.body.error);
+    }
+
+    if (result.status === 404) {
+      return throwDomainError('NOT_FOUND', result.body.error);
+    }
+
+    return throwDomainError('INTERNAL_SERVER_ERROR', result.body.error);
+  });
+
+  const tablesUpdateRecords = os.tables.updateRecords.handler(async ({ input }) => {
+    const container = await resolveContainer();
+
+    let executionContext: IExecutionContext;
+    try {
+      executionContext = await createExecutionContext();
+    } catch {
+      throw new ORPCError('INTERNAL_SERVER_ERROR', {
+        message: executionContextErrorMessage,
+      });
+    }
+
+    const commandBus = container.resolve<ICommandBus>(v2CoreTokens.commandBus);
+    const result = await executeUpdateRecordsEndpoint(executionContext, input, commandBus);
+
+    if (result.status === 200) return result.body;
+
+    if (result.status === 400) {
+      return throwDomainError('BAD_REQUEST', result.body.error);
+    }
+    if (result.status === 403) {
+      return throwDomainError('FORBIDDEN', result.body.error);
+    }
+
+    if (result.status === 404) {
+      return throwDomainError('NOT_FOUND', result.body.error);
+    }
+
+    return throwDomainError('INTERNAL_SERVER_ERROR', result.body.error);
+  });
+
+  const tablesReorderRecords = os.tables.reorderRecords.handler(async ({ input }) => {
+    const container = await resolveContainer();
+
+    let executionContext: IExecutionContext;
+    try {
+      executionContext = await createExecutionContext();
+    } catch {
+      throw new ORPCError('INTERNAL_SERVER_ERROR', {
+        message: executionContextErrorMessage,
+      });
+    }
+
+    const commandBus = container.resolve<ICommandBus>(v2CoreTokens.commandBus);
+    const result = await executeReorderRecordsEndpoint(executionContext, input, commandBus);
+
+    if (result.status === 200) return result.body;
+
+    if (result.status === 400) {
+      return throwDomainError('BAD_REQUEST', result.body.error);
+    }
+
+    if (result.status === 404) {
+      return throwDomainError('NOT_FOUND', result.body.error);
+    }
+
+    return throwDomainError('INTERNAL_SERVER_ERROR', result.body.error);
+  });
+
+  const tablesDuplicateRecord = os.tables.duplicateRecord.handler(async ({ input }) => {
+    const container = await resolveContainer();
+
+    let executionContext: IExecutionContext;
+    try {
+      executionContext = await createExecutionContext();
+    } catch {
+      throw new ORPCError('INTERNAL_SERVER_ERROR', {
+        message: executionContextErrorMessage,
+      });
+    }
+
+    const commandBus = container.resolve<ICommandBus>(v2CoreTokens.commandBus);
+    const result = await executeDuplicateRecordEndpoint(executionContext, input, commandBus);
+
+    if (result.status === 201) return result.body;
+
+    if (result.status === 400) {
+      return throwDomainError('BAD_REQUEST', result.body.error);
+    }
+
+    if (result.status === 404) {
+      return throwDomainError('NOT_FOUND', result.body.error);
+    }
+
+    return throwDomainError('INTERNAL_SERVER_ERROR', result.body.error);
+  });
+
+  const tablesDuplicateField = os.tables.duplicateField.handler(async ({ input }) => {
+    const container = await resolveContainer();
+
+    let executionContext: IExecutionContext;
+    try {
+      executionContext = await createExecutionContext();
+    } catch {
+      throw new ORPCError('INTERNAL_SERVER_ERROR', {
+        message: executionContextErrorMessage,
+      });
+    }
+
+    const commandBus = container.resolve<ICommandBus>(v2CoreTokens.commandBus);
+    const result = await executeDuplicateFieldEndpoint(executionContext, input, commandBus);
+
+    if (result.status === 200) return result.body;
+
+    if (result.status === 400) {
+      return throwDomainError('BAD_REQUEST', result.body.error);
+    }
+
+    if (result.status === 404) {
+      return throwDomainError('NOT_FOUND', result.body.error);
+    }
+
+    return throwDomainError('INTERNAL_SERVER_ERROR', result.body.error);
+  });
+
+  const tablesPaste = os.tables.paste.handler(async ({ input }) => {
+    const container = await resolveContainer();
+
+    let executionContext: IExecutionContext;
+    try {
+      executionContext = await createExecutionContext();
+    } catch {
+      throw new ORPCError('INTERNAL_SERVER_ERROR', {
+        message: executionContextErrorMessage,
+      });
+    }
+
+    const commandBus = container.resolve<ICommandBus>(v2CoreTokens.commandBus);
+    const result = await executePasteEndpoint(executionContext, input, commandBus);
+
+    if (result.status === 200) return result.body;
+
+    if (result.status === 400) {
+      return throwDomainError('BAD_REQUEST', result.body.error);
+    }
+    if (result.status === 403) {
+      return throwDomainError('FORBIDDEN', result.body.error);
+    }
+
+    if (result.status === 404) {
+      return throwDomainError('NOT_FOUND', result.body.error);
+    }
+
+    return throwDomainError('INTERNAL_SERVER_ERROR', result.body.error);
+  });
+
+  const tablesClear = os.tables.clear.handler(async ({ input }) => {
+    const container = await resolveContainer();
+
+    let executionContext: IExecutionContext;
+    try {
+      executionContext = await createExecutionContext();
+    } catch {
+      throw new ORPCError('INTERNAL_SERVER_ERROR', {
+        message: executionContextErrorMessage,
+      });
+    }
+
+    const commandBus = container.resolve<ICommandBus>(v2CoreTokens.commandBus);
+    const result = await executeClearEndpoint(executionContext, input, commandBus);
+
+    if (result.status === 200) return result.body;
+
+    if (result.status === 400) {
+      return throwDomainError('BAD_REQUEST', result.body.error);
+    }
+
+    if (result.status === 404) {
+      return throwDomainError('NOT_FOUND', result.body.error);
+    }
+
+    return throwDomainError('INTERNAL_SERVER_ERROR', result.body.error);
+  });
+
+  const tablesDeleteByRange = os.tables.deleteByRange.handler(async ({ input }) => {
+    const container = await resolveContainer();
+
+    let executionContext: IExecutionContext;
+    try {
+      executionContext = await createExecutionContext();
+    } catch {
+      throw new ORPCError('INTERNAL_SERVER_ERROR', {
+        message: executionContextErrorMessage,
+      });
+    }
+
+    const commandBus = container.resolve<ICommandBus>(v2CoreTokens.commandBus);
+    const result = await executeDeleteByRangeEndpoint(executionContext, input, commandBus);
+
+    if (result.status === 200) return result.body;
+
+    if (result.status === 400) {
+      return throwDomainError('BAD_REQUEST', result.body.error);
+    }
+
+    if (result.status === 404) {
+      return throwDomainError('NOT_FOUND', result.body.error);
+    }
+
+    return throwDomainError('INTERNAL_SERVER_ERROR', result.body.error);
+  });
+
+  const tablesDeleteRecords = os.tables.deleteRecords.handler(async ({ input }) => {
+    const container = await resolveContainer();
+
+    let executionContext: IExecutionContext;
+    try {
+      executionContext = await createExecutionContext();
+    } catch {
+      throw new ORPCError('INTERNAL_SERVER_ERROR', {
+        message: executionContextErrorMessage,
+      });
+    }
+
+    const commandBus = container.resolve<ICommandBus>(v2CoreTokens.commandBus);
+    const result = await executeDeleteRecordsEndpoint(executionContext, input, commandBus);
+
+    if (result.status === 200) return result.body;
+
+    if (result.status === 400) {
+      return throwDomainError('BAD_REQUEST', result.body.error);
+    }
+
+    if (result.status === 404) {
+      return throwDomainError('NOT_FOUND', result.body.error);
+    }
+
+    return throwDomainError('INTERNAL_SERVER_ERROR', result.body.error);
+  });
+
+  const tablesDeleteField = os.tables.deleteField.handler(async ({ input }) => {
+    const container = await resolveContainer();
+
+    let executionContext: IExecutionContext;
+    try {
+      executionContext = await createExecutionContext();
+    } catch {
+      throw new ORPCError('INTERNAL_SERVER_ERROR', {
+        message: executionContextErrorMessage,
+      });
+    }
+
+    const commandBus = container.resolve<ICommandBus>(v2CoreTokens.commandBus);
+    const result = await executeDeleteFieldEndpoint(executionContext, input, commandBus);
+
+    if (result.status === 200) return result.body;
+
+    if (result.status === 400) {
+      return throwDomainError('BAD_REQUEST', result.body.error);
+    }
+
+    if (result.status === 404) {
+      return throwDomainError('NOT_FOUND', result.body.error);
+    }
+
+    if (result.status === 403) {
+      return throwDomainError('FORBIDDEN', result.body.error);
+    }
+
+    return throwDomainError('INTERNAL_SERVER_ERROR', result.body.error);
+  });
+
+  const tablesGetById = os.tables.getById.handler(async ({ input }) => {
+    const container = await resolveContainer();
+
+    let executionContext: IExecutionContext;
+    try {
+      executionContext = await createExecutionContext();
+    } catch {
+      throw new ORPCError('INTERNAL_SERVER_ERROR', {
+        message: executionContextErrorMessage,
+      });
+    }
+
+    const queryBus = container.resolve<IQueryBus>(v2CoreTokens.queryBus);
+    let activityReader: IComputedActivityReader | undefined;
+    try {
+      activityReader = container.resolve<IComputedActivityReader>(
+        v2CoreTokens.computedActivityReader
+      );
+    } catch {
+      activityReader = undefined;
+    }
+    const result = await executeGetTableByIdEndpoint(
+      executionContext,
+      input,
+      queryBus,
+      activityReader
+    );
+
+    if (result.status === 200) return result.body;
+
+    if (result.status === 400) {
+      return throwDomainError('BAD_REQUEST', result.body.error);
+    }
+
+    if (result.status === 404) {
+      return throwDomainError('NOT_FOUND', result.body.error);
+    }
+
+    return throwDomainError('INTERNAL_SERVER_ERROR', result.body.error);
+  });
+
+  const tablesGetComputeActivity = os.tables.getComputeActivity.handler(async ({ input }) => {
+    const container = await resolveContainer();
+
+    let executionContext: IExecutionContext;
+    try {
+      executionContext = await createExecutionContext();
+    } catch {
+      throw new ORPCError('INTERNAL_SERVER_ERROR', {
+        message: executionContextErrorMessage,
+      });
+    }
+
+    const queryBus = container.resolve<IQueryBus>(v2CoreTokens.queryBus);
+    const result = await executeGetComputeActivityEndpoint(executionContext, input, queryBus);
+
+    if (result.status === 200) return result.body;
+
+    if (result.status === 400) {
+      return throwDomainError('BAD_REQUEST', result.body.error);
+    }
+
+    if (result.status === 404) {
+      return throwDomainError('NOT_FOUND', result.body.error);
+    }
+
+    return throwDomainError('INTERNAL_SERVER_ERROR', result.body.error);
+  });
+
+  const tablesGetRecord = os.tables.getRecord.handler(async ({ input }) => {
+    const container = await resolveContainer();
+
+    let executionContext: IExecutionContext;
+    try {
+      executionContext = await createExecutionContext();
+    } catch {
+      throw new ORPCError('INTERNAL_SERVER_ERROR', {
+        message: executionContextErrorMessage,
+      });
+    }
+
+    const queryBus = container.resolve<IQueryBus>(v2CoreTokens.queryBus);
+    const result = await executeGetRecordByIdEndpoint(executionContext, input, queryBus);
+
+    if (result.status === 200) return result.body;
+
+    if (result.status === 400) {
+      return throwDomainError('BAD_REQUEST', result.body.error);
+    }
+
+    if (result.status === 404) {
+      return throwDomainError('NOT_FOUND', result.body.error);
+    }
+
+    return throwDomainError('INTERNAL_SERVER_ERROR', result.body.error);
+  });
+
+  const tablesGetView = os.tables.getView.handler(async ({ input }) => {
+    const container = await resolveContainer();
+
+    let executionContext: IExecutionContext;
+    try {
+      executionContext = await createExecutionContext();
+    } catch {
+      throw new ORPCError('INTERNAL_SERVER_ERROR', {
+        message: executionContextErrorMessage,
+      });
+    }
+
+    const queryBus = container.resolve<IQueryBus>(v2CoreTokens.queryBus);
+    const result = await executeGetViewEndpoint(executionContext, input, queryBus);
+
+    if (result.status === 200) return result.body;
+
+    if (result.status === 400) {
+      return throwDomainError('BAD_REQUEST', result.body.error);
+    }
+
+    if (result.status === 404) {
+      return throwDomainError('NOT_FOUND', result.body.error);
+    }
+
+    return throwDomainError('INTERNAL_SERVER_ERROR', result.body.error);
+  });
+
+  const tablesDelete = os.tables.delete.handler(async ({ input }) => {
+    const container = await resolveContainer();
+
+    let executionContext: IExecutionContext;
+    try {
+      executionContext = await createExecutionContext();
+    } catch {
+      throw new ORPCError('INTERNAL_SERVER_ERROR', {
+        message: executionContextErrorMessage,
+      });
+    }
+
+    const commandBus = container.resolve<ICommandBus>(v2CoreTokens.commandBus);
+    const result = await executeDeleteTableEndpoint(executionContext, input, commandBus);
+
+    if (result.status === 200) return result.body;
+
+    if (result.status === 400) {
+      return throwDomainError('BAD_REQUEST', result.body.error);
+    }
+
+    if (result.status === 404) {
+      return throwDomainError('NOT_FOUND', result.body.error);
+    }
+
+    return throwDomainError('INTERNAL_SERVER_ERROR', result.body.error);
+  });
+
+  const tablesRestore = os.tables.restore.handler(async ({ input }) => {
+    const container = await resolveContainer();
+
+    let executionContext: IExecutionContext;
+    try {
+      executionContext = await createExecutionContext();
+    } catch {
+      throw new ORPCError('INTERNAL_SERVER_ERROR', {
+        message: executionContextErrorMessage,
+      });
+    }
+
+    const commandBus = container.resolve<ICommandBus>(v2CoreTokens.commandBus);
+    const result = await executeRestoreTableEndpoint(executionContext, input, commandBus);
+
+    if (result.status === 200) return result.body;
+
+    if (result.status === 400) {
+      return throwDomainError('BAD_REQUEST', result.body.error);
+    }
+
+    if (result.status === 404) {
+      return throwDomainError('NOT_FOUND', result.body.error);
+    }
+
+    return throwDomainError('INTERNAL_SERVER_ERROR', result.body.error);
+  });
+
+  const tablesList = os.tables.list.handler(async ({ input }) => {
+    const container = await resolveContainer();
+
+    let executionContext: IExecutionContext;
+    try {
+      executionContext = await createExecutionContext();
+    } catch {
+      throw new ORPCError('INTERNAL_SERVER_ERROR', {
+        message: executionContextErrorMessage,
+      });
+    }
+
+    const queryBus = container.resolve<IQueryBus>(v2CoreTokens.queryBus);
+    const result = await executeListTablesEndpoint(executionContext, input, queryBus);
+
+    if (result.status === 200) return result.body;
+
+    if (result.status === 400) {
+      return throwDomainError('BAD_REQUEST', result.body.error);
+    }
+
+    return throwDomainError('INTERNAL_SERVER_ERROR', result.body.error);
+  });
+
+  const tablesListViews = os.tables.listViews.handler(async ({ input }) => {
+    const container = await resolveContainer();
+
+    let executionContext: IExecutionContext;
+    try {
+      executionContext = await createExecutionContext();
+    } catch {
+      throw new ORPCError('INTERNAL_SERVER_ERROR', {
+        message: executionContextErrorMessage,
+      });
+    }
+
+    const queryBus = container.resolve<IQueryBus>(v2CoreTokens.queryBus);
+    const result = await executeListViewsEndpoint(executionContext, input, queryBus);
+
+    if (result.status === 200) return result.body;
+
+    if (result.status === 400) {
+      return throwDomainError('BAD_REQUEST', result.body.error);
+    }
+
+    if (result.status === 404) {
+      return throwDomainError('NOT_FOUND', result.body.error);
+    }
+
+    return throwDomainError('INTERNAL_SERVER_ERROR', result.body.error);
+  });
+
+  const tablesListRecords = os.tables.listRecords.handler(async ({ input }) => {
+    const container = await resolveContainer();
+
+    let executionContext: IExecutionContext;
+    try {
+      executionContext = await createExecutionContext();
+    } catch {
+      throw new ORPCError('INTERNAL_SERVER_ERROR', {
+        message: executionContextErrorMessage,
+      });
+    }
+
+    const queryBus = container.resolve<IQueryBus>(v2CoreTokens.queryBus);
+    const result = await executeListTableRecordsEndpoint(executionContext, input, queryBus);
+
+    if (result.status === 200) return result.body;
+
+    if (result.status === 400) {
+      return throwDomainError('BAD_REQUEST', result.body.error);
+    }
+
+    if (result.status === 404) {
+      return throwDomainError('NOT_FOUND', result.body.error);
+    }
+
+    // A read that outran its budget is a dependency timeout, not an internal failure.
+    if (result.status === 504) {
+      return throwDomainError('GATEWAY_TIMEOUT', result.body.error);
+    }
+
+    return throwDomainError('INTERNAL_SERVER_ERROR', result.body.error);
+  });
+
+  const tablesRename = os.tables.rename.handler(async ({ input }) => {
+    const container = await resolveContainer();
+
+    let executionContext: IExecutionContext;
+    try {
+      executionContext = await createExecutionContext();
+    } catch {
+      throw new ORPCError('INTERNAL_SERVER_ERROR', {
+        message: executionContextErrorMessage,
+      });
+    }
+
+    const commandBus = container.resolve<ICommandBus>(v2CoreTokens.commandBus);
+    const result = await executeRenameTableEndpoint(executionContext, input, commandBus);
+
+    if (result.status === 200) return result.body;
+
+    if (result.status === 400) {
+      return throwDomainError('BAD_REQUEST', result.body.error);
+    }
+
+    if (result.status === 404) {
+      return throwDomainError('NOT_FOUND', result.body.error);
+    }
+
+    return throwDomainError('INTERNAL_SERVER_ERROR', result.body.error);
+  });
+
+  const tablesUpdateProperties = os.tables.updateProperties.handler(async ({ input }) => {
+    const container = await resolveContainer();
+
+    let executionContext: IExecutionContext;
+    try {
+      executionContext = await createExecutionContext();
+    } catch {
+      throw new ORPCError('INTERNAL_SERVER_ERROR', {
+        message: executionContextErrorMessage,
+      });
+    }
+
+    const commandBus = container.resolve<ICommandBus>(v2CoreTokens.commandBus);
+    const result = await executeUpdateTablePropertiesEndpoint(executionContext, input, commandBus);
+
+    if (result.status === 200) return result.body;
+    if (result.status === 400) return throwDomainError('BAD_REQUEST', result.body.error);
+    if (result.status === 403) return throwDomainError('FORBIDDEN', result.body.error);
+    if (result.status === 404) return throwDomainError('NOT_FOUND', result.body.error);
+    return throwDomainError('INTERNAL_SERVER_ERROR', result.body.error);
+  });
+
+  const tablesImportCsv = os.tables.importCsv.handler(async ({ input }) => {
+    const container = await resolveContainer();
+
+    let executionContext: IExecutionContext;
+    try {
+      executionContext = await createExecutionContext();
+    } catch {
+      throw new ORPCError('INTERNAL_SERVER_ERROR', {
+        message: executionContextErrorMessage,
+      });
+    }
+
+    const commandBus = container.resolve<ICommandBus>(v2CoreTokens.commandBus);
+    const result = await executeImportCsvEndpoint(executionContext, input, commandBus);
+
+    if (result.status === 201) return result.body;
+
+    if (result.status === 400) {
+      return throwDomainError('BAD_REQUEST', result.body.error);
+    }
+
+    if (result.status === 404) {
+      return throwDomainError('NOT_FOUND', result.body.error);
+    }
+
+    // Dependency timeouts (statement timeout, interrupted import source) are
+    // retryable, so keep 504 instead of collapsing them into a 500.
+    if (result.status === 504) {
+      return throwDomainError('GATEWAY_TIMEOUT', result.body.error);
+    }
+
+    return throwDomainError('INTERNAL_SERVER_ERROR', result.body.error);
+  });
+
+  const tablesImportRecords = os.tables.importRecords.handler(async ({ input }) => {
+    const container = await resolveContainer();
+
+    let executionContext: IExecutionContext;
+    try {
+      executionContext = await createExecutionContext();
+    } catch {
+      throw new ORPCError('INTERNAL_SERVER_ERROR', {
+        message: executionContextErrorMessage,
+      });
+    }
+
+    const commandBus = container.resolve<ICommandBus>(v2CoreTokens.commandBus);
+    const result = await executeImportRecordsEndpoint(executionContext, input, commandBus);
+
+    if (result.status === 200) return result.body;
+
+    if (result.status === 400) {
+      return throwDomainError('BAD_REQUEST', result.body.error);
+    }
+
+    if (result.status === 404) {
+      return throwDomainError('NOT_FOUND', result.body.error);
+    }
+
+    // Dependency timeouts (statement timeout, interrupted import source) are
+    // retryable, so keep 504 instead of collapsing them into a 500.
+    if (result.status === 504) {
+      return throwDomainError('GATEWAY_TIMEOUT', result.body.error);
+    }
+
+    return throwDomainError('INTERNAL_SERVER_ERROR', result.body.error);
+  });
+
+  const tablesExplainCreateRecord = os.tables.explainCreateRecord.handler(async ({ input }) => {
+    const container = await resolveContainer();
+
+    let executionContext: IExecutionContext;
+    try {
+      executionContext = await createExecutionContext();
+    } catch {
+      throw new ORPCError('INTERNAL_SERVER_ERROR', {
+        message: executionContextErrorMessage,
+      });
+    }
+
+    const explainService = container.resolve<IExplainService>(
+      v2CommandExplainTokens.explainService
+    );
+    const result = await executeExplainCreateRecordEndpoint(
+      executionContext,
+      input,
+      explainService
+    );
+
+    if (result.status === 200) return result.body;
+
+    if (result.status === 400) {
+      return throwDomainError('BAD_REQUEST', result.body.error);
+    }
+
+    if (result.status === 404) {
+      return throwDomainError('NOT_FOUND', result.body.error);
+    }
+
+    return throwDomainError('INTERNAL_SERVER_ERROR', result.body.error);
+  });
+
+  const tablesExplainCreateField = os.tables.explainCreateField.handler(async ({ input }) => {
+    const container = await resolveContainer();
+
+    let executionContext: IExecutionContext;
+    try {
+      executionContext = await createExecutionContext();
+    } catch {
+      throw new ORPCError('INTERNAL_SERVER_ERROR', {
+        message: executionContextErrorMessage,
+      });
+    }
+
+    const explainService = container.resolve<IExplainService>(
+      v2CommandExplainTokens.explainService
+    );
+    const result = await executeExplainCreateFieldEndpoint(executionContext, input, explainService);
+
+    if (result.status === 200) return result.body;
+
+    if (result.status === 400) {
+      return throwDomainError('BAD_REQUEST', result.body.error);
+    }
+
+    if (result.status === 404) {
+      return throwDomainError('NOT_FOUND', result.body.error);
+    }
+
+    return throwDomainError('INTERNAL_SERVER_ERROR', result.body.error);
+  });
+
+  const tablesExplainUpdateField = os.tables.explainUpdateField.handler(async ({ input }) => {
+    const container = await resolveContainer();
+
+    let executionContext: IExecutionContext;
+    try {
+      executionContext = await createExecutionContext();
+    } catch {
+      throw new ORPCError('INTERNAL_SERVER_ERROR', {
+        message: executionContextErrorMessage,
+      });
+    }
+
+    const explainService = container.resolve<IExplainService>(
+      v2CommandExplainTokens.explainService
+    );
+    const result = await executeExplainUpdateFieldEndpoint(executionContext, input, explainService);
+
+    if (result.status === 200) return result.body;
+
+    if (result.status === 400) {
+      return throwDomainError('BAD_REQUEST', result.body.error);
+    }
+
+    if (result.status === 404) {
+      return throwDomainError('NOT_FOUND', result.body.error);
+    }
+
+    return throwDomainError('INTERNAL_SERVER_ERROR', result.body.error);
+  });
+
+  const tablesExplainDeleteField = os.tables.explainDeleteField.handler(async ({ input }) => {
+    const container = await resolveContainer();
+
+    let executionContext: IExecutionContext;
+    try {
+      executionContext = await createExecutionContext();
+    } catch {
+      throw new ORPCError('INTERNAL_SERVER_ERROR', {
+        message: executionContextErrorMessage,
+      });
+    }
+
+    const explainService = container.resolve<IExplainService>(
+      v2CommandExplainTokens.explainService
+    );
+    const result = await executeExplainDeleteFieldEndpoint(executionContext, input, explainService);
+
+    if (result.status === 200) return result.body;
+
+    if (result.status === 400) {
+      return throwDomainError('BAD_REQUEST', result.body.error);
+    }
+
+    if (result.status === 404) {
+      return throwDomainError('NOT_FOUND', result.body.error);
+    }
+
+    return throwDomainError('INTERNAL_SERVER_ERROR', result.body.error);
+  });
+
+  const tablesExplainDeleteTable = os.tables.explainDeleteTable.handler(async ({ input }) => {
+    const container = await resolveContainer();
+
+    let executionContext: IExecutionContext;
+    try {
+      executionContext = await createExecutionContext();
+    } catch {
+      throw new ORPCError('INTERNAL_SERVER_ERROR', {
+        message: executionContextErrorMessage,
+      });
+    }
+
+    const explainService = container.resolve<IExplainService>(
+      v2CommandExplainTokens.explainService
+    );
+    const result = await executeExplainDeleteTableEndpoint(executionContext, input, explainService);
+
+    if (result.status === 200) return result.body;
+
+    if (result.status === 400) {
+      return throwDomainError('BAD_REQUEST', result.body.error);
+    }
+
+    if (result.status === 404) {
+      return throwDomainError('NOT_FOUND', result.body.error);
+    }
+
+    return throwDomainError('INTERNAL_SERVER_ERROR', result.body.error);
+  });
+
+  const tablesExplainUpdateRecord = os.tables.explainUpdateRecord.handler(async ({ input }) => {
+    const container = await resolveContainer();
+
+    let executionContext: IExecutionContext;
+    try {
+      executionContext = await createExecutionContext();
+    } catch {
+      throw new ORPCError('INTERNAL_SERVER_ERROR', {
+        message: executionContextErrorMessage,
+      });
+    }
+
+    const explainService = container.resolve<IExplainService>(
+      v2CommandExplainTokens.explainService
+    );
+    const result = await executeExplainUpdateRecordEndpoint(
+      executionContext,
+      input,
+      explainService
+    );
+
+    if (result.status === 200) return result.body;
+
+    if (result.status === 400) {
+      return throwDomainError('BAD_REQUEST', result.body.error);
+    }
+
+    if (result.status === 404) {
+      return throwDomainError('NOT_FOUND', result.body.error);
+    }
+
+    return throwDomainError('INTERNAL_SERVER_ERROR', result.body.error);
+  });
+
+  const tablesExplainDeleteRecords = os.tables.explainDeleteRecords.handler(async ({ input }) => {
+    const container = await resolveContainer();
+
+    let executionContext: IExecutionContext;
+    try {
+      executionContext = await createExecutionContext();
+    } catch {
+      throw new ORPCError('INTERNAL_SERVER_ERROR', {
+        message: executionContextErrorMessage,
+      });
+    }
+
+    const explainService = container.resolve<IExplainService>(
+      v2CommandExplainTokens.explainService
+    );
+    const result = await executeExplainDeleteRecordsEndpoint(
+      executionContext,
+      input,
+      explainService
+    );
+
+    if (result.status === 200) return result.body;
+
+    if (result.status === 400) {
+      return throwDomainError('BAD_REQUEST', result.body.error);
+    }
+
+    if (result.status === 404) {
+      return throwDomainError('NOT_FOUND', result.body.error);
+    }
+
+    return throwDomainError('INTERNAL_SERVER_ERROR', result.body.error);
+  });
+
+  /**
+   * This generic mount is transport-only. An exposing host must authenticate
+   * and authorize the exact write scope before invoking preview.
+   */
+  const operationPreview = os.operations.preview.handler(async ({ input }) => {
+    const container = await resolveContainer();
+    let executionContext: IExecutionContext;
+    try {
+      executionContext = await createExecutionContext();
+    } catch {
+      throw new ORPCError('INTERNAL_SERVER_ERROR', {
+        message: executionContextErrorMessage,
+      });
+    }
+
+    const previewService = container.resolve<IOperationPreviewService>(
+      v2CommandExplainTokens.operationPreviewService
+    );
+    const result = await executeOperationPreviewEndpoint(executionContext, input, previewService);
+    if (result.status === 200) return result.body;
+    return throwMappedDomainError(result.status, result.body.error);
+  });
+
+  const operationPreviewCapabilities = os.operations.capabilities.handler(async () => {
+    const container = await resolveContainer();
+    const registry = container.resolve<PreviewPlannerRegistry>(
+      v2CommandExplainTokens.previewPlannerRegistry
+    );
+    return executeOperationPreviewCapabilitiesEndpoint(registry).body;
+  });
+
+  /**
+   * Host integration note: this router does not authenticate or authorize.
+   * `createExecutionContext` may default to a system actor for local/embedded
+   * mounts, and a system actor is not a permission. Hosts must gate the mount
+   * (session/token verification plus a table read check) before exposing these
+   * complexity reads.
+   */
+  const complexityAssess = os.complexity.assess.handler(async ({ input }) => {
+    const container = await resolveContainer();
+
+    let executionContext: IExecutionContext;
+    try {
+      executionContext = await createExecutionContext();
+    } catch {
+      throw new ORPCError('INTERNAL_SERVER_ERROR', {
+        message: executionContextErrorMessage,
+      });
+    }
+
+    const complexityService = container.resolve<IComplexityService>(
+      v2CommandExplainTokens.complexityService
+    );
+    const result = await executeComplexityAssessEndpoint(
+      executionContext,
+      input,
+      complexityService
+    );
+
+    if (result.status === 200) return result.body;
+
+    if (result.status === 400) {
+      return throwDomainError('BAD_REQUEST', result.body.error);
+    }
+
+    if (result.status === 403) {
+      return throwDomainError('FORBIDDEN', result.body.error);
+    }
+
+    if (result.status === 404) {
+      return throwDomainError('NOT_FOUND', result.body.error);
+    }
+
+    return throwDomainError('INTERNAL_SERVER_ERROR', result.body.error);
+  });
+
+  const complexityAssessMatrix = os.complexity.assessMatrix.handler(async ({ input }) => {
+    const container = await resolveContainer();
+    let executionContext: IExecutionContext;
+    try {
+      executionContext = await createExecutionContext();
+    } catch {
+      throw new ORPCError('INTERNAL_SERVER_ERROR', {
+        message: executionContextErrorMessage,
+      });
+    }
+
+    const complexityService = container.resolve<IComplexityService>(
+      v2CommandExplainTokens.complexityService
+    );
+    const result = await executeComplexityAssessMatrixEndpoint(
+      executionContext,
+      input,
+      complexityService
+    );
+
+    if (result.status === 200) return result.body;
+
+    if (result.status === 400) {
+      return throwDomainError('BAD_REQUEST', result.body.error);
+    }
+
+    if (result.status === 403) {
+      return throwDomainError('FORBIDDEN', result.body.error);
+    }
+
+    if (result.status === 404) {
+      return throwDomainError('NOT_FOUND', result.body.error);
+    }
+
+    return throwDomainError('INTERNAL_SERVER_ERROR', result.body.error);
+  });
+
+  const tablesDeleteView = os.tables.deleteView.handler(({ input }) =>
+    runViewCommandRoute(input, executeDeleteViewEndpoint)
+  );
+  const tablesDuplicateView = os.tables.duplicateView.handler(({ input }) =>
+    runViewCommandRoute(input, executeDuplicateViewEndpoint)
+  );
+  const tablesRenameView = os.tables.renameView.handler(({ input }) =>
+    runViewCommandRoute(input, executeRenameViewEndpoint)
+  );
+  const tablesUpdateViewDescription = os.tables.updateViewDescription.handler(({ input }) =>
+    runViewCommandRoute(input, executeUpdateViewDescriptionEndpoint)
+  );
+  const tablesUpdateViewLocked = os.tables.updateViewLocked.handler(({ input }) =>
+    runViewCommandRoute(input, executeUpdateViewLockedEndpoint)
+  );
+  const tablesUpdateViewOrder = os.tables.updateViewOrder.handler(({ input }) =>
+    runViewCommandRoute(input, executeUpdateViewOrderEndpoint)
+  );
+  const tablesUpdateViewColumnMeta = os.tables.updateViewColumnMeta.handler(({ input }) =>
+    runViewCommandRoute(input, executeUpdateViewColumnMetaEndpoint)
+  );
+  const tablesUpdateViewFilter = os.tables.updateViewFilter.handler(({ input }) =>
+    runViewCommandRoute(input, executeUpdateViewFilterEndpoint)
+  );
+  const tablesUpdateViewSort = os.tables.updateViewSort.handler(({ input }) =>
+    runViewCommandRoute(input, executeUpdateViewSortEndpoint)
+  );
+  const tablesUpdateViewGroup = os.tables.updateViewGroup.handler(({ input }) =>
+    runViewCommandRoute(input, executeUpdateViewGroupEndpoint)
+  );
+  const tablesUpdateViewOptions = os.tables.updateViewOptions.handler(({ input }) =>
+    runViewCommandRoute(input, executeUpdateViewOptionsEndpoint)
+  );
+  const tablesApplyViewManualSort = os.tables.applyViewManualSort.handler(({ input }) =>
+    runViewCommandRoute(input, executeApplyViewManualSortEndpoint)
+  );
+  const tablesUpdateViewShareMeta = os.tables.updateViewShareMeta.handler(({ input }) =>
+    runViewCommandRoute(input, executeUpdateViewShareMetaEndpoint)
+  );
+  const tablesRefreshViewShareId = os.tables.refreshViewShareId.handler(({ input }) =>
+    runViewCommandRoute(input, executeRefreshViewShareIdEndpoint)
+  );
+  const tablesEnableViewShare = os.tables.enableViewShare.handler(({ input }) =>
+    runViewCommandRoute(input, executeEnableViewShareEndpoint)
+  );
+  const tablesDisableViewShare = os.tables.disableViewShare.handler(({ input }) =>
+    runViewCommandRoute(input, executeDisableViewShareEndpoint)
+  );
+  const tablesGetViewFilterLinkRecords = os.tables.getViewFilterLinkRecords.handler(({ input }) =>
+    runViewQueryRoute(input, executeGetViewFilterLinkRecordsEndpoint)
+  );
+  const tablesGetViewSnapshots = os.tables.getViewSnapshots.handler(({ input }) =>
+    runViewQueryRoute(input, executeGetViewSnapshotsEndpoint)
+  );
+  const tablesListViewDocIds = os.tables.listViewDocIds.handler(({ input }) =>
+    runViewQueryRoute(input, executeListViewDocIdsEndpoint)
+  );
+  const tablesInstallViewPlugin = os.tables.installViewPlugin.handler(({ input }) =>
+    runViewCommandRoute(input, executeInstallViewPluginEndpoint)
+  );
+  const tablesGetViewPluginInstall = os.tables.getViewPluginInstall.handler(({ input }) =>
+    runViewQueryRoute(input, executeGetViewPluginInstallEndpoint)
+  );
+  const tablesUpdateViewPluginStorage = os.tables.updateViewPluginStorage.handler(({ input }) =>
+    runViewCommandRoute(input, executeUpdateViewPluginStorageEndpoint)
+  );
+
+  return os.router({
+    operations: {
+      preview: operationPreview,
+      capabilities: operationPreviewCapabilities,
+    },
+    complexity: {
+      assess: complexityAssess,
+      assessMatrix: complexityAssessMatrix,
+    },
+    bases: {
+      create: basesCreate,
+      duplicate: basesDuplicate,
+      list: basesList,
+    },
+    tables: {
+      create: tablesCreate,
+      createTables: tablesCreateTables,
+      duplicateTable: tablesDuplicateTable,
+      createField: tablesCreateField,
+      createView: tablesCreateView,
+      updateField: tablesUpdateField,
+      explainCreateField: tablesExplainCreateField,
+      explainUpdateField: tablesExplainUpdateField,
+      createRecord: tablesCreateRecord,
+      submitRecord: tablesSubmitRecord,
+      createRecords: tablesCreateRecords,
+      updateRecord: tablesUpdateRecord,
+      updateRecords: tablesUpdateRecords,
+      reorderRecords: tablesReorderRecords,
+      duplicateField: tablesDuplicateField,
+      duplicateRecord: tablesDuplicateRecord,
+      paste: tablesPaste,
+      clear: tablesClear,
+      deleteByRange: tablesDeleteByRange,
+      deleteRecords: tablesDeleteRecords,
+      deleteField: tablesDeleteField,
+      explainDeleteField: tablesExplainDeleteField,
+      explainDeleteTable: tablesExplainDeleteTable,
+      delete: tablesDelete,
+      restore: tablesRestore,
+      getById: tablesGetById,
+      getComputeActivity: tablesGetComputeActivity,
+      getRecord: tablesGetRecord,
+      getView: tablesGetView,
+      importCsv: tablesImportCsv,
+      importRecords: tablesImportRecords,
+      list: tablesList,
+      listRecords: tablesListRecords,
+      listViews: tablesListViews,
+      deleteView: tablesDeleteView,
+      duplicateView: tablesDuplicateView,
+      renameView: tablesRenameView,
+      updateViewDescription: tablesUpdateViewDescription,
+      updateViewLocked: tablesUpdateViewLocked,
+      updateViewOrder: tablesUpdateViewOrder,
+      updateViewColumnMeta: tablesUpdateViewColumnMeta,
+      updateViewFilter: tablesUpdateViewFilter,
+      updateViewSort: tablesUpdateViewSort,
+      updateViewGroup: tablesUpdateViewGroup,
+      updateViewOptions: tablesUpdateViewOptions,
+      applyViewManualSort: tablesApplyViewManualSort,
+      updateViewShareMeta: tablesUpdateViewShareMeta,
+      refreshViewShareId: tablesRefreshViewShareId,
+      enableViewShare: tablesEnableViewShare,
+      disableViewShare: tablesDisableViewShare,
+      getViewFilterLinkRecords: tablesGetViewFilterLinkRecords,
+      getViewSnapshots: tablesGetViewSnapshots,
+      listViewDocIds: tablesListViewDocIds,
+      installViewPlugin: tablesInstallViewPlugin,
+      getViewPluginInstall: tablesGetViewPluginInstall,
+      updateViewPluginStorage: tablesUpdateViewPluginStorage,
+      rename: tablesRename,
+      updateProperties: tablesUpdateProperties,
+      explainCreateRecord: tablesExplainCreateRecord,
+      explainUpdateRecord: tablesExplainUpdateRecord,
+      explainDeleteRecords: tablesExplainDeleteRecords,
+    },
+  });
+};

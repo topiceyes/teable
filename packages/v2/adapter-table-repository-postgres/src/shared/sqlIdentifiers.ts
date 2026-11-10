@@ -1,0 +1,79 @@
+import { sql, type Kysely } from 'kysely';
+
+export type QualifiedIdentifierLiteral = string & {
+  readonly __brand: 'QualifiedIdentifierLiteral';
+};
+
+const POSTGRES_IDENTIFIER_MAX_LENGTH = 63;
+
+const quoteIdentifierName = (identifier: string) => `"${identifier.replaceAll('"', '""')}"`;
+
+const hashIdentifier = (identifier: string): string => {
+  let hash = 2166136261;
+  for (let i = 0; i < identifier.length; i++) {
+    hash ^= identifier.charCodeAt(i); // NOSONAR typescript:S7758 -- the hash is defined over UTF-16 code units; switching to code points would change persisted/compared values
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36).padStart(7, '0');
+};
+
+export const toPostgresIdentifierWithHash = (identifier: string): string => {
+  if (identifier.length <= POSTGRES_IDENTIFIER_MAX_LENGTH) {
+    return identifier;
+  }
+
+  const suffix = `_${hashIdentifier(identifier)}`;
+  return `${identifier.slice(0, POSTGRES_IDENTIFIER_MAX_LENGTH - suffix.length)}${suffix}`;
+};
+
+export const splitSchemaQualifiedTableName = (
+  tableName: string
+): { schemaName?: string; plainTableName: string } => {
+  // Accepts raw generated schema/table names only, not already-quoted identifiers
+  // whose contents may themselves contain dots.
+  const splitIndex = tableName.indexOf('.');
+  if (splitIndex === -1) {
+    return { plainTableName: tableName };
+  }
+
+  return {
+    schemaName: tableName.slice(0, splitIndex),
+    plainTableName: tableName.slice(splitIndex + 1),
+  };
+};
+
+export const toQualifiedIdentifierLiteral = (
+  schemaOrTableName: string | null | undefined,
+  tableName?: string
+): QualifiedIdentifierLiteral => {
+  if (tableName != null) {
+    return (
+      schemaOrTableName
+        ? `${quoteIdentifierName(schemaOrTableName)}.${quoteIdentifierName(tableName)}`
+        : quoteIdentifierName(tableName)
+    ) as QualifiedIdentifierLiteral;
+  }
+
+  const { schemaName, plainTableName } = splitSchemaQualifiedTableName(schemaOrTableName ?? '');
+  return (
+    schemaName
+      ? `${quoteIdentifierName(schemaName)}.${quoteIdentifierName(plainTableName)}`
+      : quoteIdentifierName(plainTableName)
+  ) as QualifiedIdentifierLiteral;
+};
+
+export const resolveTableSql = <DB>(db: Kysely<DB>, name: keyof DB & string) => {
+  // withSchema transforms query table nodes, but not standalone raw fragments.
+  // Compile through the caller's plugins and reuse the escaped table identifier.
+  return sql.raw(resolveTableName(db, name));
+};
+
+/**
+ * Same relation name as {@link resolveTableSql}, as a value: pass it as a
+ * parameter for casts that take a name rather than an identifier, such as
+ * `$1::regclass` in size functions. A quoted identifier followed by `::regclass`
+ * parses as a column reference instead, so those call sites cannot use the
+ * identifier fragment.
+ */
+export const resolveTableName = <DB>(db: Kysely<DB>, name: keyof DB & string): string =>
+  db.selectFrom(name).selectAll().compile().sql.slice('select * from '.length);

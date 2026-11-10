@@ -2,11 +2,23 @@ import type { RouteConfig } from '@asteasolutions/zod-to-openapi';
 import { axios } from '../axios';
 import { registerRoute } from '../utils';
 import { z } from '../zod';
+import { dataDbInternalSchemaSchema, dataDbTargetModeSchema } from './data-db';
 
 export const CREATE_SPACE = '/space';
 
+export const SPACE_NAME_MAX_LENGTH = 100;
+
 export const createSpaceRoSchema = z.object({
-  name: z.string().optional(),
+  name: z.string().min(1).max(SPACE_NAME_MAX_LENGTH).optional(),
+  dataDb: z
+    .object({
+      mode: z.enum(['default', 'byodb']),
+      url: z.string().min(1).optional(),
+      targetMode: dataDbTargetModeSchema.optional().default('initialize-empty'),
+      internalSchema: dataDbInternalSchemaSchema,
+      preflightToken: z.string().optional(),
+    })
+    .optional(),
 });
 
 export type ICreateSpaceRo = z.infer<typeof createSpaceRoSchema>;

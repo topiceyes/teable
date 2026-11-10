@@ -7,12 +7,15 @@ export interface IFileItemBase {
   size?: number;
   thumb?: string;
   downloadUrl?: string;
+  /** Deletes the underlying file. The preview shows a delete action only when provided. */
+  onDelete?: () => void;
 }
 
 export type IFileId = number | string;
 
 export interface IFileItemInner extends IFileItemBase {
   fileId: IFileId;
+  onClose?: () => void;
 }
 
 export interface IFileItem extends IFileItemBase {
@@ -28,5 +31,6 @@ export const FilePreviewContext = createContext<{
   closePreview: () => void;
   onPrev: () => void;
   onNext: () => void;
-  onDelete: (fileId: IFileId) => void;
+  removeFile: (fileId: IFileId) => void;
+  i18nMap?: Record<string, string>;
 }>(null!);

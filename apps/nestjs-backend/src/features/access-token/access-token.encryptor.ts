@@ -24,14 +24,19 @@ export const getAccessToken = (accessTokenId: string, sign: string) => {
 };
 
 export const splitAccessToken = (accessToken: string) => {
-  const [prefix, accessTokenId, encryptedSign] = accessToken.split('_');
+  const [prefix = '', accessTokenId = '', encryptedSign = ''] = accessToken.split('_');
   if (!accessTokenId) {
     return null;
   }
   if (prefix !== authConfig().accessToken.prefix) {
     return null;
   }
-  const { sign } = getAccessTokenEncryptor().decrypt(encryptedSign);
+  let sign: string | null = null;
+  try {
+    sign = getAccessTokenEncryptor().decrypt(encryptedSign).sign;
+  } catch (error) {
+    return null;
+  }
   if (!sign) {
     return null;
   }

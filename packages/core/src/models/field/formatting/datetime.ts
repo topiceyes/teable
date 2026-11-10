@@ -1,6 +1,7 @@
+import { formatInTimeZone } from 'date-fns-tz';
 import dayjs from 'dayjs';
 import { z } from '../../../zod';
-import type { timeZoneStringSchema } from './time-zone';
+import { timeZoneStringSchema } from './time-zone';
 
 export enum DateFormattingPreset {
   US = 'M/D/YYYY',
@@ -22,57 +23,59 @@ export enum TimeFormatting {
 
 export const datetimeFormattingSchema = z
   .object({
-    date: z.string().openapi({
-      description: 'the display formatting of the date.',
+    date: z.string().meta({
+      description:
+        'the display formatting of the date. you can use the following presets: ' +
+        Object.values(DateFormattingPreset).join(', '),
     }),
-    time: z.nativeEnum(TimeFormatting).openapi({
-      description: 'the display formatting of the time.',
+    time: z.enum(TimeFormatting).meta({
+      description:
+        'the display formatting of the time. you can use the following presets: ' +
+        Object.values(TimeFormatting).join(', '),
     }),
-    timeZone: z
-      .string()
-      .refine(
-        (value) => {
-          try {
-            new Intl.DateTimeFormat('en-US', { timeZone: value }).resolvedOptions();
-            return true;
-          } catch (e) {
-            return false;
-          }
-        },
-        {
-          message: 'Invalid time zone string',
-        }
-      )
-      .openapi({
-        description: 'the display time zone of the time',
-      }),
+    timeZone: timeZoneStringSchema,
   })
-  .openapi({
+  .describe(
+    'Only be used in date field (date field or formula / rollup field with cellValueType equals dateTime)'
+  )
+  .meta({
     description:
       'caveat: the formatting is just a formatter, it dose not effect the storing value of the record',
   });
 
-export type ITimeZoneString = z.infer<typeof timeZoneStringSchema>;
+export type ITimeZoneString = string;
 
 export type IDatetimeFormatting = z.infer<typeof datetimeFormattingSchema>;
 
 export const defaultDatetimeFormatting: IDatetimeFormatting = {
   date: DateFormattingPreset.ISO,
   time: TimeFormatting.None,
-  timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone as ITimeZoneString,
+  timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
 };
 
 export const formatDateToString = (
   cellValue: string | undefined,
-  formatting: IDatetimeFormatting
+  formatting?: IDatetimeFormatting
 ) => {
   if (cellValue == null) {
     return '';
   }
 
-  const { date, time, timeZone } = formatting;
+  const { date, time, timeZone } = formatting ?? defaultDatetimeFormatting;
   const format = time === TimeFormatting.None ? date : `${date} ${time}`;
-  return dayjs(cellValue as string)
-    .tz(timeZone)
-    .format(format);
+
+  try {
+    return dayjs(cellValue).tz(timeZone).format(format);
+  } catch {
+    // in export service case, crash in dayjs, so use date-fns-tz
+    return formatInTimeZone(cellValue, timeZone, format.replaceAll('D', 'd').replaceAll('Y', 'y'));
+  }
+};
+
+export const normalizeDateFormatting = (dateFormatting: string): string => {
+  const validFormats = Object.values(DateFormattingPreset);
+  if (validFormats.includes(dateFormatting as DateFormattingPreset)) {
+    return dateFormatting;
+  }
+  return DateFormattingPreset.ISO;
 };

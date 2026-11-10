@@ -1,81 +1,75 @@
-import { fieldVoSchema, parseClipboardText, type IFieldVo } from '@teable/core';
-import { mapValues } from 'lodash';
+import { FieldType, fieldVoSchema, parseClipboardText, type IFieldVo } from '@teable/core';
+import { createFieldInstance } from '@teable/sdk/model';
+import { z } from 'zod';
 import { fromZodError } from 'zod-validation-error';
 
 const teableHtmlMarker = 'data-teable-html-marker';
+const teableHeader = 'data-teable-html-header';
+
+const lineTag = '<br data-teable-line-tag="1" style="mso-data-placement:same-cell;">';
+
+export const escapeHTML = (str: string) => {
+  const p = document.createElement('p');
+  p.appendChild(document.createTextNode(str));
+  return p.innerHTML;
+};
 
 export const serializerHtml = (data: string, headers: IFieldVo[]) => {
   const tableData = parseClipboardText(data);
   const bodyContent = tableData
     .map((row) => {
-      return `<tr>${row.map((cell) => `<td>${cell}</td>`).join('')}</tr>`;
-    })
-    .join('');
-  const headerContent = headers
-    .map((header) => {
-      const attrs = Object.entries(header)
-        .map(([key, value]) => `${key}="${encodeURIComponent(JSON.stringify(value))}"`)
-        .join(' ');
-      return `<td ${attrs}>${header.name}</td>`;
+      return `<tr>${row
+        .map((cell, index) => {
+          const header = headers[index];
+          if (header.type === FieldType.LongText) {
+            return `<td>${cell.replaceAll('\n', lineTag)}</td>`;
+          }
+          return `<td>${cell}</td>`;
+        })
+        .join('')}</tr>`;
     })
     .join('');
 
-  return `<table ${teableHtmlMarker}="1"><thead><tr>${headerContent}</tr></thead><tbody>${bodyContent}</tbody></table>`;
+  return `<meta charset="utf-8"><table ${teableHtmlMarker}="1" ${teableHeader}="${encodeURIComponent(JSON.stringify(headers))}"><tbody>${bodyContent}</tbody></table>`;
 };
 
-export const extractTableHeader = (html?: string) => {
+export const serializerCellValueHtml = (data: unknown[][], headers: IFieldVo[]) => {
+  const fields = headers.map((header) => createFieldInstance(header));
+  const bodyContent = data
+    .map((row) => {
+      return `<tr>${row
+        .map((cell, index) => {
+          const field = fields[index];
+          const safeHtml = escapeHTML(field.cellValue2String(cell));
+          if (field.type === FieldType.LongText) {
+            return `<td data-teable-cell-value="${encodeURIComponent(JSON.stringify(cell == null ? null : cell))}">${safeHtml.replaceAll('\n', lineTag)}</td>`;
+          }
+          return `<td data-teable-cell-value="${encodeURIComponent(JSON.stringify(cell == null ? null : cell))}">${safeHtml}</td>`;
+        })
+        .join('')}</tr>`;
+    })
+    .join('');
+
+  return `<meta charset="utf-8"><table ${teableHtmlMarker}="1" ${teableHeader}="${encodeURIComponent(JSON.stringify(headers))}"><tbody>${bodyContent}</tbody></table>`;
+};
+
+export const extractHtmlHeader = (html?: string) => {
   if (!html || !isTeableHTML(html)) {
     return { result: undefined };
   }
   const parser = new DOMParser();
   const doc = parser.parseFromString(html, 'text/html');
   const table = doc.querySelector('table');
-  const headerRow = table?.querySelector('thead tr');
-  const headerCells = headerRow?.querySelectorAll('td') || [];
-
-  const headers = Array.from(headerCells);
-  let error = '';
-  const result = headers.map((cell) => {
-    const id = cell.getAttribute('id');
-    const name = cell.getAttribute('name');
-    const isPrimary = cell.getAttribute('isPrimary');
-    const columnMeta = cell.getAttribute('columnMeta');
-    const dbFieldName = cell.getAttribute('dbFieldName');
-    const dbFieldType = cell.getAttribute('dbFieldType');
-    const type = cell.getAttribute('type');
-    const options = cell.getAttribute('options');
-    const cellValueType = cell.getAttribute('cellValueType');
-    const isComputed = cell.getAttribute('isComputed');
-    const isLookup = cell.getAttribute('isLookup');
-    const isMultipleCellValue = cell.getAttribute('isMultipleCellValue');
-    const fieldVo = mapValues(
-      {
-        id,
-        name,
-        isPrimary,
-        columnMeta,
-        dbFieldName,
-        dbFieldType,
-        type,
-        options,
-        cellValueType,
-        isComputed,
-        isLookup,
-        isMultipleCellValue,
-      },
-      (value) => {
-        const encodeValue = value ? decodeURIComponent(value) : undefined;
-        return encodeValue ? JSON.parse(encodeValue) : undefined;
-      }
-    );
-    const validate = fieldVoSchema.safeParse(fieldVo);
-    if (validate.success) {
-      return fieldVo;
-    }
-    error = fromZodError(validate.error).message;
-    return undefined;
-  }) as IFieldVo[];
-  return error ? { result: undefined, error } : { result };
+  const headerStr = table?.getAttribute(teableHeader);
+  const headers = headerStr ? JSON.parse(decodeURIComponent(headerStr)) : undefined;
+  if (!headers) {
+    return { result: undefined };
+  }
+  const validate = z.array(fieldVoSchema).safeParse(headers);
+  if (!validate.success) {
+    return { result: undefined, error: fromZodError(validate.error).message };
+  }
+  return { result: validate.data };
 };
 
 export const isTeableHTML = (html: string) => {
@@ -83,4 +77,56 @@ export const isTeableHTML = (html: string) => {
   const doc = parser.parseFromString(html, 'text/html');
   const table = doc.querySelector('table');
   return Boolean(table?.getAttribute(teableHtmlMarker));
+};
+
+export const extractTableContent = (html: string) => {
+  if (!html || !isTeableHTML(html)) {
+    return undefined;
+  }
+
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(html, 'text/html');
+  const table = doc.querySelector('table');
+
+  if (!table) {
+    return undefined;
+  }
+
+  const rows = table.querySelectorAll('tr');
+  const content: unknown[][] = [];
+
+  rows.forEach((row) => {
+    const rowData: unknown[] = [];
+    const cells = row.querySelectorAll('td');
+    cells.forEach((cell) => {
+      const cellText = cell.textContent || '';
+      const cellValue = cell.dataset.teableCellValue;
+      if (!cellValue) {
+        rowData.push(cellText);
+        return;
+      }
+
+      const cellValueObj = JSON.parse(decodeURIComponent(cellValue));
+      rowData.push(cellValueObj);
+    });
+
+    if (rowData.length > 0) {
+      content.push(rowData);
+    }
+  });
+  return content;
+};
+
+export const parseNormalHtml = (html: string) => {
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(html, 'text/html');
+  const table = doc.querySelector('table');
+  if (!table) {
+    return [[doc.body.textContent || '']];
+  }
+  const rows = Array.from(table.rows);
+  return rows.map((row) => {
+    const cells = Array.from(row.cells);
+    return cells.map((cell) => cell.textContent || '');
+  });
 };

@@ -1,0 +1,5 @@
+# Robots.txt for app.teable.ai
+# App pages are private product routes; there is no /public page.
+
+User-agent: *
+Disallow: /

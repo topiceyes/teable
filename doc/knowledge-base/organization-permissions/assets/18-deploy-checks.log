@@ -1,0 +1,8 @@
+2026-11-10 / local offline verification
+PASS environment generator creates distinct random secrets and 16-byte legacy AES key/IV values
+PASS .env.production.local mode 0600 and refusal to overwrite an existing file
+PASS generated Compose configuration: docker compose config --quiet (no daemon operation)
+PASS bash -n backup.sh and node --check init-env.mjs
+PASS mock Docker backup ordering: stop app / capture database and assets / restart app
+PASS backup config permissions, failure restart, missing COMPLETE on failure, refusal to overwrite backup directory
+NOT RUN: Linux custom image build / production containers / real backup and restore / TLS / load testing

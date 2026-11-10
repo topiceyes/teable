@@ -1,7 +1,9 @@
-import { Input } from '@teable/ui-lib';
+import { SPACE_NAME_MAX_LENGTH } from '@teable/openapi';
+import { cn, Input } from '@teable/ui-lib';
 import React, { useEffect, useRef } from 'react';
 
 interface SpaceRenamingProps {
+  className?: string;
   spaceName: string;
   isRenaming: boolean;
   children: React.ReactNode;
@@ -10,7 +12,7 @@ interface SpaceRenamingProps {
 }
 
 export const SpaceRenaming: React.FC<SpaceRenamingProps> = (props) => {
-  const { spaceName, isRenaming, children, onChange, onBlur } = props;
+  const { spaceName, isRenaming, children, onChange, onBlur, className } = props;
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -32,7 +34,8 @@ export const SpaceRenaming: React.FC<SpaceRenamingProps> = (props) => {
       {isRenaming ? (
         <Input
           ref={inputRef}
-          className="h-7 flex-1"
+          className={cn('m-0.5 h-6 flex-1', className)}
+          maxLength={SPACE_NAME_MAX_LENGTH}
           value={spaceName}
           onKeyDown={handleKeyDown}
           onChange={onChange}

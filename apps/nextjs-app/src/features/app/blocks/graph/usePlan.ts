@@ -1,56 +1,59 @@
 import { useQuery } from '@tanstack/react-query';
-import type { IFieldRo } from '@teable/core';
-import { planField, planFieldCreate, planFieldConvert } from '@teable/openapi';
+import type { FieldAction, IFieldRo } from '@teable/core';
+import { planField, planFieldCreate, planFieldConvert, planFieldDelete } from '@teable/openapi';
 import { ReactQueryKeys } from '@teable/sdk/config';
-import { useEffect } from 'react';
 
 export function usePlan({
   tableId,
   fieldId,
   fieldRo,
+  fieldAction,
 }: {
   tableId: string;
   fieldId?: string;
   fieldRo?: IFieldRo;
+  fieldAction?: FieldAction;
 }) {
-  const { data: updatePlan, refetch: planUpdate } = useQuery({
+  // if fieldAction is not provided, we need to infer it from fieldId and fieldRo
+  let action = fieldAction;
+  if (!action && fieldId && fieldRo) {
+    action = 'field|update';
+  }
+  if (!action && !fieldId && fieldRo) {
+    action = 'field|create';
+  }
+  if (!action && fieldId && !fieldRo) {
+    action = 'field|read';
+  }
+
+  const { data: deletePlan } = useQuery({
+    queryKey: ReactQueryKeys.planFieldDelete(tableId, fieldId as string),
+    queryFn: ({ queryKey }) => planFieldDelete(queryKey[1], queryKey[2]).then((data) => data.data),
+    refetchOnWindowFocus: false,
+    enabled: action === 'field|delete',
+  });
+
+  const { data: updatePlan } = useQuery({
     queryKey: ReactQueryKeys.planFieldConvert(tableId, fieldId as string, fieldRo as IFieldRo),
-    queryFn: ({ queryKey }) => planFieldConvert(queryKey[1], queryKey[2], queryKey[3]),
+    queryFn: ({ queryKey }) =>
+      planFieldConvert(queryKey[1], queryKey[2], queryKey[3]).then((data) => data.data),
     refetchOnWindowFocus: false,
-    enabled: false,
+    enabled: action === 'field|update',
   });
 
-  const { data: createPlan, refetch: planCreate } = useQuery({
+  const { data: createPlan } = useQuery({
     queryKey: ReactQueryKeys.planFieldCreate(tableId, fieldRo as IFieldRo),
-    queryFn: ({ queryKey }) => planFieldCreate(queryKey[1], queryKey[2]),
+    queryFn: ({ queryKey }) => planFieldCreate(queryKey[1], queryKey[2]).then((data) => data.data),
     refetchOnWindowFocus: false,
-    enabled: false,
+    enabled: action === 'field|create',
   });
 
-  const { data: staticPlan, refetch: planStatic } = useQuery({
+  const { data: staticPlan } = useQuery({
     queryKey: ReactQueryKeys.planField(tableId, fieldId as string),
-    queryFn: ({ queryKey }) => planField(queryKey[1], queryKey[2]),
+    queryFn: ({ queryKey }) => planField(queryKey[1], queryKey[2]).then((data) => data.data),
     refetchOnWindowFocus: false,
-    enabled: false,
+    enabled: action === 'field|read',
   });
 
-  const isUpdate = fieldId && fieldRo;
-  const isStatic = fieldId && !fieldRo;
-  const isCreate = !fieldId && fieldRo;
-
-  useEffect(() => {
-    if (isUpdate) {
-      planUpdate();
-    }
-
-    if (isCreate) {
-      planCreate();
-    }
-
-    if (isStatic) {
-      planStatic();
-    }
-  }, [isCreate, isStatic, isUpdate, planCreate, planStatic, planUpdate]);
-
-  return createPlan?.data || staticPlan?.data || updatePlan?.data;
+  return deletePlan || updatePlan || createPlan || staticPlan;
 }

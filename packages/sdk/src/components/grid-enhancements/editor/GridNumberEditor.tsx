@@ -1,6 +1,7 @@
-import type { INumberFieldOptions } from '@teable/core';
+import type { INumberFormatting } from '@teable/core';
 import type { ForwardRefRenderFunction } from 'react';
 import { forwardRef, useImperativeHandle, useMemo, useRef } from 'react';
+import { useTranslation } from '../../../context/app/i18n';
 import { NumberEditor } from '../../editor';
 import type { IEditorRef } from '../../editor/type';
 import type { IEditorProps } from '../../grid/components';
@@ -14,9 +15,10 @@ const GridNumberEditorBase: ForwardRefRenderFunction<
   IWrapperEditorProps & IEditorProps
 > = (props, ref) => {
   const { field, record, rect, style, theme, cell, isEditing } = props;
+  const formatting = (field.options as { formatting?: INumberFormatting })?.formatting;
+  const { t } = useTranslation();
   const { cellLineColorActived } = theme;
   const editorRef = useRef<IEditorRef<number>>(null);
-  const options = field.options as INumberFieldOptions;
   const { width, height } = rect;
 
   useImperativeHandle(ref, () => ({
@@ -27,7 +29,7 @@ const GridNumberEditorBase: ForwardRefRenderFunction<
 
   const saveValue = (value: unknown) => {
     if (value === cell.data || !isEditing) return;
-    record.updateCell(field.id, value ?? null);
+    record.updateCell(field.id, value ?? null, { t });
   };
 
   const attachStyle = useMemo(() => {
@@ -46,10 +48,11 @@ const GridNumberEditorBase: ForwardRefRenderFunction<
   return (
     <NumberEditor
       ref={editorRef}
-      className="rounded-md border-2 text-right shadow-none focus-visible:ring-transparent"
+      className="rounded-md border-2 text-end shadow-none focus-visible:ring-transparent"
       style={{ border: `2px solid ${cellLineColorActived}`, ...style, ...attachStyle }}
-      options={options}
       onChange={saveValue}
+      saveOnBlur={false}
+      formatting={formatting}
     />
   );
 };

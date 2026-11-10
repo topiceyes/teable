@@ -1,33 +1,83 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { deleteSpace, getBaseList, getSpaceById, updateSpace } from '@teable/openapi';
+import { hasPermission, Role } from '@teable/core';
+import { Plus } from '@teable/icons';
+import {
+  createBase,
+  PinType,
+  deleteSpace,
+  getSpaceById,
+  getSubscriptionSummary,
+  permanentDeleteSpace,
+  updateSpace,
+} from '@teable/openapi';
 import { ReactQueryKeys } from '@teable/sdk/config';
+import { useIsMobile } from '@teable/sdk/hooks';
+import { useTheme } from '@teable/ui-lib';
+import { cn, ScrollArea } from '@teable/ui-lib/shadcn';
+import { Button } from '@teable/ui-lib/shadcn/ui/button';
+import Image from 'next/image';
 import { useRouter } from 'next/router';
 import { useTranslation } from 'next-i18next';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { spaceConfig } from '@/features/i18n/space.config';
+import { SpaceSettingTab, SpaceInnerSettingModal } from '@overridable/SpaceInnerSettingModal';
+import { LevelWithUpgrade } from '../../components/billing/LevelWithUpgrade';
 import { Collaborators } from '../../components/collaborator-manage/space-inner/Collaborators';
+import { PersonalSettingTab, useSettingStore } from '../../components/setting/useSettingStore';
 import { SpaceActionBar } from '../../components/space/SpaceActionBar';
 import { SpaceRenaming } from '../../components/space/SpaceRenaming';
-import { DraggableBaseGrid } from './DraggableBaseGrid';
+import { useIsCloud } from '../../hooks/useIsCloud';
+import { useSetting } from '../../hooks/useSetting';
+import { useUpgradeCtaEnabled } from '../../hooks/useUpgradeCtaEnabled';
+import { useTemplateMonitor } from '../base/duplicate/useTemplateMonitor';
+import { BaseList } from './BaseList';
+import { DataDbBadge } from './DataDbBadge';
+import { StarButton } from './space-side-bar/StarButton';
+import { useBaseList } from './useBaseList';
 
-export const SpaceInnerPage: React.FC = () => {
+/**
+ * The space's page: its name, plan and actions above its projects and collaborators. With
+ * `title`, a page about the space's projects instead (the chat-first shell's Projects page):
+ * that title in place of the space's name and badges, no stars, since that shell lists no starred
+ * projects, and only creating and importing projects.
+ */
+export const SpaceInnerPage: React.FC<{ title?: string }> = ({ title }) => {
   const router = useRouter();
   const queryClient = useQueryClient();
+  const isCloud = useIsCloud();
+  useTemplateMonitor();
   const ref = useRef<HTMLDivElement>(null);
   const spaceId = router.query.spaceId as string;
   const { t } = useTranslation(spaceConfig.i18nNamespaces);
+  const isMobile = useIsMobile();
+  const upgradeCtaEnabled = useUpgradeCtaEnabled();
+  const { resolvedTheme } = useTheme();
+  const isDark = resolvedTheme === 'dark';
 
   const [renaming, setRenaming] = useState<boolean>(false);
   const [spaceName, setSpaceName] = useState<string>();
+  const [settingModalOpen, setSettingModalOpen] = useState(false);
+  const [settingDefaultTab, setSettingDefaultTab] = useState<SpaceSettingTab>(SpaceSettingTab.Plan);
+
+  const openSetting = useSettingStore((state) => state.setOpen);
 
   const { data: space } = useQuery({
-    queryKey: ['space', spaceId],
-    queryFn: ({ queryKey }) => getSpaceById(queryKey[1]).then(({ data }) => data),
+    queryKey: ReactQueryKeys.space(spaceId),
+    queryFn: ({ queryKey }) => getSpaceById(queryKey[1]).then((res) => res.data),
   });
 
-  const { data: bases } = useQuery({
-    queryKey: ['base-list', spaceId],
-    queryFn: ({ queryKey }) => getBaseList({ spaceId: queryKey[1] }).then(({ data }) => data),
+  const bases = useBaseList();
+
+  const { disallowSpaceInvitation } = useSetting();
+
+  const basesInSpace = useMemo(() => {
+    return bases?.filter((base) => base.spaceId === spaceId);
+  }, [bases, spaceId]);
+
+  const { data: subscriptionSummary } = useQuery({
+    queryKey: ReactQueryKeys.subscriptionSummary(spaceId),
+    queryFn: () => getSubscriptionSummary(spaceId).then((res) => res.data),
+    enabled: isCloud,
   });
 
   const { mutate: deleteSpaceMutator } = useMutation({
@@ -40,13 +90,39 @@ export const SpaceInnerPage: React.FC = () => {
     },
   });
 
+  const { mutate: permanentDeleteSpaceMutator } = useMutation({
+    mutationFn: permanentDeleteSpace,
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ReactQueryKeys.spaceList() });
+      router.push({
+        pathname: '/space',
+      });
+    },
+  });
+
   const { mutateAsync: updateSpaceMutator } = useMutation({
     mutationFn: updateSpace,
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['space'] });
       queryClient.invalidateQueries({ queryKey: ReactQueryKeys.spaceList() });
+      queryClient.invalidateQueries({ queryKey: ReactQueryKeys.space(spaceId) });
     },
   });
+
+  const { mutate: createBaseMutator, isPending: createBaseLoading } = useMutation({
+    mutationFn: createBase,
+    onSuccess: ({ data }) => {
+      router.push({
+        pathname: '/base/[baseId]',
+        query: { baseId: data.id },
+      });
+    },
+  });
+
+  const handleCreateBase = () => {
+    createBaseMutator({ spaceId });
+  };
+
+  const canCreateBase = space && hasPermission(space.role, 'base|create');
 
   useEffect(() => setSpaceName(space?.name), [renaming, space?.name]);
 
@@ -65,43 +141,184 @@ export const SpaceInnerPage: React.FC = () => {
     setRenaming(false);
   };
 
+  const handleOpenUpgrade = useCallback(() => {
+    if (space?.role === Role.Owner) {
+      setSettingModalOpen(true);
+    }
+  }, [space?.role]);
+
+  const renderSubscription = () => {
+    if (space && isCloud) {
+      return (
+        <LevelWithUpgrade
+          level={subscriptionSummary?.level}
+          status={subscriptionSummary?.status}
+          spaceId={space.id}
+          withUpgrade={space.role === Role.Owner}
+          organization={space.organization}
+          onUpgradeClick={handleOpenUpgrade}
+          appSumoTier={subscriptionSummary?.appSumoTier}
+        >
+          <DataDbBadge dataDb={space.dataDb} />
+        </LevelWithUpgrade>
+      );
+    }
+    return <DataDbBadge dataDb={space?.dataDb} />;
+  };
+
+  const renderOrganization = () => {
+    if (!isCloud && space?.organization) {
+      return <div className="text-sm text-gray-500">{space.organization.name}</div>;
+    }
+    return null;
+  };
+
+  useEffect(() => {
+    const { subscribeLevel, host, settingTab } = router.query;
+    const isOwner = space?.role === Role.Owner;
+
+    // `?subscribeLevel=` opens purchase tabs: ignored inside the native mobile WebView.
+    if (subscribeLevel && !upgradeCtaEnabled) return;
+
+    if (subscribeLevel && host === 'self-hosted') {
+      openSetting(true, PersonalSettingTab.License);
+      return;
+    }
+
+    let tab: SpaceSettingTab | undefined;
+
+    if (subscribeLevel) {
+      if (isCloud && isOwner) {
+        tab = SpaceSettingTab.Plan;
+      }
+    } else if (settingTab && isOwner) {
+      tab = settingTab as SpaceSettingTab;
+    }
+
+    if (!tab) return;
+
+    setSettingDefaultTab(tab);
+    setSettingModalOpen(true);
+
+    if (settingTab) {
+      const { settingTab: _, ...rest } = router.query;
+      router.replace({ pathname: router.pathname, query: rest }, undefined, { shallow: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [router.query, isCloud, space?.role, upgradeCtaEnabled]);
+
   return (
     space && (
-      <div ref={ref} className="flex size-full min-w-[760px] px-12 pt-8">
-        <div className="w-full flex-1 space-y-6">
-          <div className="pb-6">
-            <SpaceRenaming
-              spaceName={spaceName!}
-              isRenaming={renaming}
-              onChange={(e) => setSpaceName(e.target.value)}
-              onBlur={(e) => toggleUpdateSpace(e)}
-            >
-              <h1 className="text-2xl font-semibold">{space.name}</h1>
-            </SpaceRenaming>
-          </div>
-
-          {bases?.length ? (
-            <DraggableBaseGrid bases={bases} />
+      <div ref={ref} className={cn('flex h-full min-w-0 flex-1 flex-col py-6 sm:min-w-[760px]')}>
+        <div
+          className={cn(
+            'flex shrink-0 px-5 sm:px-8 items-start sm:items-center justify-between gap-4  sm:pb-4'
+          )}
+        >
+          {title ? (
+            <h1 className="min-w-0 truncate text-2xl font-semibold">{title}</h1>
+          ) : isMobile ? (
+            <div className="flex min-w-0 flex-col items-start justify-start gap-2">
+              <div className="flex w-full items-center justify-start gap-2 text-start">
+                <SpaceRenaming
+                  spaceName={spaceName!}
+                  isRenaming={renaming}
+                  onChange={(e) => setSpaceName(e.target.value)}
+                  onBlur={(e) => toggleUpdateSpace(e)}
+                  className="h-8"
+                >
+                  <h1 className="truncate text-2xl font-semibold">{space.name}</h1>
+                </SpaceRenaming>
+              </div>
+              {renderSubscription()}
+              {renderOrganization()}
+            </div>
           ) : (
-            <div className="flex items-center justify-center">
-              <h1>{t('space:spaceIsEmpty')}</h1>
+            <div className="flex min-w-0 items-center gap-2">
+              <SpaceRenaming
+                spaceName={spaceName!}
+                isRenaming={renaming}
+                onChange={(e) => setSpaceName(e.target.value)}
+                onBlur={(e) => toggleUpdateSpace(e)}
+                className="h-8"
+              >
+                <h1 className="truncate text-2xl font-semibold">{space.name}</h1>
+              </SpaceRenaming>
+              <StarButton className="opacity-100" id={space.id} type={PinType.Space} />
+              {renderSubscription()}
+              {renderOrganization()}
             </div>
           )}
-        </div>
 
-        <div className="ml-16 w-72 min-w-60">
           <SpaceActionBar
-            className="flex shrink-0 items-center justify-end gap-3 pb-8"
             space={space}
-            buttonSize={'xs'}
-            invQueryFilters={['base-list', space.id]}
+            buttonSize="sm"
+            invQueryFilters={ReactQueryKeys.baseAll() as unknown as string[]}
+            disallowSpaceInvitation={disallowSpaceInvitation}
+            variant={title ? 'projects' : 'space'}
             onDelete={() => deleteSpaceMutator(space.id)}
+            onPermanentDelete={() => permanentDeleteSpaceMutator(space.id)}
             onRename={() => setRenaming(true)}
           />
-          <div className="text-left">
-            <Collaborators spaceId={spaceId} />
+        </div>
+
+        <div className="flex min-h-0 flex-1 gap-8 px-4 pt-4 sm:px-8">
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+            {basesInSpace?.length ? (
+              <BaseList
+                key={spaceId}
+                baseIds={basesInSpace.map((base) => base.id)}
+                spaceId={spaceId}
+                showToolbar={true}
+                showStar={!title}
+              />
+            ) : (
+              <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-4">
+                <Image
+                  src={
+                    isDark
+                      ? '/images/layout/empty-base-dark.png'
+                      : '/images/layout/empty-base-light.png'
+                  }
+                  alt="No projects available"
+                  width={240}
+                  height={240}
+                />
+                <div className="flex flex-col items-center justify-center gap-2">
+                  <p className="text-base font-semibold text-foreground">
+                    {t('space:emptySpaceTitle')}
+                  </p>
+                  <p className="text-sm text-muted-foreground">{t('space:spaceIsEmpty')}</p>
+                </div>
+                {canCreateBase && (
+                  <Button onClick={handleCreateBase} disabled={createBaseLoading}>
+                    <Plus className="size-4" />
+                    {t('space:action.createBase')}
+                  </Button>
+                )}
+              </div>
+            )}
+          </div>
+
+          <div className="hidden w-[200px] min-w-[200px] flex-col sm:flex">
+            <ScrollArea
+              key={spaceId}
+              className="flex-1 [&>[data-radix-scroll-area-viewport]>div]:!block [&>[data-radix-scroll-area-viewport]>div]:!min-w-0"
+            >
+              <div className="text-start">
+                <Collaborators spaceId={spaceId} space={space} />
+              </div>
+            </ScrollArea>
           </div>
         </div>
+
+        <SpaceInnerSettingModal
+          open={settingModalOpen}
+          setOpen={setSettingModalOpen}
+          defaultTab={settingDefaultTab}
+        >
+          <span className="hidden" />
+        </SpaceInnerSettingModal>
       </div>
     )
   );

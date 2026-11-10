@@ -1,0 +1,245 @@
+/* eslint-disable sonarjs/no-duplicate-string */
+import { Session } from 'node:inspector';
+import { Readable } from 'node:stream';
+import { Injectable, InternalServerErrorException, Logger } from '@nestjs/common';
+import { heicMimetypes, HttpErrorCode, NotificationTypeEnum } from '@teable/core';
+import { PrismaService } from '@teable/db-main-prisma';
+import type { IAdminSendNotificationRo } from '@teable/openapi';
+import { PluginStatus, UploadType } from '@teable/openapi';
+import { Response } from 'express';
+import { Knex } from 'knex';
+import { InjectModel } from 'nest-knexjs';
+import { ClsService } from 'nestjs-cls';
+import { CustomHttpException } from '../../../custom.exception';
+import { PerformanceCacheService } from '../../../performance-cache';
+import type { IClsStore } from '../../../types/cls';
+import { Timing } from '../../../utils/timing';
+import { AttachmentsCropQueueProcessor } from '../../attachments/attachments-crop.processor';
+import StorageAdapter from '../../attachments/plugins/adapter';
+import { AuditScope } from '../../audit/audit-scope';
+import { NotificationService } from '../../notification/notification.service';
+
+@Injectable()
+export class AdminOpenApiService {
+  private readonly logger = new Logger(AdminOpenApiService.name);
+  constructor(
+    private readonly prismaService: PrismaService,
+    @InjectModel('CUSTOM_KNEX') private readonly knex: Knex,
+    private readonly attachmentsCropQueueProcessor: AttachmentsCropQueueProcessor,
+    private readonly performanceCacheService: PerformanceCacheService,
+    private readonly notificationService: NotificationService,
+    private readonly cls: ClsService<IClsStore>,
+    private readonly audit: AuditScope
+  ) {}
+
+  async publishPlugin(pluginId: string) {
+    const plugin = await this.prismaService.plugin.update({
+      where: { id: pluginId, status: PluginStatus.Reviewing },
+      data: { status: PluginStatus.Published },
+    });
+    // Publishing changes what every user of the instance can install.
+    await this.audit.emitAtomic({
+      action: 'admin.plugin.publish',
+      resourceId: pluginId,
+      params: { pluginId, name: plugin.name },
+    });
+    return plugin;
+  }
+
+  async unpublishPlugin(pluginId: string) {
+    const plugin = await this.prismaService.plugin.update({
+      where: { id: pluginId, status: PluginStatus.Published },
+      data: { status: PluginStatus.Developing },
+    });
+    await this.audit.emitAtomic({
+      action: 'admin.plugin.unpublish',
+      resourceId: pluginId,
+      params: { pluginId, name: plugin.name },
+    });
+    return plugin;
+  }
+
+  async repairTableAttachmentThumbnail() {
+    const take = 1000;
+    let total = 0;
+    let lastToken: string | null = null;
+    for (;;) {
+      const query = this.knex('attachments_table')
+        .select(
+          'attachments.token',
+          'attachments.height',
+          'attachments.mimetype',
+          'attachments.path'
+        )
+        .leftJoin('attachments', 'attachments_table.token', 'attachments.token')
+        .where((qb) =>
+          qb
+            .where((image) =>
+              image
+                .where('attachments.mimetype', 'like', 'image/%')
+                .whereNotNull('attachments.height')
+            )
+            .orWhereIn('attachments.mimetype', ['application/pdf', 'application/x-pdf'])
+            // HEIC rows have no height (sharp cannot read HEVC metadata)
+            .orWhereIn('attachments.mimetype', heicMimetypes)
+        )
+        .whereNull('attachments.deleted_time')
+        .whereNull('attachments.thumbnail_path')
+        .groupBy(
+          'attachments.token',
+          'attachments.height',
+          'attachments.mimetype',
+          'attachments.path'
+        )
+        .orderBy('attachments.token')
+        .limit(take);
+      if (lastToken) {
+        query.where('attachments.token', '>', lastToken);
+      }
+      const sqlNative = query.toSQL().toNative();
+      const attachments = await this.prismaService.$queryRawUnsafe<
+        { token: string; height?: number; mimetype: string; path: string }[]
+      >(sqlNative.sql, ...sqlNative.bindings);
+      this.logger.log('attachments', attachments, sqlNative.sql);
+      if (attachments.length === 0) {
+        break;
+      }
+      lastToken = attachments[attachments.length - 1].token;
+      total += attachments.length;
+      await this.attachmentsCropQueueProcessor.queue.addBulk(
+        attachments.map((attachment) => ({
+          name: 'admin_attachment_crop_image',
+          data: {
+            ...attachment,
+            bucket: StorageAdapter.getBucket(UploadType.Table),
+          },
+        }))
+      );
+      this.logger.log(`Processed ${attachments.length} attachments`);
+    }
+    this.logger.log(`Total processed ${total} attachments`);
+    await this.audit.emitAtomic({
+      action: 'admin.attachment.repair-thumbnail',
+      resourceId: 'instance',
+      params: { queuedCount: total },
+    });
+  }
+
+  @Timing()
+  async getHeapSnapshot(res: Response) {
+    const podName = process.env.HOSTNAME || 'unknown';
+    const session = new Session();
+    const timestamp = new Date().toISOString();
+    const filename = `heap-${podName}-${timestamp}.heapsnapshot`;
+    try {
+      const snapshotStream = new Readable({
+        // eslint-disable-next-line @typescript-eslint/no-empty-function
+        read() {},
+      });
+
+      res.setHeader('Content-Type', 'application/octet-stream');
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+
+      session.connect();
+      session.on('HeapProfiler.addHeapSnapshotChunk', (m) => {
+        snapshotStream.push(m.params.chunk);
+      });
+
+      const snapshotPromise = new Promise<void>((resolve, reject) => {
+        session.post('HeapProfiler.takeHeapSnapshot', undefined, (err) => {
+          if (err) {
+            reject(err);
+          } else {
+            snapshotStream.push(null);
+            resolve();
+          }
+        });
+      });
+
+      snapshotStream.on('error', (error) => {
+        this.logger.error(`Stream error for pod ${podName}:`, error);
+        throw new InternalServerErrorException(`Stream error: ${error.message}`);
+      });
+
+      snapshotStream.pipe(res);
+
+      await new Promise<void>((resolve, reject) => {
+        res.on('finish', () => {
+          this.logger.log(`Heap snapshot streaming completed for pod ${podName}`);
+          resolve();
+        });
+
+        res.on('error', (error) => {
+          this.logger.error(`Response error for pod ${podName}:`, error);
+          reject(error);
+        });
+
+        snapshotStream.on('error', reject);
+      });
+
+      await snapshotPromise;
+      // A heap dump holds whatever was in memory, sessions and secrets included.
+      await this.audit.emitAtomic({
+        action: 'admin.debug.heap-snapshot',
+        resourceId: 'instance',
+        params: { podName, filename },
+      });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } catch (error: any) {
+      throw new InternalServerErrorException(
+        `Failed to get heap snapshot: ${error.message}, podName: ${podName}, timestamp: ${timestamp}`
+      );
+    } finally {
+      session.disconnect();
+      this.logger.log(`Session disconnected for pod ${podName}`);
+    }
+  }
+
+  async getPerformanceCache() {
+    return {
+      stats: this.performanceCacheService.getStats(),
+      typeStats: this.performanceCacheService.getTypeStats(),
+    };
+  }
+
+  async deletePerformanceCache(key?: string) {
+    if (!key) {
+      throw new CustomHttpException('key is required', HttpErrorCode.VALIDATION_ERROR);
+    }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await this.performanceCacheService.del(key as any);
+    await this.audit.emitAtomic({
+      action: 'admin.performance-cache.delete',
+      resourceId: 'instance',
+      params: { key },
+    });
+  }
+
+  async sendAdminNotification(ro: IAdminSendNotificationRo) {
+    const fromUserId = this.cls.get('user.id');
+    const { message, severity, userIds, emails } = ro;
+
+    const result = await this.notificationService.sendCommonNotify(
+      {
+        fromUserId,
+        toUserId: userIds,
+        toEmail: emails,
+        message,
+        severity,
+      },
+      NotificationTypeEnum.AdminNotice
+    );
+    await this.audit.emitAtomic({
+      action: 'admin.notification.send',
+      resourceId: 'instance',
+      params: {
+        severity,
+        message,
+        userIds,
+        emails,
+        sentCount: result.sentCount,
+      },
+    });
+    return result;
+  }
+}

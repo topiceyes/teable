@@ -1,22 +1,13 @@
-import type { DriverClient } from '@teable/core';
+import type { IGetBaseVo } from '@teable/openapi';
 import React from 'react';
-import type { Connection } from 'sharedb/lib/client';
 import type { ILocale } from './i18n';
 
-export enum ThemeKey {
-  Light = 'light',
-  Dark = 'dark',
-}
-
 export interface IAppContext {
-  connection?: Connection;
-  driver: DriverClient;
-  connected: boolean;
-  theme: ThemeKey;
-  isAutoTheme: boolean;
   locale: ILocale;
   lang?: string;
-  setTheme: (theme: ThemeKey | null) => void;
+  shareId?: string;
+  template?: IGetBaseVo['template'];
+  maxSearchFieldCount?: number;
 }
 
 // eslint-disable-next-line @typescript-eslint/naming-convention, @typescript-eslint/no-non-null-assertion

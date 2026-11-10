@@ -54,14 +54,14 @@ export const ShareFormLinkEditor = (props: IShareFormLinkEditorProps) => {
       <Popover open={open} onOpenChange={setOpen}>
         <PopoverTrigger asChild>
           <Button variant="outline" size={'sm'} className={className}>
-            <Plus />
+            <Plus className="size-4 shrink-0" />
             {t('table:view.addRecord')}
           </Button>
         </PopoverTrigger>
         <PopoverContent className="h-[350px] w-screen md:w-[480px]">
           <LinkRecordList
             shareId={shareId}
-            field={field}
+            fieldId={field.id}
             selectedRecordIds={selectedRecordIds}
             onSelected={onSelected}
           />

@@ -1,0 +1,42 @@
+import type { IGroupHeaderRef } from '@teable/openapi';
+import type { IFieldInstance, Record } from '../../../model';
+import type { IPosition, IRectangle } from '../../grid/interface';
+
+export interface IHeaderMenu {
+  fields: IFieldInstance[];
+  position: IPosition;
+  aiEnable?: boolean;
+  freezeColumnIndex?: number;
+  maxFreezeColumnCount?: number;
+  onAutoFill?: (fieldId: string) => void;
+  onSelectionClear?: () => void;
+  addToChat?: () => void;
+}
+
+export interface IRecordMenu {
+  // only single select record
+  record?: Record;
+  neighborRecords?: (Record | null)[];
+  isMultipleSelected?: boolean;
+  position: IPosition;
+  copySelection?: () => Promise<void>;
+  deleteRecords?: () => Promise<void>;
+  archiveRecords?: () => Promise<void>;
+  insertRecord?: (anchorId: string, position: 'before' | 'after', num: number) => void;
+  duplicateRecord?: () => Promise<void>;
+  copyRecordUrl?: () => Promise<void>;
+  viewRecordHistory?: () => Promise<void>;
+  addRecordComment?: () => Promise<void>;
+  addToChat?: () => void;
+}
+
+export interface IStatisticMenu {
+  fieldId: string;
+  position: IRectangle;
+}
+
+export interface IGroupHeaderMenu {
+  groupId: string;
+  position: IPosition;
+  allGroupHeaderRefs: IGroupHeaderRef[] | null;
+}

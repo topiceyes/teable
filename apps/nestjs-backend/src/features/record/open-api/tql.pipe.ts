@@ -1,12 +1,13 @@
 import type { ArgumentMetadata, PipeTransform } from '@nestjs/common';
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import type { IFilter } from '@teable/core';
-import { parseTQL } from '@teable/core';
+import { HttpErrorCode, parseTQL } from '@teable/core';
+import { CustomHttpException } from '../../../custom.exception';
 
 @Injectable()
-export class TqlPipe<T extends { filterByTql?: string; filter?: IFilter }>
-  implements PipeTransform
-{
+export class TqlPipe<
+  T extends { filterByTql?: string; filter?: IFilter },
+> implements PipeTransform {
   transform(value: T, _metadata: ArgumentMetadata) {
     this.transformFilterTql(value);
     return value;
@@ -17,7 +18,8 @@ export class TqlPipe<T extends { filterByTql?: string; filter?: IFilter }>
       try {
         value.filter = parseTQL(value.filterByTql);
       } catch (e) {
-        throw new BadRequestException(`TQL parse error, ${(e as Error).message}`);
+        const detail = (e as Error).message;
+        throw new CustomHttpException(`TQL parse error, ${detail}`, HttpErrorCode.VALIDATION_ERROR);
       }
     }
   }

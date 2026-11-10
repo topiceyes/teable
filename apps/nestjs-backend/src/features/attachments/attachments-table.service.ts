@@ -45,10 +45,13 @@ export class AttachmentsTableService {
         });
       });
     });
+    if (!newAttachments.length) {
+      return;
+    }
     await this.prismaService.$tx(async (prisma) => {
-      for (let i = 0; i < newAttachments.length; i++) {
-        await prisma.attachmentsTable.create({ data: newAttachments[i] });
-      }
+      await prisma.attachmentsTable.createMany({
+        data: newAttachments,
+      });
     });
   }
 
@@ -112,10 +115,16 @@ export class AttachmentsTableService {
       });
     });
 
+    if (!needDelete.length && !newAttachments.length) {
+      return;
+    }
+
     await this.prismaService.$tx(async (prisma) => {
       needDelete.length && (await this.delete(needDelete));
-      for (let i = 0; i < newAttachments.length; i++) {
-        await prisma.attachmentsTable.create({ data: newAttachments[i] });
+      if (newAttachments.length) {
+        await prisma.attachmentsTable.createMany({
+          data: newAttachments,
+        });
       }
     });
   }

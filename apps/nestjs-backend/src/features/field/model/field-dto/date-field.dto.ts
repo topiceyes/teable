@@ -1,7 +1,11 @@
 import { DateFieldCore } from '@teable/core';
-import type { IFieldBase } from '../field-base';
+import type { FieldBase } from '../field-base';
 
-export class DateFieldDto extends DateFieldCore implements IFieldBase {
+export class DateFieldDto extends DateFieldCore implements FieldBase {
+  get isStructuredCellValue() {
+    return false;
+  }
+
   convertCellValue2DBValue(value: unknown): unknown {
     if (this.isMultipleCellValue) {
       return value == null ? value : JSON.stringify(value);
@@ -11,11 +15,30 @@ export class DateFieldDto extends DateFieldCore implements IFieldBase {
 
   convertDBValue2CellValue(value: unknown): unknown {
     if (this.isMultipleCellValue) {
-      return value == null || typeof value === 'object' ? value : JSON.parse(value as string);
+      if (value == null) return value;
+      const arr: unknown[] = Array.isArray(value)
+        ? value
+        : typeof value === 'string'
+          ? (JSON.parse(value) as unknown[])
+          : (value as unknown[]);
+      return arr.map((v) => {
+        if (v instanceof Date) return v.toISOString();
+        if (typeof v === 'number' || typeof v === 'string') {
+          const parsed = new Date(v);
+          return Number.isNaN(parsed.getTime()) ? v : parsed.toISOString();
+        }
+        return v as unknown;
+      });
     }
     if (value instanceof Date) {
       return value.toISOString();
     }
+
+    if (typeof value === 'string' || typeof value === 'number') {
+      const parsed = new Date(value);
+      return Number.isNaN(parsed.getTime()) ? value : parsed.toISOString();
+    }
+
     return value;
   }
 }

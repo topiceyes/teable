@@ -1,4 +1,5 @@
 import type { RouteConfig } from '@asteasolutions/zod-to-openapi';
+import type { AxiosResponse } from 'axios';
 import { axios } from '../axios';
 import { registerRoute, urlBuilder } from '../utils';
 import { z } from '../zod';
@@ -14,7 +15,8 @@ export type IDeleteRecordsQuery = z.infer<typeof deleteRecordsQuerySchema>;
 export const DeleteRecordsRoute: RouteConfig = registerRoute({
   method: 'delete',
   path: DELETE_RECORDS_URL,
-  description: 'Delete multiple records',
+  summary: 'Delete records',
+  description: 'Permanently delete multiple records by their IDs in a single request.',
   request: {
     params: z.object({
       tableId: z.string(),
@@ -29,15 +31,12 @@ export const DeleteRecordsRoute: RouteConfig = registerRoute({
   tags: ['record'],
 });
 
-export const deleteRecords = async (tableId: string, recordIds: string[]) => {
-  return axios.delete<null>(
-    urlBuilder(DELETE_RECORDS_URL, {
-      tableId,
-    }),
-    {
-      params: {
-        recordIds,
-      },
-    }
-  );
-};
+// Function overloads for deleteRecords
+export async function deleteRecords(
+  tableId: string,
+  recordIds: string[]
+): Promise<AxiosResponse<null>> {
+  return axios.delete<null>(urlBuilder(DELETE_RECORDS_URL, { tableId }), {
+    params: { recordIds },
+  });
+}

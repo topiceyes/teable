@@ -1,24 +1,39 @@
 import type { RouteConfig } from '@asteasolutions/zod-to-openapi';
+import { timeZoneStringSchema } from '@teable/core';
 import { axios } from '../axios';
+import { CREATE_SOURCE_HEADER, CREATE_SOURCE_TEMPLATE } from '../types';
 import { registerRoute } from '../utils';
 import { z } from '../zod';
-import type { ICreateBaseVo } from './create';
 import { createBaseVoSchema } from './create';
 
 export const CREATE_BASE_FROM_TEMPLATE = '/base/create-from-template';
 
 export const createBaseFromTemplateRoSchema = z.object({
-  spaceId: z.string(),
-  templateId: z.string(),
-  withRecords: z.boolean().optional(),
+  spaceId: z.string().describe('The space id to create a project from'),
+  templateId: z.string().describe('The template id to create a project from'),
+  withRecords: z.boolean().optional().describe('Whether to create records from the template'),
+  baseId: z.string().optional().describe('The project id to apply the template to'),
+  timeZone: timeZoneStringSchema
+    .optional()
+    .describe(
+      'The IANA time zone of the user; date-related field options in the template will be adapted to it'
+    ),
 });
 
 export type ICreateBaseFromTemplateRo = z.infer<typeof createBaseFromTemplateRoSchema>;
 
+export const createBaseFromTemplateVoSchema = createBaseVoSchema.extend({
+  defaultUrl: z.string().optional(),
+});
+
+export type ICreateBaseFromTemplateVo = z.infer<typeof createBaseFromTemplateVoSchema>;
+
 export const CreateBaseFromTemplateRoute: RouteConfig = registerRoute({
   method: 'post',
   path: CREATE_BASE_FROM_TEMPLATE,
-  description: 'Create a base from template',
+  title: 'Create or update project from template',
+  summary: 'Create a project from template or apply a template to a project',
+  description: 'Create a project from a template or apply a template to an existing project.',
   request: {
     body: {
       content: {
@@ -30,10 +45,10 @@ export const CreateBaseFromTemplateRoute: RouteConfig = registerRoute({
   },
   responses: {
     201: {
-      description: 'Returns information about a successfully created base.',
+      description: 'Returns information about a successfully created project.',
       content: {
         'application/json': {
-          schema: createBaseVoSchema,
+          schema: createBaseFromTemplateVoSchema,
         },
       },
     },
@@ -42,5 +57,9 @@ export const CreateBaseFromTemplateRoute: RouteConfig = registerRoute({
 });
 
 export const createBaseFromTemplate = async (createBaseRo: ICreateBaseFromTemplateRo) => {
-  return axios.post<ICreateBaseVo>(CREATE_BASE_FROM_TEMPLATE, createBaseRo);
+  // Source header is intrinsic to this endpoint: analytics segments base
+  // creations into manual / template / import / auto.
+  return axios.post<ICreateBaseFromTemplateVo>(CREATE_BASE_FROM_TEMPLATE, createBaseRo, {
+    headers: { [CREATE_SOURCE_HEADER]: CREATE_SOURCE_TEMPLATE },
+  });
 };

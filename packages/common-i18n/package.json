@@ -1,9 +1,12 @@
 {
   "name": "@teable/common-i18n",
-  "version": "1.0.0",
-  "license": "AGPL-3.0",
-  "private": true,
+  "version": "1.10.0",
+  "license": "MIT",
   "homepage": "https://github.com/teableio/teable",
+  "private": false,
+  "publishConfig": {
+    "access": "public"
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/teableio/teable",
@@ -15,29 +18,28 @@
   },
   "sideEffects": false,
   "type": "module",
+  "types": "./src/index.ts",
+  "files": [
+    "src"
+  ],
   "exports": {
-    "./locales/*.json": {
-      "require": "./src/locales/*.json",
-      "import": "./src/locales/*.json"
-    },
-    "./src/locales/en/sdk.json": {
-      "require": "./src/locales/en/sdk.json",
-      "import": "./src/locales/en/sdk.json"
-    },
-    "./package.json": "./package.json"
+    "./src/locales/*": {
+      "require": "./src/locales/*",
+      "import": "./src/locales/*"
+    }
   },
   "scripts": {
     "clean": "rimraf ./dist ./coverage ./tsconfig.tsbuildinfo",
-    "lint": "eslint . --ext .ts,.tsx,.js,.jsx,.cjs,.mjs --cache --cache-location ../../.cache/eslint/common-i18n.eslintcache",
+    "lint": "oxlint && oxfmt --check",
     "typecheck": "tsc --project ./tsconfig.json --noEmit"
   },
   "devDependencies": {
     "@teable/eslint-config-bases": "workspace:^",
-    "@types/node": "20.9.0",
+    "@types/node": "24.19.2",
     "cross-env": "7.0.3",
-    "eslint": "8.57.0",
-    "prettier": "3.2.5",
+    "oxfmt": "0.74.0",
+    "oxlint": "1.89.0",
     "rimraf": "5.0.5",
-    "typescript": "5.4.2"
+    "typescript": "catalog:"
   }
 }

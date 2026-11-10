@@ -26,6 +26,7 @@ export interface IRectProps extends IRectangle {
   fill?: string;
   stroke?: string;
   radius?: number | ICornerRadius;
+  opacity?: number;
 }
 
 export interface IRoundPolyProps {
@@ -116,6 +117,8 @@ export type IChartBarProps = Omit<IChartLineProps, 'hoverAmount'>;
 export interface ITextInfo {
   text: string;
   width: number;
+  // Offset of this line in the source text
+  start: number;
 }
 
 export interface IAvatarProps extends IRectangle {

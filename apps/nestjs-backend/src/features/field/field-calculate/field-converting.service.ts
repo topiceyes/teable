@@ -1,16 +1,14 @@
-import {
-  BadRequestException,
-  Injectable,
-  InternalServerErrorException,
-  Logger,
-} from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import type {
   IFieldPropertyKey,
   ILookupOptionsVo,
   IOtOperation,
   ISelectFieldChoice,
   IConvertFieldRo,
+  ILinkFieldOptions,
+  FieldCore,
 } from '@teable/core';
+import { stripLookupFormulaExecutableOptions } from '@teable/v2-core';
 import {
   ColorUtils,
   DbFieldType,
@@ -18,25 +16,41 @@ import {
   FieldOpBuilder,
   FieldType,
   generateChoiceId,
+  HttpErrorCode,
   isMultiValueLink,
+  isLinkLookupOptions,
+  PRIMARY_SUPPORTED_TYPES,
   RecordOpBuilder,
 } from '@teable/core';
 import { PrismaService } from '@teable/db-main-prisma';
 import { Knex } from 'knex';
 import { difference, intersection, isEmpty, isEqual, keyBy, set } from 'lodash';
 import { InjectModel } from 'nest-knexjs';
+import { CustomHttpException } from '../../../custom.exception';
+import { DATA_KNEX } from '../../../global/knex/knex.module';
+import { DatabaseRouter } from '../../../global/database-router.service';
+import { handleDBValidationErrors } from '../../../utils/db-validation-error';
+import {
+  majorFieldKeysChanged,
+  majorOptionsKeyChanged,
+  NON_INFECT_OPTION_KEYS,
+} from '../../../utils/major-field-keys-changed';
 import { BatchService } from '../../calculation/batch.service';
 import { FieldCalculationService } from '../../calculation/field-calculation.service';
-import type { ICellContext } from '../../calculation/link.service';
 import { LinkService } from '../../calculation/link.service';
-import type { IOpsMap } from '../../calculation/reference.service';
-import { ReferenceService } from '../../calculation/reference.service';
+import type { ICellContext } from '../../calculation/utils/changes';
 import { formatChangesToOps } from '../../calculation/utils/changes';
+import type { IOpsMap } from '../../calculation/utils/compose-maps';
 import { composeOpMaps } from '../../calculation/utils/compose-maps';
+import { isLinkCellValue } from '../../calculation/utils/detect-link';
 import { CollaboratorService } from '../../collaborator/collaborator.service';
+import { ComputedOrchestratorService } from '../../record/computed/services/computed-orchestrator.service';
+import { TableIndexService } from '../../table/table-index.service';
 import { FieldService } from '../field.service';
 import type { IFieldInstance, IFieldMap } from '../model/factory';
-import { createFieldInstanceByVo } from '../model/factory';
+import { createFieldInstanceByRaw, createFieldInstanceByVo } from '../model/factory';
+import type { ButtonFieldDto } from '../model/field-dto/button-field.dto';
+import { ConditionalRollupFieldDto } from '../model/field-dto/conditional-rollup-field.dto';
 import { FormulaFieldDto } from '../model/field-dto/formula-field.dto';
 import type { LinkFieldDto } from '../model/field-dto/link-field.dto';
 import type { MultipleSelectFieldDto } from '../model/field-dto/multiple-select-field.dto';
@@ -47,26 +61,23 @@ import type { UserFieldDto } from '../model/field-dto/user-field.dto';
 import { FieldConvertingLinkService } from './field-converting-link.service';
 import { FieldSupplementService } from './field-supplement.service';
 
-interface IModifiedOps {
-  recordOpsMap?: IOpsMap;
-  fieldOps?: IOtOperation[];
-}
-
 @Injectable()
 export class FieldConvertingService {
   private readonly logger = new Logger(FieldConvertingService.name);
 
   constructor(
-    private readonly prismaService: PrismaService,
-    private readonly fieldService: FieldService,
     private readonly linkService: LinkService,
+    private readonly fieldService: FieldService,
     private readonly batchService: BatchService,
-    private readonly referenceService: ReferenceService,
+    private readonly prismaService: PrismaService,
+    private readonly databaseRouter: DatabaseRouter,
     private readonly fieldConvertingLinkService: FieldConvertingLinkService,
     private readonly fieldSupplementService: FieldSupplementService,
     private readonly fieldCalculationService: FieldCalculationService,
     private readonly collaboratorService: CollaboratorService,
-    @InjectModel('CUSTOM_KNEX') private readonly knex: Knex
+    private readonly tableIndexService: TableIndexService,
+    private readonly computedOrchestrator: ComputedOrchestratorService,
+    @InjectModel(DATA_KNEX) private readonly knex: Knex
   ) {}
 
   private fieldOpsMap() {
@@ -103,31 +114,66 @@ export class FieldConvertingService {
   // eslint-disable-next-line sonarjs/cognitive-complexity
   private updateLookupField(field: IFieldInstance, fieldMap: IFieldMap): IOtOperation[] {
     const ops: (IOtOperation | undefined)[] = [];
-    const lookupOptions = field.lookupOptions as ILookupOptionsVo;
-    const linkField = fieldMap[lookupOptions.linkFieldId] as LinkFieldDto;
+    const lookupOptions = field.lookupOptions;
+    if (!lookupOptions || !isLinkLookupOptions(lookupOptions)) {
+      return [];
+    }
+
+    const linkField = fieldMap[lookupOptions.linkFieldId];
     const lookupField = fieldMap[lookupOptions.lookupFieldId];
-    const { showAs: _, ...inheritableOptions } = lookupField.options as Record<string, unknown>;
+
+    const linkFieldIsValid =
+      linkField &&
+      !linkField.isLookup &&
+      linkField.type === FieldType.Link &&
+      (linkField.options as ILinkFieldOptions | undefined)?.foreignTableId ===
+        lookupOptions.foreignTableId;
+
+    if (!linkFieldIsValid || !lookupField) {
+      const errorOp = this.buildOpAndMutateField(field, 'hasError', true);
+      if (errorOp) {
+        ops.push(errorOp);
+      }
+      return ops.filter(Boolean) as IOtOperation[];
+    }
+
+    const linkFieldDto = linkField as LinkFieldDto;
+    const strippedLookupOptions = stripLookupFormulaExecutableOptions(lookupField.options) ?? {};
+    const { showAs: _showAs, ...inheritableOptions } = strippedLookupOptions;
+    const strippedFieldOptions = stripLookupFormulaExecutableOptions(field.options) ?? {};
     const {
       formatting = inheritableOptions.formatting,
       showAs,
       ...inheritOptions
-    } = field.options as Record<string, unknown>;
+    } = strippedFieldOptions;
     const cellValueTypeChanged = field.cellValueType !== lookupField.cellValueType;
+
+    const clearErrorOp = this.buildOpAndMutateField(field, 'hasError', null);
+    if (clearErrorOp) {
+      ops.push(clearErrorOp);
+    }
 
     if (field.type !== lookupField.type) {
       ops.push(this.buildOpAndMutateField(field, 'type', lookupField.type));
     }
 
-    if (lookupOptions.relationship !== linkField.options.relationship) {
-      ops.push(
-        this.buildOpAndMutateField(field, 'lookupOptions', {
-          ...lookupOptions,
-          relationship: linkField.options.relationship,
-          fkHostTableName: linkField.options.fkHostTableName,
-          selfKeyName: linkField.options.selfKeyName,
-          foreignKeyName: linkField.options.foreignKeyName,
-        } as ILookupOptionsVo)
-      );
+    // Only sync link-related lookupOptions when the linked field is still a Link.
+    // If the linked field has been converted to a non-link type, keep the existing
+    // relationship and linkage metadata so clients can still introspect prior config
+    // while the lookup is marked as errored.
+    // eslint-disable-next-line sonarjs/no-collapsible-if
+    if (linkFieldDto.type === FieldType.Link) {
+      if (lookupOptions.relationship !== linkFieldDto.options.relationship) {
+        ops.push(
+          this.buildOpAndMutateField(field, 'lookupOptions', {
+            ...lookupOptions,
+            relationship: linkFieldDto.options.relationship,
+            fkHostTableName: linkFieldDto.options.fkHostTableName,
+            selfKeyName: linkFieldDto.options.selfKeyName,
+            foreignKeyName: linkFieldDto.options.foreignKeyName,
+          } as ILookupOptionsVo)
+        );
+      }
     }
 
     if (!isEqual(inheritOptions, inheritableOptions)) {
@@ -147,7 +193,10 @@ export class FieldConvertingService {
       }
     }
 
-    const isMultipleCellValue = lookupField.isMultipleCellValue || linkField.isMultipleCellValue;
+    const isMultipleCellValue =
+      lookupField.isMultipleCellValue ||
+      (linkFieldDto.type === FieldType.Link && linkFieldDto.isMultipleCellValue) ||
+      false;
     if (field.isMultipleCellValue !== isMultipleCellValue) {
       ops.push(this.buildOpAndMutateField(field, 'isMultipleCellValue', isMultipleCellValue));
       // clean showAs
@@ -182,7 +231,12 @@ export class FieldConvertingService {
 
   private updateRollupField(field: RollupFieldDto, fieldMap: IFieldMap) {
     const ops: (IOtOperation | undefined)[] = [];
-    const { lookupFieldId, relationship } = field.lookupOptions;
+    const { lookupOptions } = field;
+    if (!isLinkLookupOptions(lookupOptions)) {
+      return ops.filter(Boolean) as IOtOperation[];
+    }
+
+    const { lookupFieldId, relationship } = lookupOptions;
     const lookupField = fieldMap[lookupFieldId];
     const { cellValueType, isMultipleCellValue } = RollupFieldDto.getParsedValueType(
       field.options.expression,
@@ -197,6 +251,101 @@ export class FieldConvertingService {
       ops.push(this.buildOpAndMutateField(field, 'isMultipleCellValue', isMultipleCellValue));
     }
     return ops.filter(Boolean) as IOtOperation[];
+  }
+
+  /**
+   * Update conditional lookup field - validate dependencies and clear/set hasError
+   */
+  private updateConditionalLookupField(field: IFieldInstance, fieldMap: IFieldMap): IOtOperation[] {
+    const ops: IOtOperation[] = [];
+
+    // Get referenced field IDs from the conditional lookup configuration
+    const referencedFieldIds = this.fieldSupplementService
+      .getFieldReferenceIds(field)
+      .filter((id) => !!id && id !== field.id);
+
+    // Check if any referenced field is missing or has error
+    const missingFields = referencedFieldIds.filter((id) => !fieldMap[id]);
+    const erroredFields = referencedFieldIds.filter((id) => fieldMap[id]?.hasError);
+
+    const hasMissingDependency = missingFields.length > 0;
+    const hasErroredDependency = erroredFields.length > 0;
+
+    if (hasMissingDependency || hasErroredDependency) {
+      const op = this.buildOpAndMutateField(field, 'hasError', true);
+      if (op) {
+        ops.push(op);
+      }
+      return ops;
+    }
+
+    // Clear error if all dependencies are valid
+    const clearErrorOp = this.buildOpAndMutateField(field, 'hasError', null);
+    if (clearErrorOp) {
+      ops.push(clearErrorOp);
+    }
+
+    return ops;
+  }
+
+  private updateConditionalRollupField(
+    field: ConditionalRollupFieldDto,
+    fieldMap: IFieldMap
+  ): IOtOperation[] {
+    const ops: IOtOperation[] = [];
+    if (field.isLookup) {
+      return ops;
+    }
+    const lookupFieldId = field.options.lookupFieldId;
+    const referencedFieldIds = this.fieldSupplementService
+      .getFieldReferenceIds(field)
+      .filter((id) => !!id && id !== field.id);
+
+    const hasMissingDependency = !lookupFieldId || referencedFieldIds.some((id) => !fieldMap[id]);
+    const hasErroredDependency = referencedFieldIds.some((id) => fieldMap[id]?.hasError);
+
+    if (hasMissingDependency || hasErroredDependency) {
+      const op = this.buildOpAndMutateField(field, 'hasError', true);
+      if (op) {
+        ops.push(op);
+      }
+      return ops;
+    }
+
+    const lookupField = fieldMap[lookupFieldId];
+    if (!lookupField) {
+      const op = this.buildOpAndMutateField(field, 'hasError', true);
+      if (op) {
+        ops.push(op);
+      }
+      return ops;
+    }
+
+    const clearErrorOp = this.buildOpAndMutateField(field, 'hasError', null);
+    if (clearErrorOp) {
+      ops.push(clearErrorOp);
+    }
+
+    const { cellValueType, isMultipleCellValue } = ConditionalRollupFieldDto.getParsedValueType(
+      field.options.expression,
+      lookupField.cellValueType,
+      true
+    );
+
+    const cellTypeOp = this.buildOpAndMutateField(field, 'cellValueType', cellValueType);
+    if (cellTypeOp) {
+      ops.push(cellTypeOp);
+    }
+    const multiValueOp = this.buildOpAndMutateField(
+      field,
+      'isMultipleCellValue',
+      isMultipleCellValue
+    );
+    if (multiValueOp) {
+      ops.push(multiValueOp);
+    }
+
+    return ops;
   }
 
   private updateDbFieldType(field: IFieldInstance) {
@@ -214,28 +363,57 @@ export class FieldConvertingService {
     return ops;
   }
 
-  private async generateReferenceFieldOps(fieldId: string) {
-    const topoOrdersContext = await this.fieldCalculationService.getTopoOrdersContext([fieldId]);
+  private async generateReferenceFieldOps(fields: IFieldInstance[]) {
+    const fieldIds = fields.map((field) => field.id);
 
-    const { fieldMap, topoOrdersByFieldId, fieldId2TableId } = topoOrdersContext;
-    const topoOrders = topoOrdersByFieldId[fieldId];
-    if (topoOrders.length <= 1) {
+    const topoOrdersContext = await this.fieldCalculationService.getTopoOrdersContext(fieldIds);
+    const { fieldId2TableId, directedGraph } = topoOrdersContext;
+    const fieldMap = { ...topoOrdersContext.fieldMap, ...keyBy(fields, 'id') };
+
+    // Find affected fields using directedGraph
+    const affectedFields = new Set<string>();
+
+    function findAffectedFields(currentId: string) {
+      for (const { fromFieldId, toFieldId } of directedGraph) {
+        if (fromFieldId === currentId && !affectedFields.has(toFieldId)) {
+          affectedFields.add(toFieldId);
+          findAffectedFields(toFieldId);
+        }
+      }
+    }
+
+    // Start from each initial field
+    fieldIds.forEach((fieldId) => {
+      findAffectedFields(fieldId);
+    });
+
+    // Filter topoOrders to only include affected fields
+    const topoOrders = topoOrdersContext.topoOrders.filter((item) => affectedFields.has(item.id));
+
+    if (!topoOrders.length) {
       return {};
     }
 
     const { pushOpsMap, getOpsMap } = this.fieldOpsMap();
 
-    for (let i = 1; i < topoOrders.length; i++) {
+    for (let i = 0; i < topoOrders.length; i++) {
       const topoOrder = topoOrders[i];
-      // curField will be mutate in loop
       const curField = fieldMap[topoOrder.id];
       const tableId = fieldId2TableId[curField.id];
+
       if (curField.isLookup) {
-        pushOpsMap(tableId, curField.id, this.updateLookupField(curField, fieldMap));
+        // For conditional lookup fields, use the dedicated update method
+        if (curField.isConditionalLookup) {
+          pushOpsMap(tableId, curField.id, this.updateConditionalLookupField(curField, fieldMap));
+        } else {
+          pushOpsMap(tableId, curField.id, this.updateLookupField(curField, fieldMap));
+        }
       } else if (curField.type === FieldType.Formula) {
         pushOpsMap(tableId, curField.id, this.updateFormulaField(curField, fieldMap));
       } else if (curField.type === FieldType.Rollup) {
         pushOpsMap(tableId, curField.id, this.updateRollupField(curField, fieldMap));
+      } else if (curField.type === FieldType.ConditionalRollup) {
+        pushOpsMap(tableId, curField.id, this.updateConditionalRollupField(curField, fieldMap));
       }
       pushOpsMap(tableId, curField.id, this.updateDbFieldType(curField));
     }
@@ -256,7 +434,7 @@ export class FieldConvertingService {
 
     newOptions = { ...newOptions };
     oldOptions = { ...oldOptions };
-    const nonInfectKeys = ['formatting', 'showAs'];
+    const nonInfectKeys = Array.from(NON_INFECT_OPTION_KEYS);
     nonInfectKeys.forEach((key) => {
       delete newOptions[key];
       delete oldOptions[key];
@@ -281,7 +459,7 @@ export class FieldConvertingService {
     return optionsChanges;
   }
 
-  private infectPropertyChanged(newField: IFieldInstance, oldField: IFieldInstance) {
+  private infectPropertyChanged(newField: IFieldInstance, oldField: FieldCore) {
     // those key will infect the reference field
     const infectProperties = ['type', 'cellValueType', 'isMultipleCellValue'] as const;
     const changedProperties = infectProperties.filter(
@@ -302,6 +480,105 @@ export class FieldConvertingService {
     return Boolean(changedProperties.length || !isEmpty(optionsChanges));
   }
 
+  // lookupOptions of lookup field and rollup field must be consistent with linkField Settings
+  // And they don't belong in the referenceField
+  private async updateLookupRollupRef(
+    newField: IFieldInstance,
+    oldField: FieldCore
+  ): Promise<IOpsMap | undefined> {
+    if (newField.type !== FieldType.Link || oldField.type !== FieldType.Link) {
+      return;
+    }
+
+    const oldFieldOptions = oldField.options as ILinkFieldOptions;
+    // ignore foreignTableId change
+    if (newField.options.foreignTableId !== oldFieldOptions.foreignTableId) {
+      return;
+    }
+
+    const { relationship, fkHostTableName, foreignKeyName, selfKeyName } = newField.options;
+    if (
+      relationship === oldFieldOptions.relationship &&
+      fkHostTableName === oldFieldOptions.fkHostTableName &&
+      foreignKeyName === oldFieldOptions.foreignKeyName &&
+      selfKeyName === oldFieldOptions.selfKeyName
+    ) {
+      return;
+    }
+
+    const relatedFieldsRaw = await this.prismaService.txClient().field.findMany({
+      where: {
+        lookupLinkedFieldId: newField.id,
+        deletedTime: null,
+      },
+    });
+
+    const relatedFields = relatedFieldsRaw.map(createFieldInstanceByRaw);
+
+    const lookupToFields = await this.prismaService.txClient().field.findMany({
+      where: {
+        id: {
+          in: relatedFields.map((field) => field.lookupOptions?.lookupFieldId as string),
+        },
+      },
+    });
+    const relatedFieldsRawMap = keyBy(relatedFieldsRaw, 'id');
+    const lookupToFieldsMap = keyBy(lookupToFields, 'id');
+
+    const { pushOpsMap, getOpsMap } = this.fieldOpsMap();
+
+    relatedFields.forEach((field) => {
+      const lookupOptions = field.lookupOptions!;
+      const ops: IOtOperation[] = [];
+      ops.push(
+        this.buildOpAndMutateField(field, 'lookupOptions', {
+          ...lookupOptions,
+          relationship,
+          fkHostTableName,
+          foreignKeyName,
+          selfKeyName,
+        })!
+      );
+
+      const lookupToFieldRaw = lookupToFieldsMap[lookupOptions.lookupFieldId];
+
+      if (field.isLookup) {
+        const isMultipleCellValue =
+          newField.isMultipleCellValue || lookupToFieldRaw.isMultipleCellValue || false;
+
+        if (isMultipleCellValue !== field.isMultipleCellValue) {
+          ops.push(this.buildOpAndMutateField(field, 'isMultipleCellValue', isMultipleCellValue)!);
+        }
+
+        const dbFieldType = this.fieldSupplementService.getDbFieldType(
+          field.type,
+          field.cellValueType,
+          isMultipleCellValue
+        );
+        if (dbFieldType !== field.dbFieldType) {
+          ops.push(this.buildOpAndMutateField(field, 'dbFieldType', dbFieldType)!);
+        }
+
+        const newOptions = this.fieldSupplementService.prepareFormattingShowAs(
+          field.options,
+          JSON.parse(lookupToFieldRaw.options as string),
+          field.cellValueType,
+          isMultipleCellValue,
+          { stripSourceFormulaExecutableOptions: !field.isConditionalLookup }
+        );
+
+        if (!isEqual(newOptions, field.options)) {
+          ops.push(this.buildOpAndMutateField(field, 'options', newOptions)!);
+        }
+      }
+
+      pushOpsMap(relatedFieldsRawMap[field.id].tableId, field.id, ops);
+    });
+
+    const referenceFieldOpsMap = await this.generateReferenceFieldOps(relatedFields);
+    return composeOpMaps([getOpsMap(), referenceFieldOpsMap]);
+  }
+
   /**
    * modify a field will causes the properties of the field that depend on it to change
    * example：
@@ -310,13 +587,16 @@ export class FieldConvertingService {
    * 3. options change will cause the lookup field options change
    * 4. options in link field change may cause all lookup field run in to error, should mark them as error
    */
-  private async updateReferencedFields(newField: IFieldInstance, oldField: IFieldInstance) {
+  private async updateReferencedFields(newField: IFieldInstance, oldField: FieldCore) {
     if (!this.infectPropertyChanged(newField, oldField)) {
       return;
     }
 
-    const fieldOpsMap = await this.generateReferenceFieldOps(newField.id);
-    await this.submitFieldOpsMap(fieldOpsMap);
+    const refFieldOpsMap = await this.updateLookupRollupRef(newField, oldField);
+
+    const fieldOpsMap = await this.generateReferenceFieldOps([newField]);
+
+    await this.submitFieldOpsMap(composeOpMaps([refFieldOpsMap, fieldOpsMap]));
   }
 
   private async updateOptionsFromMultiSelectField(
@@ -344,11 +624,9 @@ export class FieldConvertingService {
       .toSQL()
       .toNative();
 
-    const result = await this.prismaService
-      .txClient()
-      .$queryRawUnsafe<
-        { __id: string; [dbFieldName: string]: string }[]
-      >(nativeSql.sql, ...nativeSql.bindings);
+    const result = await this.databaseRouter.queryDataPrismaForTable<
+      { __id: string; [dbFieldName: string]: string }[]
+    >(tableId, nativeSql.sql, { useTransaction: true }, ...nativeSql.bindings);
 
     for (const row of result) {
       const oldCellValue = field.convertDBValue2CellValue(row[field.dbFieldName]) as string[];
@@ -398,14 +676,15 @@ export class FieldConvertingService {
       .toSQL()
       .toNative();
 
-    const result = await this.prismaService
-      .txClient()
-      .$queryRawUnsafe<
-        { __id: string; [dbFieldName: string]: string }[]
-      >(nativeSql.sql, ...nativeSql.bindings);
+    const result = await this.databaseRouter.queryDataPrismaForTable<
+      { __id: string; [dbFieldName: string]: string }[]
+    >(tableId, nativeSql.sql, { useTransaction: true }, ...nativeSql.bindings);
 
     for (const row of result) {
-      const oldCellValue = field.convertDBValue2CellValue(row[field.dbFieldName]) as string;
+      let oldCellValue = field.convertDBValue2CellValue(row[field.dbFieldName]) as string;
+      if (field.isLookup && Array.isArray(oldCellValue)) {
+        oldCellValue = oldCellValue[0] as string;
+      }
 
       opsMap[row.__id] = [
         RecordOpBuilder.editor.setRecord.build({
@@ -430,7 +709,18 @@ export class FieldConvertingService {
     if (field.type === FieldType.MultipleSelect) {
       return this.updateOptionsFromMultiSelectField(tableId, updatedChoiceMap, field);
     }
-    throw new Error('Invalid field type');
+    throw new CustomHttpException(
+      `Unsupported field type ${(field as { type: FieldType }).type}`,
+      HttpErrorCode.VALIDATION_ERROR,
+      {
+        localization: {
+          i18nKey: 'httpErrors.field.unsupportedFieldType',
+          context: {
+            type: (field as { type: FieldType }).type,
+          },
+        },
+      }
+    );
   }
 
   private async modifySelectOptions(
@@ -456,35 +746,39 @@ export class FieldConvertingService {
       return;
     }
 
-    return this.updateOptionsFromSelectField(tableId, updatedChoiceMap, newField);
+    return this.updateOptionsFromSelectField(tableId, updatedChoiceMap, oldField);
   }
 
   private async updateOptionsFromRatingField(
     tableId: string,
-    field: RatingFieldDto
+    field: RatingFieldDto,
+    oldField: RatingFieldDto
   ): Promise<IOpsMap | undefined> {
     const { dbTableName } = await this.prismaService.txClient().tableMeta.findFirstOrThrow({
       where: { id: tableId, deletedTime: null },
       select: { dbTableName: true },
     });
 
+    const dbFieldName = oldField.dbFieldName;
+
     const opsMap: { [recordId: string]: IOtOperation[] } = {};
     const newMax = field.options.max;
 
     const nativeSql = this.knex(dbTableName)
-      .select('__id', field.dbFieldName)
-      .where(field.dbFieldName, '>', newMax)
+      .select('__id', dbFieldName)
+      .where(dbFieldName, '>', newMax)
       .toSQL()
       .toNative();
 
-    const result = await this.prismaService
-      .txClient()
-      .$queryRawUnsafe<
-        { __id: string; [dbFieldName: string]: string }[]
-      >(nativeSql.sql, ...nativeSql.bindings);
+    const result = await this.databaseRouter.queryDataPrismaForTable<
+      { __id: string; [dbFieldName: string]: string }[]
+    >(tableId, nativeSql.sql, { useTransaction: true }, ...nativeSql.bindings);
 
     for (const row of result) {
-      const oldCellValue = field.convertDBValue2CellValue(row[field.dbFieldName]) as number;
+      let oldCellValue = field.convertDBValue2CellValue(row[dbFieldName]) as number;
+      if (field.isLookup && Array.isArray(oldCellValue)) {
+        oldCellValue = oldCellValue[0] as number;
+      }
 
       opsMap[row.__id] = [
         RecordOpBuilder.editor.setRecord.build({
@@ -508,29 +802,30 @@ export class FieldConvertingService {
 
     if (newMax >= oldMax) return;
 
-    return await this.updateOptionsFromRatingField(tableId, newField);
+    return await this.updateOptionsFromRatingField(tableId, newField, oldField);
   }
 
   private async updateOptionsFromUserField(
     tableId: string,
-    field: UserFieldDto
+    field: UserFieldDto,
+    oldField: UserFieldDto
   ): Promise<IOpsMap | undefined> {
     const { dbTableName } = await this.prismaService.txClient().tableMeta.findFirstOrThrow({
       where: { id: tableId, deletedTime: null },
       select: { dbTableName: true },
     });
+    const dbFieldName = oldField.dbFieldName;
 
     const opsMap: { [recordId: string]: IOtOperation[] } = {};
-    const nativeSql = this.knex(dbTableName)
-      .select('__id', field.dbFieldName)
-      .whereNotNull(field.dbFieldName);
+    const nativeSql = this.knex(dbTableName).select('__id', dbFieldName).whereNotNull(dbFieldName);
 
-    const result = await this.prismaService
-      .txClient()
-      .$queryRawUnsafe<{ __id: string; [dbFieldName: string]: string }[]>(nativeSql.toQuery());
+    const result = await this.databaseRouter.queryDataPrismaForTable<
+      { __id: string; [dbFieldName: string]: string }[]
+    >(tableId, nativeSql.toQuery(), { useTransaction: true });
 
     for (const row of result) {
-      const oldCellValue = field.convertDBValue2CellValue(row[field.dbFieldName]);
+      const oldCellValue = field.convertDBValue2CellValue(row[dbFieldName]);
+
       let newCellValue;
 
       if (field.isMultipleCellValue && !Array.isArray(oldCellValue)) {
@@ -559,58 +854,109 @@ export class FieldConvertingService {
 
     if (newOption === oldOption) return;
 
-    return await this.updateOptionsFromUserField(tableId, newField);
+    return await this.updateOptionsFromUserField(tableId, newField, oldField);
+  }
+
+  private async updateOptionsFromButtonField(tableId: string, field: ButtonFieldDto) {
+    const { dbTableName } = await this.prismaService.txClient().tableMeta.findFirstOrThrow({
+      where: { id: tableId, deletedTime: null },
+      select: { dbTableName: true },
+    });
+
+    const opsMap: { [recordId: string]: IOtOperation[] } = {};
+    const nativeSql = this.knex(dbTableName)
+      .select('__id', field.dbFieldName)
+      .whereNotNull(field.dbFieldName);
+
+    const result = await this.databaseRouter.queryDataPrismaForTable<
+      { __id: string; [dbFieldName: string]: string }[]
+    >(tableId, nativeSql.toQuery(), { useTransaction: true });
+    for (const row of result) {
+      const oldCellValue = field.convertDBValue2CellValue(row[field.dbFieldName]);
+      opsMap[row.__id] = [
+        RecordOpBuilder.editor.setRecord.build({
+          fieldId: field.id,
+          oldCellValue,
+          newCellValue: null,
+        }),
+      ];
+    }
+
+    return isEmpty(opsMap) ? undefined : { [tableId]: opsMap };
+  }
+
+  private async modifyButtonOptions(
+    tableId: string,
+    newField: ButtonFieldDto,
+    oldField: ButtonFieldDto
+  ) {
+    const oldWorkflow = oldField.options.workflow;
+    const newWorkflow = newField.options.workflow;
+
+    if (oldWorkflow?.id === newWorkflow?.id) return;
+
+    return await this.updateOptionsFromButtonField(tableId, oldField);
   }
 
   private async modifyOptions(
     tableId: string,
     newField: IFieldInstance,
     oldField: IFieldInstance
-  ): Promise<IModifiedOps | undefined> {
+  ): Promise<IOpsMap | undefined> {
     if (newField.isLookup) {
       return;
     }
 
     switch (newField.type) {
       case FieldType.Link:
-        return this.fieldConvertingLinkService.modifyLinkOptions(
+        return await this.fieldConvertingLinkService.modifyLinkOptions(
           tableId,
           newField as LinkFieldDto,
           oldField as LinkFieldDto
         );
       case FieldType.SingleSelect:
       case FieldType.MultipleSelect: {
-        const rawOpsMap = await this.modifySelectOptions(
+        return await this.modifySelectOptions(
           tableId,
           newField as SingleSelectFieldDto,
           oldField as SingleSelectFieldDto
         );
-        return { recordOpsMap: rawOpsMap };
       }
       case FieldType.Rating: {
-        const rawOpsMap = await this.modifyRatingOptions(
+        return await this.modifyRatingOptions(
           tableId,
           newField as RatingFieldDto,
           oldField as RatingFieldDto
         );
-        return { recordOpsMap: rawOpsMap };
       }
       case FieldType.User: {
-        const rawOpsMap = await this.modifyUserOptions(
+        return await this.modifyUserOptions(
           tableId,
           newField as UserFieldDto,
           oldField as UserFieldDto
         );
-        return { recordOpsMap: rawOpsMap };
+      }
+      case FieldType.Button: {
+        return await this.modifyButtonOptions(
+          tableId,
+          newField as ButtonFieldDto,
+          oldField as ButtonFieldDto
+        );
       }
     }
   }
 
-  private getOriginFieldKeys(newField: IFieldInstance, oldField: IFieldInstance) {
-    return FIELD_VO_PROPERTIES.filter((key) => !isEqual(newField[key], oldField[key]));
+  private getOriginFieldKeys(newField: IFieldInstance, oldField: FieldCore) {
+    return FIELD_VO_PROPERTIES.filter((key) => {
+      // For boolean constraint properties, treat undefined/null/false as equivalent (no constraint)
+      if (key === 'unique' || key === 'notNull') {
+        return Boolean(newField[key]) !== Boolean(oldField[key]);
+      }
+      return !isEqual(newField[key], oldField[key]);
+    });
   }
 
-  private getOriginFieldOps(newField: IFieldInstance, oldField: IFieldInstance) {
+  private getOriginFieldOps(newField: IFieldInstance, oldField: FieldCore) {
     return this.getOriginFieldKeys(newField, oldField).map((key) =>
       FieldOpBuilder.editor.setFieldProperty.build({
         key,
@@ -622,32 +968,79 @@ export class FieldConvertingService {
 
   private async getDerivateByLink(tableId: string, innerOpsMap: IOpsMap['key']) {
     const changes: ICellContext[] = [];
+    let fromReset = true;
     for (const recordId in innerOpsMap) {
       for (const op of innerOpsMap[recordId]) {
         const context = RecordOpBuilder.editor.setRecord.detect(op);
         if (!context) {
-          throw new Error('Invalid operation');
+          throw new CustomHttpException(
+            `Invalid operation ${JSON.stringify(op)}, when get derivate by link`,
+            HttpErrorCode.VALIDATION_ERROR,
+            {
+              localization: {
+                i18nKey: 'httpErrors.custom.invalidOperation',
+              },
+            }
+          );
         }
+
+        // when changing link relationship, old value used to clean link cellValue
+        if (isLinkCellValue(context.oldCellValue)) {
+          fromReset = false;
+        }
+
         changes.push({
           recordId,
           fieldId: context.fieldId,
-          oldValue: null, // old value by no means when converting
+          oldValue: isLinkCellValue(context.oldCellValue) ? context.oldCellValue : null,
           newValue: context.newCellValue,
         });
       }
     }
 
-    const derivate = await this.linkService.getDerivateByLink(tableId, changes, true);
+    const derivate = await this.linkService.getDerivateByLink(tableId, changes, fromReset);
     const cellChanges = derivate?.cellChanges || [];
 
     const opsMapByLink = cellChanges.length ? formatChangesToOps(cellChanges) : {};
 
     return {
       opsMapByLink,
-      saveForeignKeyToDb: derivate?.saveForeignKeyToDb,
+      fkRecordMap: derivate?.fkRecordMap,
     };
   }
 
+  private buildCellContextsFromOps(opsMap: IOpsMap[string] | undefined) {
+    const contexts: ICellContext[] = [];
+    if (!opsMap) {
+      return contexts;
+    }
+    for (const [recordId, ops] of Object.entries(opsMap)) {
+      for (const op of ops) {
+        const context = RecordOpBuilder.editor.setRecord.detect(op);
+        if (!context) {
+          continue;
+        }
+        contexts.push({
+          recordId,
+          fieldId: context.fieldId,
+          oldValue: context.oldCellValue,
+          newValue: context.newCellValue,
+        });
+      }
+    }
+    return contexts;
+  }
+
+  private buildComputedSources(recordOpsMap: IOpsMap) {
+    return Object.entries(recordOpsMap)
+      .map(([tableId, ops]) => ({
+        tableId,
+        cellContexts: this.buildCellContextsFromOps(ops),
+      }))
+      .filter((source) => source.cellContexts.length);
+  }
+
+  // eslint-disable-next-line sonarjs/cognitive-complexity
   private async calculateAndSaveRecords(
     tableId: string,
     field: IFieldInstance,
@@ -657,41 +1050,64 @@ export class FieldConvertingService {
       return;
     }
 
-    let saveForeignKeyToDb: (() => Promise<void>) | undefined;
     if (field.type === FieldType.Link && !field.isLookup) {
       const result = await this.getDerivateByLink(tableId, recordOpsMap[tableId]);
-      saveForeignKeyToDb = result?.saveForeignKeyToDb;
       recordOpsMap = composeOpMaps([recordOpsMap, result.opsMapByLink]);
+
+      // Also derive link updates for any other tables present in the ops map.
+      // This covers scenarios where conversions schedule updates on symmetric link fields
+      // in foreign tables (e.g., one-way → two-way), which need link derivations too.
+      for (const otherTableId of Object.keys(recordOpsMap)) {
+        if (otherTableId === tableId) continue;
+        const opsForOther = recordOpsMap[otherTableId];
+        if (!opsForOther || isEmpty(opsForOther)) continue;
+        try {
+          const r = await this.getDerivateByLink(otherTableId, opsForOther);
+          recordOpsMap = composeOpMaps([recordOpsMap, r.opsMapByLink]);
+        } catch (_) {
+          // Ignore derivation errors for non-link updates; they'll be handled downstream
+        }
+      }
     }
 
-    const {
-      opsMap: calculatedOpsMap,
-      fieldMap,
-      tableId2DbTableName,
-    } = await this.referenceService.calculateOpsMap(recordOpsMap, saveForeignKeyToDb);
-
-    const composedOpsMap = composeOpMaps([recordOpsMap, calculatedOpsMap]);
-
-    // console.log('recordOpsMap', JSON.stringify(recordOpsMap));
-    // console.log('composedOpsMap', JSON.stringify(composedOpsMap));
-    // console.log('tableId2DbTableName', JSON.stringify(tableId2DbTableName));
-
-    await this.batchService.updateRecords(composedOpsMap, fieldMap, tableId2DbTableName);
+    const computedSources = this.buildComputedSources(recordOpsMap);
+    if (computedSources.length) {
+      await this.computedOrchestrator.computeCellChangesForRecordsMulti(
+        computedSources,
+        async (tables) => {
+          await this.batchService.updateRecords(recordOpsMap!, undefined, undefined, tables);
+        }
+      );
+    } else {
+      await this.batchService.updateRecords(recordOpsMap);
+    }
   }
 
   private async getExistRecords(tableId: string, newField: IFieldInstance) {
-    const { dbTableName } = await this.prismaService.txClient().tableMeta.findFirstOrThrow({
-      where: { id: tableId },
-      select: { dbTableName: true },
-    });
+    const { dbTableName, name: tableName } = await this.prismaService
+      .txClient()
+      .tableMeta.findFirstOrThrow({
+        where: { id: tableId },
+        select: { dbTableName: true, name: true },
+      });
 
-    const result = await this.fieldCalculationService.getRecordsBatchByFields({
-      [dbTableName]: [newField],
-    });
+    const result = await this.fieldCalculationService.getRecordsBatchByFields(
+      {
+        [dbTableName]: [newField],
+      },
+      { [dbTableName]: tableId }
+    );
     const records = result[dbTableName];
     if (!records) {
-      throw new InternalServerErrorException(
-        `Can't find recordMap for tableId: ${tableId} and fieldId: ${newField.id}`
+      throw new CustomHttpException(
+        `Can't find recordMap for tableId: ${tableId} and fieldId: ${newField.id}`,
+        HttpErrorCode.VALIDATION_ERROR,
+        {
+          localization: {
+            i18nKey: 'httpErrors.field.recordMapNotFound',
+            context: { tableName, fieldName: newField.name },
+          },
+        }
       );
     }
 
@@ -708,7 +1124,6 @@ export class FieldConvertingService {
     const records = await this.getExistRecords(tableId, oldField);
     const choices = newField.options.choices;
     const opsMap: { [recordId: string]: IOtOperation[] } = {};
-    const fieldOps: IOtOperation[] = [];
     const choicesMap = keyBy(choices, 'name');
     const newChoicesSet = new Set<string>();
     records.forEach((record) => {
@@ -753,26 +1168,44 @@ export class FieldConvertingService {
           color: colors[i],
         }))
       );
-      const fieldOp = this.buildOpAndMutateField(newField, 'options', {
+      // mutate field
+      this.buildOpAndMutateField(newField, 'options', {
         ...newField.options,
         choices: newChoices,
       });
-      fieldOp && fieldOps.push(fieldOp);
     }
 
-    return {
-      recordOpsMap: isEmpty(opsMap) ? undefined : { [tableId]: opsMap },
-      fieldOps,
-    };
+    return isEmpty(opsMap) ? undefined : { [tableId]: opsMap };
   }
 
   private async convert2User(tableId: string, newField: UserFieldDto, oldField: IFieldInstance) {
     const fieldId = newField.id;
     const records = await this.getExistRecords(tableId, oldField);
-    const baseCollabs = await this.collaboratorService.getBaseCollabsWithPrimary(tableId);
     const opsMap: { [recordId: string]: IOtOperation[] } = {};
 
-    records.forEach((record) => {
+    const oldCvStrArr = records.map((record) => {
+      const oldCellValue = record.fields[fieldId];
+      if (oldCellValue == null) {
+        return;
+      }
+
+      return oldField.cellValue2String(oldCellValue);
+    });
+
+    const oldCvUserStrArr = oldCvStrArr
+      .flatMap((v) => (v ? v.split(',').map((s) => s.trim()) : []))
+      .filter(Boolean);
+    const tableCollaborators = await this.collaboratorService.getUserCollaboratorsByTableId(
+      tableId,
+      {
+        containsIn: {
+          keys: ['id', 'name', 'email', 'phone'],
+          values: [...new Set(oldCvUserStrArr)],
+        },
+      }
+    );
+
+    records.forEach((record, index) => {
       const oldCellValue = record.fields[fieldId];
       if (oldCellValue == null) {
         return;
@@ -782,8 +1215,13 @@ export class FieldConvertingService {
         opsMap[record.id] = [];
       }
 
-      const cellStr = oldField.cellValue2String(oldCellValue);
-      const newCellValue = newField.convertStringToCellValue(cellStr, { userSets: baseCollabs });
+      const cellStr = oldCvStrArr[index];
+      if (!cellStr) {
+        return;
+      }
+      const newCellValue = newField.convertStringToCellValue(cellStr, {
+        userSets: tableCollaborators,
+      });
 
       opsMap[record.id].push(
         RecordOpBuilder.editor.setRecord.build({
@@ -794,9 +1232,7 @@ export class FieldConvertingService {
       );
     });
 
-    return {
-      recordOpsMap: isEmpty(opsMap) ? undefined : { [tableId]: opsMap },
-    };
+    return isEmpty(opsMap) ? undefined : { [tableId]: opsMap };
   }
 
   private async basalConvert(tableId: string, newField: IFieldInstance, oldField: IFieldInstance) {
@@ -814,6 +1250,14 @@ export class FieldConvertingService {
       return;
     }
 
+    return this.buildBasalOpsMap(tableId, newField, oldField);
+  }
+
+  private async buildBasalOpsMap(
+    tableId: string,
+    newField: IFieldInstance,
+    oldField: IFieldInstance
+  ) {
     const fieldId = newField.id;
     const records = await this.getExistRecords(tableId, oldField);
     const opsMap: { [recordId: string]: IOtOperation[] } = {};
@@ -838,14 +1282,20 @@ export class FieldConvertingService {
       );
     });
 
-    return {
-      recordOpsMap: isEmpty(opsMap) ? undefined : { [tableId]: opsMap },
-    };
+    return isEmpty(opsMap) ? undefined : { [tableId]: opsMap };
   }
 
-  private async modifyType(tableId: string, newField: IFieldInstance, oldField: IFieldInstance) {
-    if (newField.isComputed) {
+  private async modifyType(
+    tableId: string,
+    newField: IFieldInstance,
+    oldField: IFieldInstance
+  ): Promise<IOpsMap | undefined> {
+    if (oldField.isComputed && newField.isComputed) {
       return;
+    }
+
+    if (!oldField.isComputed && newField.isComputed) {
+      return this.buildBasalOpsMap(tableId, newField, oldField);
     }
 
     if (newField.type === FieldType.SingleSelect || newField.type === FieldType.MultipleSelect) {
@@ -863,7 +1313,7 @@ export class FieldConvertingService {
     return this.basalConvert(tableId, newField, oldField);
   }
 
-  private async updateReference(newField: IFieldInstance, oldField: IFieldInstance) {
+  async updateReference(newField: IFieldInstance, oldField: FieldCore) {
     if (!this.shouldUpdateReference(newField, oldField)) {
       return;
     }
@@ -875,8 +1325,19 @@ export class FieldConvertingService {
     await this.fieldSupplementService.createReference(newField);
   }
 
-  private shouldUpdateReference(newField: IFieldInstance, oldField: IFieldInstance) {
+  private shouldUpdateReference(newField: IFieldInstance, oldField: FieldCore) {
     const keys = this.getOriginFieldKeys(newField, oldField);
+    if (newField.type === FieldType.Link && !newField.isLookup) {
+      if (
+        keys.includes('options') &&
+        newField.type === oldField.type &&
+        newField.options.lookupFieldId !== (oldField.options as ILinkFieldOptions).lookupFieldId
+      ) {
+        return true;
+      }
+
+      return false;
+    }
 
     // lookup options change
     if (newField.isLookup && oldField.isLookup) {
@@ -891,8 +1352,9 @@ export class FieldConvertingService {
     // for same field with options change
     if (keys.includes('options')) {
       return (
-        (newField.type === FieldType.Rollup || newField.type === FieldType.Formula) &&
-        newField.options.expression !== (oldField as FormulaFieldDto).options.expression
+        ((newField.type === FieldType.Rollup || newField.type === FieldType.Formula) &&
+          newField.options.expression !== (oldField as FormulaFieldDto).options.expression) ||
+        newField.type === FieldType.ConditionalRollup
       );
     }
 
@@ -904,7 +1366,7 @@ export class FieldConvertingService {
     tableId: string,
     newField: IFieldInstance,
     oldField: IFieldInstance
-  ): Promise<IModifiedOps | undefined> {
+  ): Promise<IOpsMap | undefined> {
     const keys = this.getOriginFieldKeys(newField, oldField);
 
     if (newField.isLookup && oldField.isLookup) {
@@ -917,32 +1379,49 @@ export class FieldConvertingService {
     }
 
     // for same field with options change
-    if (keys.includes('options')) {
+    if (keys.includes('options') && majorOptionsKeyChanged(oldField.options, newField.options)) {
       return await this.modifyOptions(tableId, newField, oldField);
     }
   }
 
-  majorKeysChanged(oldField: IFieldInstance, newField: IFieldInstance) {
-    const keys = this.getOriginFieldKeys(newField, oldField);
-
-    // filter property
-    const majorKeys = difference(keys, ['name', 'description', 'dbFieldName']);
-
-    if (!majorKeys.length) {
+  needCalculate(newField: IFieldInstance, oldField: FieldCore) {
+    if (!newField.isComputed) {
       return false;
     }
 
-    // expression not change
-    if (
-      majorKeys.length === 1 &&
-      majorKeys[0] === 'options' &&
-      (oldField.options as { expression: string }).expression ===
-        (newField.options as { expression: string }).expression
-    ) {
+    if (newField.hasError !== oldField.hasError) {
+      return true;
+    }
+
+    if (majorFieldKeysChanged(oldField, newField)) {
+      return true;
+    }
+
+    if (this.hasConditionalLookupDiff(newField, oldField)) {
+      return true;
+    }
+
+    if (this.hasConditionalRollupDiff(newField, oldField)) {
+      return true;
+    }
+
+    return false;
+  }
+
+  private hasConditionalLookupDiff(newField: IFieldInstance, oldField: FieldCore) {
+    if (!newField.isConditionalLookup) {
       return false;
     }
 
-    return true;
+    return !isEqual(newField.lookupOptions, oldField.lookupOptions);
+  }
+
+  private hasConditionalRollupDiff(newField: IFieldInstance, oldField: FieldCore) {
+    if (newField.type !== FieldType.ConditionalRollup) {
+      return false;
+    }
+
+    return !isEqual(newField.options, oldField.options);
   }
 
   private async calculateField(
@@ -954,17 +1433,17 @@ export class FieldConvertingService {
       return;
     }
 
-    if (!this.majorKeysChanged(oldField, newField)) {
+    const errorStateChanged = newField.hasError !== oldField.hasError;
+    const hasMajorChange = majorFieldKeysChanged(oldField, newField);
+    const conditionalLookupDiff = this.hasConditionalLookupDiff(newField, oldField);
+    const conditionalRollupDiff = this.hasConditionalRollupDiff(newField, oldField);
+
+    if (!errorStateChanged && !hasMajorChange && !conditionalLookupDiff && !conditionalRollupDiff) {
       return;
     }
 
     this.logger.log(`calculating field: ${newField.name}`);
 
-    if (newField.lookupOptions) {
-      await this.fieldCalculationService.resetAndCalculateFields(tableId, [newField.id]);
-    } else {
-      await this.fieldCalculationService.calculateFields(tableId, [newField.id]);
-    }
     await this.fieldService.resolvePending(tableId, [newField.id]);
   }
 
@@ -982,29 +1461,172 @@ export class FieldConvertingService {
     }
   }
 
-  async alterSupplementLink(
+  // for link ref and create or delete supplement link, (create, delete do not need calculate)
+  async deleteOrCreateSupplementLink(
     tableId: string,
     newField: IFieldInstance,
     oldField: IFieldInstance,
-    supplementChange?: { tableId: string; newField: IFieldInstance; oldField: IFieldInstance }
+    skipDestructive?: boolean
   ) {
-    // for link ref and create or delete supplement link, (create, delete do not need calculate)
-    await this.fieldConvertingLinkService.alterSupplementLink(tableId, newField, oldField);
+    await this.fieldConvertingLinkService.deleteOrCreateSupplementLink(
+      tableId,
+      newField,
+      oldField,
+      skipDestructive
+    );
+  }
 
-    // for modify supplement link
-    if (supplementChange) {
-      const { tableId, newField, oldField } = supplementChange;
-      await this.stageAlter(tableId, newField, oldField);
+  private needTempleCloseFieldConstraint(newField: IFieldInstance, oldField: IFieldInstance) {
+    return (
+      (majorFieldKeysChanged(oldField, newField) ||
+        newField.dbFieldName !== oldField.dbFieldName) &&
+      (oldField.unique || oldField.notNull)
+    );
+  }
+
+  async alterFieldConstraint(tableId: string, newField: IFieldInstance, oldField: IFieldInstance) {
+    const { dbTableName, name: tableName } = await this.prismaService
+      .txClient()
+      .tableMeta.findUniqueOrThrow({
+        where: { id: tableId },
+        select: { dbTableName: true, name: true },
+      });
+
+    await this.tableIndexService.createSearchFieldSingleIndex(tableId, newField);
+
+    if (!this.needTempleCloseFieldConstraint(newField, oldField)) {
+      return;
+    }
+    const { unique, notNull, dbFieldName } = newField;
+    const fieldValidationQuery = this.knex.schema
+      .alterTable(dbTableName, (table) => {
+        if (unique)
+          table.unique([dbFieldName], {
+            indexName: this.fieldService.getFieldUniqueKeyName(
+              dbTableName,
+              dbFieldName,
+              newField.id
+            ),
+          });
+        if (notNull) table.dropNullable(dbFieldName);
+      })
+      .toQuery();
+
+    await handleDBValidationErrors({
+      fn: () =>
+        this.databaseRouter.executeDataPrismaForTable(tableId, fieldValidationQuery, {
+          useTransaction: true,
+        }),
+      handleUniqueError: () => {
+        throw new CustomHttpException(
+          `Field ${oldField.id} unique validation failed`,
+          HttpErrorCode.VALIDATION_ERROR,
+          {
+            localization: {
+              i18nKey: 'httpErrors.custom.fieldValueDuplicate',
+              context: { fieldName: oldField.name, tableName },
+            },
+          }
+        );
+      },
+      handleNotNullError: () => {
+        throw new CustomHttpException(
+          `Field ${oldField.id} not null validation failed`,
+          HttpErrorCode.VALIDATION_ERROR,
+          {
+            localization: {
+              i18nKey: 'httpErrors.custom.fieldValueNotNull',
+              context: { fieldName: oldField.name, tableName },
+            },
+          }
+        );
+      },
+    });
+  }
+
+  async closeConstraint(tableId: string, newField: IFieldInstance, oldField: IFieldInstance) {
+    const { dbTableName } = await this.prismaService.txClient().tableMeta.findUniqueOrThrow({
+      where: { id: tableId },
+      select: { dbTableName: true },
+    });
+
+    await this.tableIndexService.deleteSearchFieldIndex(tableId, oldField, {
+      removeQueryIndexes:
+        oldField.type !== newField.type || oldField.dbFieldType !== newField.dbFieldType,
+    });
+
+    const { unique, notNull, dbFieldName } = oldField;
+
+    if (!this.needTempleCloseFieldConstraint(newField, oldField)) {
+      return;
+    }
+
+    const matchedIndexes = await this.fieldService.findUniqueIndexesForField(
+      tableId,
+      dbTableName,
+      dbFieldName
+    );
+    const dropUniqueIndexSqls = unique
+      ? this.fieldService.getDropUniqueIndexSqls(dbTableName, matchedIndexes)
+      : [];
+
+    const fieldValidationQuery = this.knex.schema
+      .alterTable(dbTableName, (table) => {
+        if (notNull) table.setNullable(dbFieldName);
+      })
+      .toSQL();
+
+    const executeSqls = fieldValidationQuery
+      .filter((s) => !s.sql.startsWith('PRAGMA'))
+      .map(({ sql }) => sql);
+    executeSqls.push(...dropUniqueIndexSqls);
+
+    for (const sql of executeSqls) {
+      await this.databaseRouter.executeDataPrismaForTable(tableId, sql, {
+        useTransaction: true,
+      });
     }
   }
 
   async stageAnalysis(tableId: string, fieldId: string, updateFieldRo: IConvertFieldRo) {
     const oldFieldVo = await this.fieldService.getField(tableId, fieldId);
-    if (!oldFieldVo) {
-      throw new BadRequestException(`Not found fieldId(${fieldId})`);
+    const oldField = createFieldInstanceByVo(oldFieldVo);
+
+    if (oldField.isPrimary && !PRIMARY_SUPPORTED_TYPES.has(updateFieldRo.type)) {
+      throw new CustomHttpException(
+        `Field type ${updateFieldRo.type} is not supported as primary field`,
+        HttpErrorCode.VALIDATION_ERROR,
+        {
+          localization: {
+            i18nKey: 'httpErrors.field.unsupportedPrimaryFieldType',
+            context: { type: updateFieldRo.type },
+          },
+        }
+      );
     }
 
-    const oldField = createFieldInstanceByVo(oldFieldVo);
+    // Primary fields must stay as regular (editable) fields. Converting a primary to a
+    // lookup / conditional-lookup produces a computed primary whose cell value is derived
+    // from a link, which in turn breaks base duplication (findFirstOrThrow for the foreign
+    // table's primary can't locate a valid static primary). See T3367.
+    // lookupOptions is included for symmetry with the createField guard — leaving stray
+    // lookupOptions on a primary is the same semantic corruption even without isLookup=true.
+    if (
+      oldField.isPrimary &&
+      (updateFieldRo.isLookup || updateFieldRo.isConditionalLookup || updateFieldRo.lookupOptions)
+    ) {
+      throw new CustomHttpException(
+        'Primary field cannot be configured as a lookup field',
+        HttpErrorCode.VALIDATION_ERROR,
+        {
+          localization: {
+            i18nKey: 'httpErrors.field.primaryCannotBeLookup',
+            context: {},
+          },
+        }
+      );
+    }
+
     const newFieldVo = await this.fieldSupplementService.prepareUpdateField(
       tableId,
       updateFieldRo,
@@ -1012,31 +1634,51 @@ export class FieldConvertingService {
     );
 
     const newField = createFieldInstanceByVo(newFieldVo);
+
     const modifiedOps = await this.generateModifiedOps(tableId, newField, oldField);
 
     // 2. collect changes effect by the supplement(link) field
-    const supplementChange = await this.fieldConvertingLinkService.analysisLink(newField, oldField);
-
+    // supplementChange is only for link relationship change
+    const references = (await this.fieldConvertingLinkService.analysisReference(oldField)) || [];
+    const supplementChange = await this.fieldConvertingLinkService.analysisSupplementLink(
+      newField,
+      oldField
+    );
     return {
       newField,
       oldField,
       modifiedOps,
       supplementChange,
+      references: references.concat(fieldId),
     };
   }
 
-  async stageAlter(
-    tableId: string,
-    newField: IFieldInstance,
-    oldField: IFieldInstance,
-    modifiedOps?: IModifiedOps
-  ) {
+  async updateAiConfigReference(tableId: string, newField: IFieldInstance, oldField: FieldCore) {
+    if (JSON.stringify(newField.aiConfig) === JSON.stringify(oldField.aiConfig)) return;
+
+    await this.fieldSupplementService.createFieldTaskReference(tableId, newField);
+  }
+
+  async stageAlter(tableId: string, newField: IFieldInstance, oldField: FieldCore) {
     const ops = this.getOriginFieldOps(newField, oldField);
 
+    if (this.needCalculate(newField, oldField)) {
+      ops.push(
+        FieldOpBuilder.editor.setFieldProperty.build({
+          key: 'isPending',
+          newValue: true,
+          oldValue: undefined,
+        })
+      );
+    }
+
     // apply current field changes
-    await this.fieldService.batchUpdateFields(tableId, [
-      { fieldId: newField.id, ops: ops.concat(modifiedOps?.fieldOps || []) },
-    ]);
+    await this.fieldService.batchUpdateFields(tableId, [{ fieldId: newField.id, ops }]);
+
+    await this.updateReference(newField, oldField);
+
+    // apply ai config changes
+    await this.updateAiConfigReference(tableId, newField, oldField);
 
     // apply referenced fields changes
     await this.updateReferencedFields(newField, oldField);
@@ -1046,14 +1688,30 @@ export class FieldConvertingService {
     tableId: string,
     newField: IFieldInstance,
     oldField: IFieldInstance,
-    modifiedOps?: IModifiedOps
+    recordOpsMap?: IOpsMap
   ) {
-    await this.updateReference(newField, oldField);
+    // For two-way -> one-way toggles, we still need to apply recordOpsMap
+    // to persist preserved source link values, but can skip computed field recalculation.
+    const skipComputed = this.isTogglingToOneWay(newField, oldField);
 
     // calculate and submit records
-    await this.calculateAndSaveRecords(tableId, newField, modifiedOps?.recordOpsMap);
+    await this.calculateAndSaveRecords(tableId, newField, recordOpsMap);
 
-    // calculate computed fields
-    await this.calculateField(tableId, newField, oldField);
+    // calculate computed fields unless explicitly skipped
+    if (!skipComputed) {
+      await this.calculateField(tableId, newField, oldField);
+    }
+  }
+
+  private isTogglingToOneWay(newField: IFieldInstance, oldField: IFieldInstance): boolean {
+    if (newField.type !== FieldType.Link || newField.isLookup) return false;
+    const newOpts = newField.options as ILinkFieldOptions;
+    const oldOpts = oldField.options as ILinkFieldOptions;
+    return (
+      newOpts.foreignTableId === oldOpts.foreignTableId &&
+      newOpts.relationship === oldOpts.relationship &&
+      Boolean(newOpts.isOneWay) &&
+      !oldOpts.isOneWay
+    );
   }
 }

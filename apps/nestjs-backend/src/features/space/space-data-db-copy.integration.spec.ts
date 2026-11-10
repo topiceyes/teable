@@ -1,0 +1,2023 @@
+/* eslint-disable sonarjs/no-duplicate-string */
+import { readFileSync } from 'fs';
+import { spawnSync } from 'child_process';
+import { mkdtemp, mkdir, rm } from 'fs/promises';
+import { createServer } from 'net';
+import { tmpdir } from 'os';
+import path from 'path';
+import { PgPoolRegistry } from '@teable/db-main-prisma';
+import createKnex from 'knex';
+import { Client, Pool } from 'pg';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { DataDbClientManager } from '../../global/data-db-client-manager.service';
+import { DataDbRuntimeCacheService } from '../../global/data-db-runtime-cache.service';
+import { BaseService } from '../base/base.service';
+import { dataDbKnexClientFactory } from './data-db-preflight.service';
+import { DataDbBaselineService } from './data-db-baseline.service';
+import { DataDbMigrationService } from './data-db-migration.service';
+import { encryptDataDbUrl } from './data-db-url-secret';
+import {
+  invalidateSearchIndexesForDataDbRouting,
+  type ISearchIndexRoutingTransaction,
+} from './search-index-routing-invalidation';
+import { buildMigrationSharedTablePsqlCopyPlans, postgresToolUrl } from './space-data-db-copy-plan';
+import { SpaceDataDbCopyService } from './space-data-db-copy.service';
+import { SpaceDataDbMigrationService } from './space-data-db-migration.service';
+import { SpaceDataDbProcessRunnerService } from './space-data-db-process-runner.service';
+
+const hasCommand = (command: string) =>
+  spawnSync('which', [command], { stdio: 'ignore' }).status === 0;
+const requiredCopyTools = ['pg_dump', 'pg_restore', 'psql'] as const;
+const hasCopyTools = requiredCopyTools.every(hasCommand);
+const hasEmbeddedPostgres = ['initdb', 'pg_ctl', ...requiredCopyTools].every(hasCommand);
+const databaseUrl = process.env.PRISMA_DATABASE_URL;
+if (process.env.CI && databaseUrl && !hasCopyTools) {
+  throw new Error(
+    'pg_dump, pg_restore, and psql are required in CI for SpaceDataDbCopyService integration'
+  );
+}
+const describeWithPostgres =
+  hasEmbeddedPostgres || (Boolean(databaseUrl) && hasCopyTools) ? describe : describe.skip;
+const clusterSuffix = crypto.randomUUID().replace(/-/g, '').slice(0, 8).toLowerCase();
+const sourceDatabase = `source_data_db_${clusterSuffix}`;
+const targetDatabase = `target_data_db_${clusterSuffix}`;
+const targetMismatchDatabase = `target_mismatch_data_db_${clusterSuffix}`;
+const targetSchema = 'teable_meta_test';
+const targetMismatchSchema = 'teable_meta_mismatch';
+const baseId = 'bsecopy';
+const otherBaseId = 'bseother';
+const tableId = 'tblcopy';
+const linkedTableId = 'tbllinkedcopy';
+const spaceId = 'spccopy';
+const otherSpaceId = 'spcother';
+const jobId = 'sdmjcopy';
+const targetConnectionId = 'dcncopy';
+const mismatchJobId = 'sdmjmismatch';
+const mismatchTargetConnectionId = 'dcnmismatch';
+const mainRelationName = 'sheet1';
+const linkedRelationName = 'sheet2';
+const junctionRelationName = 'sheet1_sheet2_junction';
+const legacyAutoNumberSequenceName = `${baseId}_${mainRelationName}_seq`;
+const undoTupleUpgrade = {
+  id: '20261101000000_add_undo_capture_old_tuple',
+  sql: readFileSync(
+    new URL(
+      '../../../../../packages/db-data-prisma/prisma/migrations/20261101000000_add_undo_capture_old_tuple/migration.sql',
+      import.meta.url
+    ),
+    'utf8'
+  ),
+};
+const undoTupleBaselineService = new DataDbBaselineService(
+  new DataDbMigrationService([undoTupleUpgrade], dataDbKnexClientFactory)
+);
+
+const buildCopyInventory = () => ({
+  baseIds: [baseId],
+  tableIds: [tableId, linkedTableId],
+  dbTableNames: [
+    `${baseId}.${mainRelationName}`,
+    `${baseId}.${linkedRelationName}`,
+    `${baseId}.${junctionRelationName}`,
+  ],
+  physicalSchemas: [
+    {
+      schemaName: baseId,
+      totalBytes: 3072,
+      estimatedRows: 6,
+      relations: [
+        {
+          schemaName: baseId,
+          relationName: mainRelationName,
+          relationKind: 'table',
+          totalBytes: 1024,
+          estimatedRows: 2,
+        },
+        {
+          schemaName: baseId,
+          relationName: linkedRelationName,
+          relationKind: 'table',
+          totalBytes: 1024,
+          estimatedRows: 2,
+        },
+        {
+          schemaName: baseId,
+          relationName: junctionRelationName,
+          relationKind: 'table',
+          totalBytes: 1024,
+          estimatedRows: 2,
+        },
+      ],
+    },
+  ],
+});
+
+const execFile = async (command: string, args: string[], options: { timeout?: number } = {}) => {
+  const { execFile: nodeExecFile } = await import('child_process');
+  return await new Promise<void>((resolve, reject) => {
+    nodeExecFile(command, args, { timeout: options.timeout ?? 30_000 }, (error, stdout, stderr) => {
+      if (!error) {
+        resolve();
+        return;
+      }
+      reject(
+        new Error(`${command} ${args.join(' ')} failed: ${stderr || stdout || error.message}`)
+      );
+    });
+  });
+};
+
+const getFreePort = async () =>
+  await new Promise<number>((resolve, reject) => {
+    const server = createServer();
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      if (!address || typeof address === 'string') {
+        reject(new Error('Could not allocate a local PostgreSQL test port'));
+        return;
+      }
+      server.close(() => resolve(address.port));
+    });
+  });
+
+const currentUser = () => encodeURIComponent(process.env.USER || 'postgres');
+
+let pgEndpoint = {
+  userInfo: currentUser(),
+  host: '127.0.0.1',
+  port: 0,
+};
+
+const pgUrl = (_port: number, database: string) =>
+  `postgresql://${pgEndpoint.userInfo}@${pgEndpoint.host}:${pgEndpoint.port}/${database}`;
+
+const adminUrlFrom = (url: string) => {
+  const parsed = new URL(postgresToolUrl(url));
+  parsed.pathname = '/postgres';
+  return parsed.toString();
+};
+
+const endpointFromUrl = (url: string) => {
+  const parsed = new URL(postgresToolUrl(url));
+  const username = decodeURIComponent(parsed.username);
+  const password = parsed.password ? decodeURIComponent(parsed.password) : '';
+  return {
+    userInfo: password
+      ? `${encodeURIComponent(username)}:${encodeURIComponent(password)}`
+      : encodeURIComponent(username),
+    host: parsed.hostname,
+    port: Number(parsed.port || 5432),
+  };
+};
+
+const queryCount = async (client: Client, sql: string, values: unknown[] = []) => {
+  const result = await client.query<{ count: string }>(sql, values);
+  return Number(result.rows[0]?.count ?? 0);
+};
+
+const expectProcessTiming = (result: {
+  startedAt: string;
+  completedAt: string;
+  durationMs: number;
+}) => {
+  expect(Date.parse(result.startedAt)).not.toBeNaN();
+  expect(Date.parse(result.completedAt)).not.toBeNaN();
+  expect(result.durationMs).toBeGreaterThanOrEqual(0);
+};
+
+const createSharedTables = async (client: Client, schema: string) => {
+  await client.query(`CREATE SCHEMA IF NOT EXISTS "${schema}"`);
+  await client.query(`
+    CREATE OR REPLACE FUNCTION "${schema}"."__teable_capture_undo_row"()
+    RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+    BEGIN
+      RETURN NEW;
+    END;
+    $$
+  `);
+  await client.query(`
+    CREATE TABLE "${schema}"."record_history" (
+      "id" text PRIMARY KEY,
+      "table_id" text,
+      "record_id" text,
+      "field_id" text,
+      "before" jsonb,
+      "after" jsonb,
+      "created_time" timestamp,
+      "created_by" text
+    )
+  `);
+  await client.query(`
+    CREATE TABLE "${schema}"."table_trash" (
+      "id" text PRIMARY KEY,
+      "table_id" text,
+      "resource_type" text,
+      "snapshot" jsonb,
+      "created_time" timestamp,
+      "created_by" text
+    )
+  `);
+  await client.query(`
+    CREATE TABLE "${schema}"."record_trash" (
+      "id" text PRIMARY KEY,
+      "table_id" text,
+      "record_id" text,
+      "snapshot" jsonb,
+      "created_time" timestamp,
+      "created_by" text,
+      "reason" text,
+      "record_created_time" timestamp,
+      "record_created_by" text,
+      "record_last_modified_time" timestamp,
+      "record_last_modified_by" text,
+      "operation_id" text
+    )
+  `);
+  await client.query(`
+    CREATE TABLE "${schema}"."record_removal_tombstone" (
+      "id" text PRIMARY KEY,
+      "table_id" text,
+      "record_id" text,
+      "type" text,
+      "created_time" timestamp
+    )
+  `);
+  await client.query(`
+    CREATE TABLE "${schema}"."computed_update_outbox" (
+      "id" text PRIMARY KEY,
+      "base_id" text,
+      "worker_lane" text NOT NULL DEFAULT 'production',
+      "seed_table_id" text,
+      "seed_record_ids" text,
+      "change_type" text,
+      "steps" text,
+      "edges" text,
+      "status" text,
+      "attempts" text,
+      "max_attempts" text,
+      "next_run_at" timestamptz DEFAULT now(),
+      "locked_at" timestamp,
+      "locked_by" text,
+      "last_error" text,
+      "estimated_complexity" text,
+      "plan_hash" text,
+      "dirty_stats" text,
+      "run_id" text,
+      "origin_run_ids" text,
+      "run_total_steps" text,
+      "run_completed_steps_before" text,
+      "affected_table_ids" text,
+      "affected_field_ids" text,
+      "sync_max_level" text,
+      "source_changed_at" timestamp,
+      "stage_depth" integer,
+      "predecessor_task_id" text,
+      "created_at" timestamp,
+      "updated_at" timestamp
+    )
+  `);
+  await client.query(`
+    CREATE TABLE "${schema}"."computed_update_dead_letter" (
+      "id" text PRIMARY KEY,
+      "base_id" text,
+      "worker_lane" text NOT NULL DEFAULT 'production',
+      "seed_table_id" text,
+      "seed_record_ids" text,
+      "change_type" text,
+      "steps" text,
+      "edges" text,
+      "status" text,
+      "attempts" text,
+      "max_attempts" text,
+      "next_run_at" timestamptz DEFAULT now(),
+      "locked_at" timestamp,
+      "locked_by" text,
+      "last_error" text,
+      "estimated_complexity" text,
+      "plan_hash" text,
+      "dirty_stats" text,
+      "run_id" text,
+      "origin_run_ids" text,
+      "run_total_steps" text,
+      "run_completed_steps_before" text,
+      "affected_table_ids" text,
+      "affected_field_ids" text,
+      "sync_max_level" text,
+      "source_changed_at" timestamp,
+      "stage_depth" integer,
+      "predecessor_task_id" text,
+      "created_at" timestamp,
+      "updated_at" timestamp,
+      "trace_data" jsonb,
+      "failed_at" timestamp,
+      "delete_authorized_txid" bigint
+    )
+  `);
+  await client.query(`
+    CREATE TABLE "${schema}"."computed_update_dead_letter_seed" (
+      "task_id" text NOT NULL REFERENCES "${schema}"."computed_update_dead_letter" ("id") ON DELETE CASCADE,
+      "table_id" text NOT NULL,
+      "record_id" text NOT NULL,
+      PRIMARY KEY ("task_id", "table_id", "record_id")
+    )
+  `);
+  await client.query(`
+    CREATE FUNCTION "${schema}"."computed_outbox_discard_base"(base_ids text[])
+    RETURNS bigint LANGUAGE plpgsql AS $$
+    DECLARE deleted_count bigint;
+    BEGIN
+      WITH deleted AS (
+        DELETE FROM "${schema}"."computed_update_dead_letter"
+        WHERE base_id = ANY(base_ids) RETURNING 1
+      ) SELECT count(*) INTO deleted_count FROM deleted;
+      RETURN deleted_count;
+    END;
+    $$;
+  `);
+  await client.query(`
+    CREATE TABLE "${schema}"."computed_update_run_history" (
+      "task_id" text PRIMARY KEY,
+      "base_id" text,
+      "seed_table_id" text,
+      "change_type" text,
+      "run_id" text,
+      "origin_run_ids" text,
+      "steps" text,
+      "edges" text,
+      "affected_table_ids" text,
+      "affected_field_ids" text,
+      "source_field_ids" text,
+      "seed_record_count" integer,
+      "stage_depth" integer,
+      "predecessor_task_id" text,
+      "run_total_steps" integer,
+      "run_completed_steps_before" integer,
+      "sync_max_level" integer,
+      "estimated_complexity" integer,
+      "attempts" integer,
+      "outcome" text,
+      "source_changed_at" timestamp,
+      "enqueued_at" timestamp,
+      "started_at" timestamp,
+      "completed_at" timestamp,
+      "duration_ms" integer
+    )
+  `);
+  await client.query(`
+    CREATE TABLE "${schema}"."computed_update_outbox_seed" (
+      "id" text PRIMARY KEY,
+      "task_id" text,
+      "table_id" text,
+      "record_id" text
+    )
+  `);
+  await client.query(`
+    CREATE TABLE "${schema}"."computed_update_pause_scope" (
+      "id" text PRIMARY KEY,
+      "scope_type" text,
+      "scope_id" text,
+      "paused_at" timestamp,
+      "paused_by" text,
+      "resume_at" timestamp,
+      "reason" text,
+      "updated_at" timestamp,
+      "updated_by" text
+    )
+  `);
+  await client.query(`
+    CREATE TABLE "${schema}"."computed_reliability_issue" (
+      "id" text PRIMARY KEY,
+      "task_id" text UNIQUE NOT NULL,
+      "base_id" text NOT NULL,
+      "source_table_id" text NOT NULL,
+      "error" text NOT NULL,
+      "failure_kind" text,
+      "failure_phase" text,
+      "error_code" text,
+      "status" text NOT NULL DEFAULT 'open',
+      "scope_complete" boolean NOT NULL DEFAULT false,
+      "occurrences" integer NOT NULL DEFAULT 1,
+      "first_seen_at" timestamptz NOT NULL DEFAULT now(),
+      "last_seen_at" timestamptz NOT NULL DEFAULT now(),
+      "closed_at" timestamptz,
+      "confirmed_by" text,
+      "confirmation_reason" text
+    );
+    CREATE TABLE "${schema}"."computed_reliability_scope" (
+      "issue_id" text NOT NULL,
+      "table_id" text NOT NULL,
+      "field_id" text NOT NULL,
+      PRIMARY KEY ("issue_id", "table_id", "field_id")
+    )
+  `);
+  await client.query(`
+    CREATE TABLE "${schema}"."__undo_log" (
+      "id" text PRIMARY KEY,
+      "batch_id" text,
+      "operation" text,
+      "table_name" text,
+      "record_id" text,
+      "old_row" jsonb,
+      "new_row" jsonb,
+      "created_at" timestamp
+    )
+  `);
+
+  await client.query(`
+    CREATE TABLE "${schema}"."domain_event_outbox" (
+      "id" text PRIMARY KEY,
+      "base_id" text NOT NULL,
+      "table_id" text,
+      "message_name" text NOT NULL,
+      "schema_version" integer NOT NULL,
+      "aggregate_id" text,
+      "payload" jsonb NOT NULL,
+      "payload_bytes" integer NOT NULL,
+      "catalog_generation" integer NOT NULL,
+      "required_consumers" jsonb NOT NULL,
+      "binding_id" text,
+      "storage_epoch" integer,
+      "unpublished" boolean NOT NULL,
+      "settled" text,
+      "settled_at" timestamp,
+      "created_at" timestamp
+    )
+  `);
+  await client.query(`
+    CREATE TABLE "${schema}"."domain_event_delivery" (
+      "id" text PRIMARY KEY,
+      "event_id" text NOT NULL,
+      "consumer_id" text NOT NULL,
+      "status" text NOT NULL,
+      "attempts" integer NOT NULL,
+      "max_attempts" integer NOT NULL,
+      "lease_token" text,
+      "lease_expires_at" timestamp,
+      "next_attempt_at" timestamp,
+      "last_error" text,
+      "created_at" timestamp
+    )
+  `);
+  await client.query(`
+    CREATE UNIQUE INDEX "${schema}_domain_event_delivery_event_consumer_idx"
+    ON "${schema}"."domain_event_delivery" ("event_id", "consumer_id")
+  `);
+  await client.query(`
+    CREATE TABLE "${schema}"."domain_event_inbox" (
+      "consumer_id" text NOT NULL,
+      "event_id" text NOT NULL,
+      "created_at" timestamp,
+      PRIMARY KEY ("consumer_id", "event_id")
+    )
+  `);
+  await client.query(`
+    CREATE TABLE "${schema}"."attachments_table" (
+      "id" text PRIMARY KEY,
+      "attachment_id" text NOT NULL,
+      "token" text NOT NULL,
+      "name" text NOT NULL,
+      "table_id" text NOT NULL,
+      "record_id" text NOT NULL,
+      "field_id" text NOT NULL,
+      "created_time" timestamp,
+      "created_by" text NOT NULL
+    )
+  `);
+};
+
+const seedSourceData = async (client: Client) => {
+  await client.query(`CREATE SCHEMA "${baseId}"`);
+  await client.query(`CREATE SEQUENCE "public"."${legacyAutoNumberSequenceName}"`);
+  await client.query(`
+    CREATE TABLE "${baseId}"."${mainRelationName}" (
+      "id" text PRIMARY KEY,
+      "__auto_number" integer DEFAULT nextval('public."${legacyAutoNumberSequenceName}"'::regclass) NOT NULL,
+      "__created_time" timestamp,
+      "__last_modified_time" timestamp,
+      "name" text,
+      CONSTRAINT "sheet1_name_nonempty" CHECK (length("name") > 0)
+    )
+  `);
+  await client.query(
+    `CREATE INDEX "sheet1_name_idx" ON "${baseId}"."${mainRelationName}" ("name")`
+  );
+  await client.query(`
+    CREATE OR REPLACE FUNCTION "${baseId}"."touch_sheet1_modified_time"()
+    RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+    BEGIN
+      NEW."__last_modified_time" = COALESCE(NEW."__last_modified_time", now());
+      RETURN NEW;
+    END;
+    $$
+  `);
+  await client.query(`
+    CREATE TRIGGER "sheet1_touch_modified_time"
+    BEFORE INSERT OR UPDATE ON "${baseId}"."${mainRelationName}"
+    FOR EACH ROW
+    EXECUTE FUNCTION "${baseId}"."touch_sheet1_modified_time"()
+  `);
+  await client.query(
+    `INSERT INTO "${baseId}"."${mainRelationName}" ("id", "__created_time", "__last_modified_time", "name") VALUES
+      ('rec1', now(), now(), 'A'),
+      ('rec2', now(), now(), 'B')`
+  );
+  await client.query(`
+    CREATE TABLE "${baseId}"."${linkedRelationName}" (
+      "id" text PRIMARY KEY,
+      "__created_time" timestamp,
+      "title" text
+    )
+  `);
+  await client.query(
+    `INSERT INTO "${baseId}"."${linkedRelationName}" VALUES
+      ('rec-linked-1', now(), 'Linked A'),
+      ('rec-linked-2', now(), 'Linked B')`
+  );
+  await client.query(`
+    CREATE TABLE "${baseId}"."${junctionRelationName}" (
+      "id" text PRIMARY KEY,
+      "sheet1_id" text NOT NULL REFERENCES "${baseId}"."${mainRelationName}" ("id"),
+      "sheet2_id" text NOT NULL REFERENCES "${baseId}"."${linkedRelationName}" ("id")
+    )
+  `);
+  await client.query(
+    `INSERT INTO "${baseId}"."${junctionRelationName}" VALUES
+      ('lnk1', 'rec1', 'rec-linked-1'),
+      ('lnk2', 'rec2', 'rec-linked-2')`
+  );
+  await client.query(`CREATE SCHEMA "${otherBaseId}"`);
+  await client.query(`
+    CREATE TABLE "${otherBaseId}"."${mainRelationName}" (
+      "id" text PRIMARY KEY,
+      "__created_time" timestamp,
+      "name" text
+    )
+  `);
+  await client.query(
+    `INSERT INTO "${otherBaseId}"."${mainRelationName}" VALUES ('rec-other-1', now(), 'Other space row')`
+  );
+
+  await createSharedTables(client, 'public');
+  // The source is current; migration targets below intentionally begin on the legacy shape.
+  await client.query(`ALTER TABLE "public"."__undo_log" ADD COLUMN "old_tuple" jsonb`);
+  await client.query(
+    `INSERT INTO "public"."record_history" VALUES
+      ('rh1', $1, 'rec1', 'fld1', '{}'::jsonb, '{"name":"A"}'::jsonb, now(), 'usr'),
+      ('rh2', 'tblother', 'rec9', 'fld1', '{}'::jsonb, '{}'::jsonb, now(), 'usr')`,
+    [tableId]
+  );
+  await client.query(
+    `INSERT INTO "public"."table_trash" VALUES
+      ('tt1', $1, 'table', '{}'::jsonb, now(), 'usr'),
+      ('tt2', 'tblother', 'table', '{}'::jsonb, now(), 'usr')`,
+    [tableId]
+  );
+  await client.query(
+    `INSERT INTO "public"."record_trash"
+      ("id", "table_id", "record_id", "snapshot", "created_time", "created_by", "reason", "operation_id")
+     VALUES
+      ('rt1', $1, 'rec1', '{}'::jsonb, now(), 'usr', 'archived', 'opr1'),
+      ('rt2', 'tblother', 'rec9', '{}'::jsonb, now(), 'usr', 'deleted', 'opr2')`,
+    [tableId]
+  );
+  await client.query(
+    `INSERT INTO "public"."record_removal_tombstone" VALUES
+      ('rmt1', $1, 'rec1', 'restored', now()),
+      ('rmt2', 'tblother', 'rec9', 'purged', now())`,
+    [tableId]
+  );
+  await client.query(
+    `INSERT INTO "public"."computed_update_outbox"
+      ("id", "base_id", "worker_lane", "status", "created_at", "updated_at")
+     VALUES
+      ('cuo1', $1, 'staging', 'pending', now(), now()),
+      ('cuo2', $2, 'production', 'pending', now(), now())`,
+    [baseId, otherBaseId]
+  );
+  await client.query(
+    `INSERT INTO "public"."computed_update_dead_letter"
+      ("id", "base_id", "worker_lane", "status", "created_at", "updated_at", "trace_data", "failed_at")
+     VALUES
+      ('cudl1', $1, 'staging', 'failed', now(), now(), '{}'::jsonb, now()),
+      ('cudl2', $2, 'production', 'failed', now(), now(), '{}'::jsonb, now())`,
+    [baseId, otherBaseId]
+  );
+  await client.query(
+    `
+    INSERT INTO "public"."computed_update_dead_letter_seed"
+      ("task_id", "table_id", "record_id")
+    VALUES
+      ('cudl1', 'tbl-cross-base-membership', 'rec-archive-1'),
+      ('cudl1', 'tbl-cross-base-membership', 'rec-archive-2'),
+      ('cudl2', $1, 'rec-other-archive')
+  `,
+    [tableId]
+  );
+  await client.query(
+    `INSERT INTO "public"."computed_update_outbox_seed" VALUES
+      ('seed1', 'cuo1', $1, 'rec1'),
+      ('seed2', 'cuo2', $1, 'rec9')`,
+    [tableId]
+  );
+  await client.query(
+    `INSERT INTO "public"."computed_update_pause_scope"
+      ("id", "scope_type", "scope_id", "paused_at", "paused_by", "reason", "updated_at", "updated_by")
+     VALUES
+      ('pause-space', 'space', $1, now(), 'usr', $5, now(), 'usr'),
+      ('pause-base', 'base', $2, now(), 'usr', 'migration', now(), 'usr'),
+      ('pause-table', 'table', $3, now(), 'usr', 'migration', now(), 'usr'),
+      ('pause-other', 'space', $4, now(), 'usr', 'other', now(), 'usr')`,
+    [spaceId, baseId, tableId, otherSpaceId, `space-data-db-migration:${jobId}`]
+  );
+  await client.query(
+    `INSERT INTO "public"."__undo_log"
+      ("id", "batch_id", "operation", "table_name", "record_id", "old_row", "new_row", "old_tuple", "created_at")
+     VALUES
+      ('undo1', 'batch1', 'update', $1, 'rec1',
+       '{"name":"before","quantity":2,"optional":null}'::jsonb,
+       '{"name":"after","quantity":3,"tags":["migrated"]}'::jsonb, $3::jsonb, now()),
+      ('undo2', 'batch2', 'update', $2, 'rec9', '{}'::jsonb, '{}'::jsonb, $3::jsonb, now())`,
+    [
+      `${baseId}.${mainRelationName}`,
+      `${otherBaseId}.${mainRelationName}`,
+      JSON.stringify({ xmin: '123', ctid: '(0,1)', relationOid: '456', relationFilenode: '789' }),
+    ]
+  );
+
+  await client.query(
+    `INSERT INTO "public"."domain_event_outbox"
+      ("id", "base_id", "table_id", "message_name", "schema_version", "aggregate_id",
+       "payload", "payload_bytes", "catalog_generation", "required_consumers",
+       "unpublished", "settled", "created_at")
+     VALUES
+      ('deo-copy', $1, $3, 'table.record.created.v1', 1, 'rec1',
+       '{"recordId":"rec1"}'::jsonb, 18, 1, '["record.validation.v1"]'::jsonb,
+       true, null, now()),
+      ('deo-other', $2, 'tblother', 'table.record.created.v1', 1, 'rec9',
+       '{"recordId":"rec9"}'::jsonb, 18, 1, '["record.validation.v1"]'::jsonb,
+       true, null, now())`,
+    [baseId, otherBaseId, tableId]
+  );
+  await client.query(
+    `INSERT INTO "public"."domain_event_delivery"
+      ("id", "event_id", "consumer_id", "status", "attempts", "max_attempts", "created_at")
+     VALUES
+      ('dlv-copy', 'deo-copy', 'record.validation.v1', 'pending', 0, 12, now()),
+      ('dlv-other', 'deo-other', 'record.validation.v1', 'pending', 0, 12, now())`
+  );
+  await client.query(
+    `INSERT INTO "public"."domain_event_inbox" ("consumer_id", "event_id", "created_at")
+     VALUES
+      ('record.validation.v1', 'deo-copy', now()),
+      ('record.validation.v1', 'deo-other', now())`
+  );
+};
+
+const waitUntil = async (predicate: () => boolean, timeoutMs = 1000, pollMs = 10) => {
+  const startedAt = Date.now();
+  for (;;) {
+    if (predicate()) {
+      return;
+    }
+    if (Date.now() - startedAt >= timeoutMs) {
+      throw new Error('Timed out waiting for condition');
+    }
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+  }
+};
+
+describeWithPostgres('SpaceDataDbCopyService integration', () => {
+  let rootDir: string;
+  let dataDir: string;
+  let socketDir: string;
+  let port: number;
+
+  let usedEmbeddedPostgres = false;
+
+  beforeAll(async () => {
+    rootDir = await mkdtemp(path.join(tmpdir(), 'teable-byodb-copy-'));
+    if (hasEmbeddedPostgres) {
+      usedEmbeddedPostgres = true;
+      dataDir = path.join(rootDir, 'pgdata');
+      socketDir = path.join(rootDir, 'socket');
+      port = await getFreePort();
+      pgEndpoint = { userInfo: currentUser(), host: '127.0.0.1', port };
+      await mkdir(socketDir);
+      await execFile('initdb', ['-D', dataDir, '--no-instructions', '--auth=trust']);
+      await execFile('pg_ctl', [
+        '-D',
+        dataDir,
+        '-o',
+        `-F -p ${port} -k ${socketDir} -c listen_addresses=127.0.0.1`,
+        '-l',
+        path.join(rootDir, 'postgres.log'),
+        '-w',
+        'start',
+      ]);
+    } else {
+      pgEndpoint = endpointFromUrl(databaseUrl!);
+      port = pgEndpoint.port;
+    }
+
+    const admin = new Client({
+      connectionString: usedEmbeddedPostgres ? pgUrl(port, 'postgres') : adminUrlFrom(databaseUrl!),
+    });
+    await admin.connect();
+    try {
+      await admin.query(`CREATE DATABASE ${sourceDatabase}`);
+      await admin.query(`CREATE DATABASE ${targetDatabase}`);
+      await admin.query(`CREATE DATABASE ${targetMismatchDatabase}`);
+    } finally {
+      await admin.end();
+    }
+
+    const source = new Client({ connectionString: pgUrl(port, sourceDatabase) });
+    const target = new Client({ connectionString: pgUrl(port, targetDatabase) });
+    const targetMismatch = new Client({ connectionString: pgUrl(port, targetMismatchDatabase) });
+    await Promise.all([source.connect(), target.connect(), targetMismatch.connect()]);
+    try {
+      await seedSourceData(source);
+      await createSharedTables(target, targetSchema);
+      await createSharedTables(targetMismatch, targetMismatchSchema);
+    } finally {
+      await Promise.all([source.end(), target.end(), targetMismatch.end()]);
+    }
+  }, 30_000);
+
+  afterAll(async () => {
+    if (usedEmbeddedPostgres && dataDir) {
+      await execFile('pg_ctl', ['-D', dataDir, '-m', 'fast', '-w', 'stop']).catch(() => undefined);
+    } else if (databaseUrl) {
+      const admin = new Client({ connectionString: adminUrlFrom(databaseUrl) });
+      await admin.connect();
+      try {
+        await admin.query(
+          `SELECT pg_terminate_backend(pid)
+           FROM pg_stat_activity
+           WHERE datname = ANY($1::text[])
+             AND pid <> pg_backend_pid()`,
+          [[sourceDatabase, targetDatabase, targetMismatchDatabase]]
+        );
+        await admin.query(`DROP DATABASE IF EXISTS ${sourceDatabase}`);
+        await admin.query(`DROP DATABASE IF EXISTS ${targetDatabase}`);
+        await admin.query(`DROP DATABASE IF EXISTS ${targetMismatchDatabase}`);
+      } finally {
+        await admin.end().catch(() => undefined);
+      }
+    }
+    if (rootDir) {
+      await rm(rootDir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  const withRoutingMetadata = async (
+    run: (client: Client, transaction: ISearchIndexRoutingTransaction) => Promise<void>,
+    withConfig = true
+  ) => {
+    const client = new Client({ connectionString: pgUrl(port, sourceDatabase) });
+    await client.connect();
+    const previousMetaUrl = process.env.PRISMA_META_DATABASE_URL;
+    vi.stubEnv('PRISMA_META_DATABASE_URL', `${pgUrl(port, sourceDatabase)}?schema=pg_temp`);
+    try {
+      await client.query(`
+        CREATE TEMP TABLE base (id text PRIMARY KEY, space_id text);
+        CREATE TEMP TABLE table_meta (
+          id text PRIMARY KEY, base_id text, search_index jsonb, version integer
+        );
+        SET search_path TO pg_temp;
+        INSERT INTO base VALUES
+          ('bsemove', 'spcmove'), ('bsesame', 'spcmove'),
+          ('bserelated', 'spcrelated'), ('bseoutside', 'spcoutside');
+        INSERT INTO table_meta
+          SELECT 'tbl' || id, id, '{"definitionKey":"ready"}'::jsonb, 7 FROM base;
+      `);
+      if (withConfig) {
+        await client.query(`
+          CREATE TEMP TABLE table_query_search_vector_config (
+            table_id text, candidate_key text, status text, last_modified_time timestamptz,
+            reclaim_idx_scan_baseline bigint, reclaim_sampled_at timestamptz,
+            reclaim_disabled_at timestamptz, reclaim_drop_after timestamptz,
+            reclaim_drop_queued_at timestamptz,
+            PRIMARY KEY (table_id, candidate_key)
+          );
+          INSERT INTO table_query_search_vector_config
+            SELECT id, 'ready', 'ready', now() - interval '30 days', 42,
+                   now() - interval '30 days', NULL, NULL, NULL FROM table_meta;
+          INSERT INTO table_query_search_vector_config VALUES (
+            'tblbsemove', 'queued', 'disabled', now() - interval '30 days', 17,
+            now() - interval '30 days', now() - interval '7 days',
+            now() - interval '1 day', now()
+          );
+        `);
+      }
+      await run(client, {
+        $queryRawUnsafe: async <T>(query: string, ...values: unknown[]) =>
+          (await client.query(query, values)).rows as T,
+        $executeRawUnsafe: async (query: string, ...values: unknown[]) =>
+          (await client.query(query, values)).rowCount ?? 0,
+      });
+    } finally {
+      vi.stubEnv('PRISMA_META_DATABASE_URL', previousMetaUrl);
+      await client.end();
+    }
+  };
+
+  it.each([
+    { scope: { baseId: 'bsemove' }, affected: ['tblbsemove'] },
+    {
+      scope: { spaceIds: ['spcmove', 'spcrelated'] },
+      affected: ['tblbsemove', 'tblbsesame', 'tblbserelated'],
+    },
+  ])('fences pre-routing reclaim work only in $scope', async ({ scope, affected }) => {
+    await withRoutingMetadata(async (client, transaction) => {
+      const before = await client.query(
+        'SELECT xmin::text AS config_version, * FROM table_query_search_vector_config'
+      );
+      const startedAt = new Date();
+      await client.query('BEGIN');
+      await invalidateSearchIndexesForDataDbRouting(transaction, scope);
+      await client.query('COMMIT');
+
+      const configs = await client.query(
+        'SELECT xmin::text AS config_version, * FROM table_query_search_vector_config'
+      );
+      for (const config of configs.rows) {
+        const original = before.rows.find(
+          (row) => row.table_id === config.table_id && row.candidate_key === config.candidate_key
+        );
+        if (!affected.includes(config.table_id)) {
+          expect(config).toEqual(original);
+          continue;
+        }
+        expect(config.config_version).not.toBe(original.config_version);
+        expect(config.status).toBe(original.status);
+        expect(config.last_modified_time.getTime()).toBeGreaterThanOrEqual(startedAt.getTime());
+        expect(config).toMatchObject({
+          reclaim_idx_scan_baseline: null,
+          reclaim_sampled_at: null,
+          reclaim_disabled_at: null,
+          reclaim_drop_after: null,
+          reclaim_drop_queued_at: null,
+        });
+      }
+      const tables = await client.query('SELECT * FROM table_meta');
+      for (const table of tables.rows) {
+        expect(table).toMatchObject(
+          affected.includes(table.id)
+            ? { search_index: null, version: 8 }
+            : { search_index: { definitionKey: 'ready' }, version: 7 }
+        );
+      }
+
+      // A refresh can adopt the same copied definition without changing config xmin.
+      await client.query(
+        `UPDATE table_meta SET search_index = '{"definitionKey":"ready"}'
+         WHERE id = 'tblbsemove'`
+      );
+      const staleVersion = before.rows.find(
+        (row) => row.table_id === 'tblbsemove' && row.candidate_key === 'ready'
+      ).config_version;
+      const staleGrace = await client.query(
+        `UPDATE table_query_search_vector_config SET status = 'disabled'
+         WHERE table_id = 'tblbsemove' AND candidate_key = 'ready'
+           AND status = 'ready' AND xmin::text = $1 RETURNING table_id`,
+        [staleVersion]
+      );
+      expect(staleGrace.rowCount).toBe(0);
+      const queuedDrop = await client.query(
+        `SELECT table_id FROM table_query_search_vector_config
+         WHERE table_id = 'tblbsemove' AND candidate_key = 'queued'
+           AND status = 'disabled' AND reclaim_drop_after <= now()`
+      );
+      expect(queuedDrop.rows).toEqual([]);
+    });
+  });
+
+  it('rolls routing invalidation back atomically with the metadata transaction', async () => {
+    await withRoutingMetadata(async (client, transaction) => {
+      const readState = async () => ({
+        tables: (await client.query('SELECT * FROM table_meta ORDER BY id')).rows,
+        configs: (
+          await client.query(
+            `SELECT xmin::text, * FROM table_query_search_vector_config
+             ORDER BY table_id, candidate_key`
+          )
+        ).rows,
+      });
+      const before = await readState();
+      await client.query('BEGIN');
+      await invalidateSearchIndexesForDataDbRouting(transaction, { baseId: 'bsemove' });
+      await client.query('ROLLBACK');
+      expect(await readState()).toEqual(before);
+    });
+  });
+
+  it('unpublishes routing metadata without provisioning absent management tables', async () => {
+    await withRoutingMetadata(async (client, transaction) => {
+      await client.query('BEGIN');
+      await invalidateSearchIndexesForDataDbRouting(transaction, { baseId: 'bsemove' });
+      await client.query('COMMIT');
+      expect(
+        (await client.query(`SELECT * FROM table_meta WHERE id = 'tblbsemove'`)).rows[0]
+      ).toMatchObject({ search_index: null, version: 8 });
+      expect(
+        (await client.query(`SELECT to_regclass('table_query_search_vector_config') AS config`))
+          .rows[0].config
+      ).toBeNull();
+    }, false);
+  });
+
+  it('preserves serving and reclaim state on a same-database metadata-only base move', async () => {
+    await withRoutingMetadata(async (client, transaction) => {
+      const txClient = {
+        ...transaction,
+        base: {
+          update: async ({ where, data }: { where: { id: string }; data: { spaceId: string } }) =>
+            client.query('UPDATE base SET space_id = $1 WHERE id = $2', [data.spaceId, where.id]),
+        },
+        userBaseOrder: {
+          deleteMany: async () => ({ count: 0 }),
+        },
+      };
+      const prisma = {
+        txClient: () => txClient,
+        $tx: async (run: () => Promise<void>) => {
+          await client.query('BEGIN');
+          await run();
+          await client.query('COMMIT');
+        },
+      };
+      const baseService = new BaseService(
+        prisma as never,
+        {} as never,
+        {} as never,
+        {} as never,
+        {} as never,
+        {} as never,
+        {} as never,
+        {} as never,
+        {} as never,
+        {} as never,
+        {} as never,
+        {} as never,
+        {} as never,
+        {} as never,
+        {} as never,
+        {} as never
+      );
+      vi.spyOn(
+        baseService as unknown as {
+          computeMoveBaseCrossSpaceImpact(): Promise<{
+            affected: never[];
+            levels: Map<string, number>;
+          }>;
+        },
+        'computeMoveBaseCrossSpaceImpact'
+      ).mockResolvedValue({ affected: [], levels: new Map() });
+      const readState = async () => ({
+        tables: (await client.query('SELECT * FROM table_meta ORDER BY id')).rows,
+        configs: (
+          await client.query(
+            `SELECT xmin::text, * FROM table_query_search_vector_config
+             ORDER BY table_id, candidate_key`
+          )
+        ).rows,
+      });
+      const before = await readState();
+      await baseService.applyMetaMoveBase('bsemove', 'spcoutside');
+      expect(
+        (await client.query(`SELECT space_id FROM base WHERE id = 'bsemove'`)).rows[0].space_id
+      ).toBe('spcoutside');
+      expect(await readState()).toEqual(before);
+    });
+  });
+
+  it.each(['INSERT', 'UPDATE'] as const)(
+    'clears source tuple metadata during real PostgreSQL undo %s delta replay without changing old/new rows',
+    async (op) => {
+      const source = new Client({ connectionString: pgUrl(port, sourceDatabase) });
+      const target = new Client({ connectionString: pgUrl(port, targetDatabase) });
+      const targetClient = dataDbKnexClientFactory(pgUrl(port, targetDatabase));
+      const replayId = `undo-replay-${op.toLowerCase()}`;
+      const replaySchema = `${targetSchema}_replay_${op.toLowerCase()}`;
+      const migrationService = new SpaceDataDbMigrationService(
+        {} as never,
+        {} as never,
+        {} as never,
+        {} as never,
+        {} as never,
+        dataDbKnexClientFactory
+      );
+      // The existing test seam is private; only its TypeScript visibility needs widening here.
+      const replayService = migrationService as unknown as {
+        applyDeltaRowToTarget: (input: unknown) => Promise<boolean>;
+      };
+      const applyDeltaRowToTarget = replayService.applyDeltaRowToTarget;
+
+      await Promise.all([source.connect(), target.connect()]);
+      try {
+        await target.query(`
+          CREATE SCHEMA "${replaySchema}";
+          CREATE TABLE "${replaySchema}"."__undo_log" (
+            "id" text PRIMARY KEY,
+            "batch_id" text,
+            "operation" text,
+            "table_name" text,
+            "record_id" text,
+            "old_row" jsonb,
+            "new_row" jsonb,
+            "created_at" timestamp
+          )
+        `);
+        await undoTupleBaselineService.initialize(pgUrl(port, targetDatabase), replaySchema);
+        const sourceUndo = (
+          await source.query<{ payload: Record<string, unknown> }>(
+            `SELECT to_jsonb(u) AS payload FROM "public"."__undo_log" u WHERE "id" = 'undo1'`
+          )
+        ).rows[0].payload;
+        expect(sourceUndo).toMatchObject({
+          old_row: { name: 'before', quantity: 2, optional: null },
+          new_row: { name: 'after', quantity: 3, tags: ['migrated'] },
+          old_tuple: { xmin: '123', ctid: '(0,1)', relationOid: '456', relationFilenode: '789' },
+        });
+        if (op === 'UPDATE') {
+          await target.query(
+            `INSERT INTO "${replaySchema}"."__undo_log" ("id", "old_row", "new_row", "old_tuple")
+             VALUES ($1, '{"stale":"old"}'::jsonb, '{"stale":"new"}'::jsonb, $2::jsonb)`,
+            [replayId, JSON.stringify(sourceUndo.old_tuple)]
+          );
+        }
+
+        await expect(
+          applyDeltaRowToTarget.call(migrationService, {
+            targetClient,
+            row: {
+              seq: 1,
+              schemaName: 'public',
+              tableName: '__undo_log',
+              op,
+              pk: { id: replayId },
+              oldRow: op === 'UPDATE' ? { id: replayId } : null,
+              newRow: { ...sourceUndo, id: replayId },
+              capturedAt: '2026-11-01T00:00:00.000Z',
+            },
+            sourceSchema: 'public',
+            targetSchema: replaySchema,
+            columnMetadataCache: new Map(),
+          })
+        ).resolves.toBe(true);
+
+        expect(
+          (
+            await target.query(
+              `SELECT "old_row", "new_row", "old_tuple"
+               FROM "${replaySchema}"."__undo_log" WHERE "id" = $1`,
+              [replayId]
+            )
+          ).rows
+        ).toEqual([
+          {
+            old_row: { name: 'before', quantity: 2, optional: null },
+            new_row: { name: 'after', quantity: 3, tags: ['migrated'] },
+            old_tuple: null,
+          },
+        ]);
+      } finally {
+        await target.query(`DROP SCHEMA IF EXISTS "${replaySchema}" CASCADE`);
+        await Promise.all([source.end(), target.end(), targetClient.destroy()]);
+      }
+    }
+  );
+
+  it('copies base schemas and validates/switches the migration job through real PostgreSQL tools', async () => {
+    const sourceUrl = pgUrl(port, sourceDatabase);
+    const targetUrl = pgUrl(port, targetDatabase);
+    vi.stubEnv('PRISMA_DATABASE_URL', sourceUrl);
+    const service = new SpaceDataDbCopyService(new SpaceDataDbProcessRunnerService());
+    await mkdir(path.join(rootDir, 'work'));
+
+    const targetConnection = {
+      id: targetConnectionId,
+      status: 'migrating',
+      internalSchema: targetSchema,
+      encryptedUrl: encryptDataDbUrl(targetUrl),
+      displayHost: '127.0.0.1',
+      displayDatabase: targetDatabase,
+      urlFingerprint: 'dbfp_copy_target',
+    };
+    let currentBinding: {
+      mode: 'byodb';
+      state: 'ready';
+      dataDbConnection: typeof targetConnection;
+    } | null = null;
+    const txClient = {
+      $queryRawUnsafe: vi.fn().mockResolvedValue([]),
+      $executeRawUnsafe: vi.fn(),
+      dataDbConnection: {
+        update: vi.fn().mockImplementation(async (args) => {
+          if (args.where?.id === targetConnectionId) {
+            targetConnection.status = args.data.status ?? targetConnection.status;
+          }
+          return undefined;
+        }),
+      },
+      spaceDataDbBinding: {
+        upsert: vi.fn().mockImplementation(async (args) => {
+          if (args.where?.spaceId === spaceId) {
+            currentBinding = {
+              mode: 'byodb',
+              state: 'ready',
+              dataDbConnection: targetConnection,
+            };
+          }
+          return undefined;
+        }),
+      },
+      spaceDataDbMigrationJob: {
+        update: vi.fn().mockResolvedValue(undefined),
+      },
+    };
+    const migrationJob = {
+      id: jobId,
+      spaceId,
+      targetConnectionId,
+      targetInternalSchema: targetSchema,
+      switchOnCompletion: true,
+      createdBy: 'usr',
+      startedAt: new Date('2026-05-06T00:00:00.000Z'),
+      completedAt: null,
+      inventory: buildCopyInventory(),
+      copyStats: null,
+      validationStats: null,
+      targetConnection: {
+        encryptedUrl: encryptDataDbUrl(targetUrl),
+      },
+    };
+    const prismaService = {
+      $tx: vi.fn(async (fn: (client: typeof txClient) => Promise<unknown>) => fn(txClient)),
+      base: {
+        findUnique: vi.fn().mockImplementation(async (args) => {
+          if (args.where?.id === baseId) {
+            return { spaceId };
+          }
+          if (args.where?.id === otherBaseId) {
+            return { spaceId: otherSpaceId };
+          }
+          return null;
+        }),
+      },
+      spaceDataDbBinding: {
+        findUnique: vi
+          .fn()
+          .mockImplementation(async (args) =>
+            args.where?.spaceId === spaceId ? currentBinding : null
+          ),
+      },
+      spaceDataDbMigrationJob: {
+        findUnique: vi.fn().mockResolvedValue(migrationJob),
+        update: vi.fn().mockResolvedValue(undefined),
+      },
+    };
+    const baselineService = undoTupleBaselineService;
+    const dataDbClientManager = {
+      getDataDatabaseForSpace: vi.fn().mockImplementation((_, options) => {
+        if (options?.previewBinding) {
+          return Promise.resolve({
+            cacheKey: targetConnectionId,
+            connectionId: targetConnectionId,
+            internalSchema: targetSchema,
+            isMetaFallback: false,
+            url: targetUrl,
+          });
+        }
+        return Promise.resolve({
+          cacheKey: 'meta-fallback',
+          connectionId: undefined,
+          internalSchema: undefined,
+          isMetaFallback: true,
+          url: sourceUrl,
+        });
+      }),
+      invalidateConnection: vi.fn(),
+    };
+    const runtimeCache = new DataDbRuntimeCacheService();
+    const sourceFallbackKnex = createKnex({
+      client: 'pg',
+      connection: sourceUrl,
+      pool: { min: 0, max: 1 },
+    });
+    const routingManager = new DataDbClientManager(
+      prismaService as never,
+      {} as never,
+      sourceFallbackKnex,
+      runtimeCache,
+      new PgPoolRegistry((config) => new Pool(config))
+    );
+    const migrationService = new SpaceDataDbMigrationService(
+      prismaService as never,
+      {} as never,
+      baselineService as never,
+      dataDbClientManager as never,
+      service as never,
+      dataDbKnexClientFactory
+    );
+
+    try {
+      await expect(routingManager.dataKnexForBase(baseId)).resolves.toBe(sourceFallbackKnex);
+
+      const baseCopyStats = await migrationService.copyBaseSchemasForJob(jobId, {
+        workDir: path.join(rootDir, 'work'),
+        jobs: 2,
+        timeoutMs: 30_000,
+      });
+
+      expect(baseCopyStats).toMatchObject({
+        phase: 'base_schemas_completed',
+        baseSchemas: {
+          copiedRelationCount: 3,
+          totalCopiedRows: 6,
+          copiedRelations: expect.arrayContaining([
+            expect.objectContaining({
+              schemaName: baseId,
+              relationName: mainRelationName,
+              copiedRows: 2,
+              estimatedRows: 2,
+            }),
+            expect.objectContaining({
+              schemaName: baseId,
+              relationName: linkedRelationName,
+              copiedRows: 2,
+              estimatedRows: 2,
+            }),
+            expect.objectContaining({
+              schemaName: baseId,
+              relationName: junctionRelationName,
+              copiedRows: 2,
+              estimatedRows: 2,
+            }),
+          ]),
+        },
+      });
+      if (baseCopyStats.baseSchemas.strategy === 'pg_dump_stream_restore') {
+        expectProcessTiming(baseCopyStats.baseSchemas.stream!.source);
+        expectProcessTiming(baseCopyStats.baseSchemas.stream!.target);
+      } else if (baseCopyStats.baseSchemas.strategy === 'pgcopydb') {
+        expectProcessTiming(baseCopyStats.baseSchemas.pgcopydb!);
+      } else {
+        expectProcessTiming(baseCopyStats.baseSchemas.dump!);
+        expectProcessTiming(baseCopyStats.baseSchemas.restore!);
+      }
+
+      const sharedResults = await service.copySharedTables(
+        buildMigrationSharedTablePsqlCopyPlans({
+          sourceUrl,
+          targetUrl,
+          sourceSchema: 'public',
+          targetSchema,
+          spaceId,
+          baseIds: [baseId],
+          tableIds: [tableId, linkedTableId],
+        }),
+        { timeoutMs: 30_000 }
+      );
+
+      expect(sharedResults.map((result) => result.table)).toEqual(
+        expect.arrayContaining([
+          'record_history',
+          'table_trash',
+          'record_trash',
+          'record_removal_tombstone',
+          'computed_update_outbox',
+          'computed_update_dead_letter',
+          'computed_update_outbox_seed',
+          'computed_update_dead_letter_seed',
+          '__undo_log',
+          'domain_event_outbox',
+          'domain_event_delivery',
+          'domain_event_inbox',
+          'computed_reliability_issue',
+          'computed_reliability_scope',
+        ])
+      );
+      const historyCopy = sharedResults.find((result) => result.table === 'record_history');
+      expect(historyCopy).toBeDefined();
+      if (!historyCopy) {
+        throw new Error('Expected record_history copy result');
+      }
+      expectProcessTiming(historyCopy.source);
+      expectProcessTiming(historyCopy.target);
+
+      const target = new Client({ connectionString: targetUrl });
+      await target.connect();
+      try {
+        await expect(
+          queryCount(target, `SELECT COUNT(*) AS count FROM "${baseId}"."${mainRelationName}"`)
+        ).resolves.toBe(2);
+        await target.query(
+          `INSERT INTO "${baseId}"."${mainRelationName}" ("id", "__created_time", "__last_modified_time", "name")
+           VALUES ('rec3', now(), now(), 'C')`
+        );
+        await expect(
+          queryCount(
+            target,
+            `SELECT COUNT(*) AS count FROM "${baseId}"."${mainRelationName}" WHERE "__auto_number" = 3`
+          )
+        ).resolves.toBe(1);
+        await expect(
+          queryCount(
+            target,
+            `
+            SELECT COUNT(*) AS count
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = 'public'
+              AND c.relname = $1
+              AND c.relkind = 'S'
+          `,
+            [legacyAutoNumberSequenceName]
+          )
+        ).resolves.toBe(1);
+        await target.query(`DELETE FROM "${baseId}"."${mainRelationName}" WHERE "id" = 'rec3'`);
+        await expect(
+          queryCount(target, `SELECT COUNT(*) AS count FROM "${baseId}"."${linkedRelationName}"`)
+        ).resolves.toBe(2);
+        await expect(
+          queryCount(target, `SELECT COUNT(*) AS count FROM "${baseId}"."${junctionRelationName}"`)
+        ).resolves.toBe(2);
+        await expect(
+          queryCount(
+            target,
+            `
+            SELECT COUNT(*) AS count
+            FROM pg_indexes
+            WHERE schemaname = $1
+              AND indexname = 'sheet1_name_idx'
+          `,
+            [baseId]
+          )
+        ).resolves.toBe(1);
+        await expect(
+          queryCount(
+            target,
+            `
+            SELECT COUNT(*) AS count
+            FROM pg_constraint con
+            JOIN pg_class c ON c.oid = con.conrelid
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = $1
+              AND c.relname = $2
+              AND con.conname = 'sheet1_name_nonempty'
+          `,
+            [baseId, mainRelationName]
+          )
+        ).resolves.toBe(1);
+        await expect(
+          queryCount(
+            target,
+            `
+            SELECT COUNT(*) AS count
+            FROM pg_trigger tg
+            JOIN pg_class c ON c.oid = tg.tgrelid
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = $1
+              AND c.relname = $2
+              AND tg.tgname = 'sheet1_touch_modified_time'
+              AND NOT tg.tgisinternal
+          `,
+            [baseId, mainRelationName]
+          )
+        ).resolves.toBe(1);
+        await expect(
+          queryCount(
+            target,
+            `SELECT COUNT(*) AS count FROM "${targetSchema}"."record_history" WHERE "table_id" = $1`,
+            [tableId]
+          )
+        ).resolves.toBe(1);
+        await expect(
+          queryCount(
+            target,
+            `SELECT COUNT(*) AS count FROM "${targetSchema}"."record_history" WHERE "table_id" = 'tblother'`
+          )
+        ).resolves.toBe(0);
+        await expect(
+          queryCount(
+            target,
+            `SELECT COUNT(*) AS count FROM "${targetSchema}"."table_trash" WHERE "table_id" = $1`,
+            [tableId]
+          )
+        ).resolves.toBe(1);
+        await expect(
+          queryCount(
+            target,
+            `SELECT COUNT(*) AS count FROM "${targetSchema}"."table_trash" WHERE "table_id" = 'tblother'`
+          )
+        ).resolves.toBe(0);
+        await expect(
+          queryCount(
+            target,
+            `SELECT COUNT(*) AS count FROM "${targetSchema}"."record_trash" WHERE "table_id" = $1`,
+            [tableId]
+          )
+        ).resolves.toBe(1);
+        await expect(
+          queryCount(
+            target,
+            `SELECT COUNT(*) AS count FROM "${targetSchema}"."record_trash" WHERE "table_id" = 'tblother'`
+          )
+        ).resolves.toBe(0);
+        await expect(
+          queryCount(
+            target,
+            `SELECT COUNT(*) AS count FROM "${targetSchema}"."record_trash" WHERE "table_id" = $1 AND "reason" = 'archived' AND "operation_id" = 'opr1'`,
+            [tableId]
+          )
+        ).resolves.toBe(1);
+        await expect(
+          queryCount(
+            target,
+            `SELECT COUNT(*) AS count FROM "${targetSchema}"."record_removal_tombstone" WHERE "table_id" = $1 AND "type" = 'restored'`,
+            [tableId]
+          )
+        ).resolves.toBe(1);
+        await expect(
+          queryCount(
+            target,
+            `SELECT COUNT(*) AS count FROM "${targetSchema}"."record_removal_tombstone" WHERE "table_id" = 'tblother'`
+          )
+        ).resolves.toBe(0);
+        await expect(
+          queryCount(
+            target,
+            `SELECT COUNT(*) AS count FROM "${targetSchema}"."computed_update_outbox" WHERE "base_id" = $1 AND "worker_lane" = 'staging'`,
+            [baseId]
+          )
+        ).resolves.toBe(1);
+        await expect(
+          queryCount(
+            target,
+            `SELECT COUNT(*) AS count FROM "${targetSchema}"."computed_update_outbox" WHERE "base_id" = $1`,
+            [otherBaseId]
+          )
+        ).resolves.toBe(0);
+        await expect(
+          queryCount(
+            target,
+            `SELECT COUNT(*) AS count FROM "${targetSchema}"."computed_update_dead_letter" WHERE "base_id" = $1 AND "worker_lane" = 'staging'`,
+            [baseId]
+          )
+        ).resolves.toBe(1);
+        await expect(
+          queryCount(
+            target,
+            `SELECT COUNT(*) AS count FROM "${targetSchema}"."computed_update_dead_letter" WHERE "base_id" = $1`,
+            [otherBaseId]
+          )
+        ).resolves.toBe(0);
+        await expect(
+          queryCount(
+            target,
+            `SELECT COUNT(*) AS count FROM "${targetSchema}"."computed_update_dead_letter_seed" WHERE "task_id" = 'cudl1'`
+          )
+        ).resolves.toBe(2);
+        await expect(
+          queryCount(
+            target,
+            `SELECT COUNT(*) AS count FROM "${targetSchema}"."computed_update_dead_letter_seed" WHERE "task_id" = 'cudl2'`
+          )
+        ).resolves.toBe(0);
+        await expect(
+          queryCount(
+            target,
+            `SELECT COUNT(*) AS count FROM "${targetSchema}"."computed_update_outbox_seed"`
+          )
+        ).resolves.toBe(1);
+        await expect(
+          queryCount(
+            target,
+            `SELECT COUNT(*) AS count FROM "${targetSchema}"."computed_update_outbox_seed" WHERE "task_id" = 'cuo2'`
+          )
+        ).resolves.toBe(0);
+        // Space migration intentionally does not copy source pause scopes.
+        await expect(
+          queryCount(
+            target,
+            `SELECT COUNT(*) AS count FROM "${targetSchema}"."computed_update_pause_scope"`
+          )
+        ).resolves.toBe(0);
+        await expect(
+          queryCount(
+            target,
+            `SELECT COUNT(*) AS count FROM "${targetSchema}"."computed_update_pause_scope" WHERE "scope_id" = $1`,
+            [otherSpaceId]
+          )
+        ).resolves.toBe(0);
+        await expect(
+          queryCount(target, `SELECT COUNT(*) AS count FROM "${targetSchema}"."__undo_log"`)
+        ).resolves.toBe(1);
+        await expect(
+          queryCount(
+            target,
+            `SELECT COUNT(*) AS count FROM "${targetSchema}"."__undo_log" WHERE "table_name" = $1`,
+            [`${otherBaseId}.${mainRelationName}`]
+          )
+        ).resolves.toBe(0);
+        expect(
+          (
+            await target.query(
+              `SELECT "old_row", "new_row", "old_tuple"
+               FROM "${targetSchema}"."__undo_log" WHERE "id" = 'undo1'`
+            )
+          ).rows
+        ).toEqual([
+          {
+            old_row: { name: 'before', quantity: 2, optional: null },
+            new_row: { name: 'after', quantity: 3, tags: ['migrated'] },
+            old_tuple: null,
+          },
+        ]);
+        await expect(
+          queryCount(
+            target,
+            `SELECT COUNT(*) AS count FROM "${targetSchema}"."domain_event_outbox" WHERE "base_id" = $1`,
+            [baseId]
+          )
+        ).resolves.toBe(1);
+        await expect(
+          queryCount(
+            target,
+            `SELECT COUNT(*) AS count FROM "${targetSchema}"."domain_event_outbox" WHERE "base_id" = $1`,
+            [otherBaseId]
+          )
+        ).resolves.toBe(0);
+        await expect(
+          queryCount(
+            target,
+            `SELECT COUNT(*) AS count FROM "${targetSchema}"."domain_event_delivery" WHERE "event_id" = 'deo-copy'`
+          )
+        ).resolves.toBe(1);
+        await expect(
+          queryCount(
+            target,
+            `SELECT COUNT(*) AS count FROM "${targetSchema}"."domain_event_delivery" WHERE "event_id" = 'deo-other'`
+          )
+        ).resolves.toBe(0);
+        await expect(
+          queryCount(
+            target,
+            `SELECT COUNT(*) AS count FROM "${targetSchema}"."domain_event_inbox" WHERE "event_id" = 'deo-copy'`
+          )
+        ).resolves.toBe(1);
+        await expect(
+          queryCount(
+            target,
+            `SELECT COUNT(*) AS count FROM "${targetSchema}"."domain_event_inbox" WHERE "event_id" = 'deo-other'`
+          )
+        ).resolves.toBe(0);
+      } finally {
+        await target.end();
+      }
+
+      await expect(migrationService.validateAndSwitchJob(jobId)).resolves.toMatchObject({
+        state: 'succeeded',
+        validationStats: expect.objectContaining({
+          phase: 'validation_completed',
+          routeSmoke: expect.objectContaining({
+            ok: true,
+            connectionId: targetConnectionId,
+            internalSchema: targetSchema,
+          }),
+          baseSchemas: expect.arrayContaining([
+            expect.objectContaining({ object: `base:${baseId}.${mainRelationName}` }),
+            expect.objectContaining({ object: `base:${baseId}.${linkedRelationName}` }),
+            expect.objectContaining({ object: `base:${baseId}.${junctionRelationName}` }),
+          ]),
+        }),
+      });
+      expect(txClient.spaceDataDbBinding.upsert).toHaveBeenCalled();
+      expect(currentBinding).not.toBeNull();
+
+      await routingManager.withDataKnexConnectionForBase(baseId, async (knex, connection) => {
+        const route = await knex
+          .raw<{ rows: Array<{ database: string }> }>('SELECT current_database() AS "database"')
+          .connection(connection);
+        expect(route.rows[0]?.database).toBe(targetDatabase);
+        await knex
+          .raw(
+            `INSERT INTO "${baseId}"."${mainRelationName}" ("id", "__created_time", "name") VALUES (?, now(), ?)`,
+            ['rec-post-switch', 'BYODB target']
+          )
+          .connection(connection);
+      });
+      await routingManager.withDataKnexConnectionForBase(otherBaseId, (knex, connection) =>
+        knex
+          .raw(
+            `INSERT INTO "${otherBaseId}"."${mainRelationName}" ("id", "__created_time", "name") VALUES (?, now(), ?)`,
+            ['rec-other-post-switch', 'Default source']
+          )
+          .connection(connection)
+      );
+
+      const source = new Client({ connectionString: sourceUrl });
+      const targetAfterSwitch = new Client({ connectionString: targetUrl });
+      await Promise.all([source.connect(), targetAfterSwitch.connect()]);
+      try {
+        await expect(
+          queryCount(
+            source,
+            `SELECT COUNT(*) AS count FROM "${baseId}"."${mainRelationName}" WHERE "id" = 'rec-post-switch'`
+          )
+        ).resolves.toBe(0);
+        await expect(
+          queryCount(
+            targetAfterSwitch,
+            `SELECT COUNT(*) AS count FROM "${baseId}"."${mainRelationName}" WHERE "id" = 'rec-post-switch'`
+          )
+        ).resolves.toBe(1);
+        await expect(
+          queryCount(
+            source,
+            `SELECT COUNT(*) AS count FROM "${otherBaseId}"."${mainRelationName}" WHERE "id" = 'rec-other-post-switch'`
+          )
+        ).resolves.toBe(1);
+        await expect(
+          queryCount(
+            targetAfterSwitch,
+            `
+              SELECT COUNT(*) AS count
+              FROM information_schema.schemata
+              WHERE schema_name = $1
+            `,
+            [otherBaseId]
+          )
+        ).resolves.toBe(0);
+      } finally {
+        await Promise.all([source.end(), targetAfterSwitch.end()]);
+      }
+
+      expect(txClient.dataDbConnection.update).toHaveBeenCalledWith({
+        where: { id: targetConnectionId },
+        data: expect.objectContaining({ status: 'ready', lastError: null }),
+      });
+      expect(txClient.spaceDataDbBinding.upsert).toHaveBeenCalledWith({
+        where: { spaceId },
+        create: {
+          spaceId,
+          dataDbConnectionId: targetConnectionId,
+          mode: 'byodb',
+          state: 'ready',
+          createdBy: 'usr',
+        },
+        update: {
+          dataDbConnectionId: targetConnectionId,
+          mode: 'byodb',
+          state: 'ready',
+        },
+      });
+      expect(prismaService.spaceDataDbMigrationJob.update).toHaveBeenCalledWith({
+        where: { id: jobId },
+        data: expect.objectContaining({ state: 'succeeded', lastError: null }),
+      });
+      expect(dataDbClientManager.invalidateConnection).toHaveBeenCalledWith(targetConnectionId);
+    } finally {
+      await Promise.all([routingManager.onModuleDestroy(), sourceFallbackKnex.destroy()]);
+      vi.unstubAllEnvs();
+    }
+  }, 60_000);
+
+  it('fails validation and keeps source routing when target base rows drift before switch', async () => {
+    const sourceUrl = pgUrl(port, sourceDatabase);
+    const targetUrl = pgUrl(port, targetMismatchDatabase);
+    const service = new SpaceDataDbCopyService(new SpaceDataDbProcessRunnerService());
+    await mkdir(path.join(rootDir, 'work-mismatch'));
+
+    const targetConnection = {
+      id: mismatchTargetConnectionId,
+      status: 'migrating',
+      internalSchema: targetMismatchSchema,
+      encryptedUrl: encryptDataDbUrl(targetUrl),
+      displayHost: '127.0.0.1',
+      displayDatabase: targetMismatchDatabase,
+      urlFingerprint: 'dbfp_copy_target_mismatch',
+    };
+    let currentBinding: {
+      mode: 'byodb';
+      state: 'ready';
+      dataDbConnection: typeof targetConnection;
+    } | null = null;
+    const txClient = {
+      $queryRawUnsafe: vi.fn().mockResolvedValue([]),
+      $executeRawUnsafe: vi.fn(),
+      dataDbConnection: {
+        update: vi.fn().mockImplementation(async (args) => {
+          if (args.where?.id === mismatchTargetConnectionId) {
+            targetConnection.status = args.data.status ?? targetConnection.status;
+          }
+          return undefined;
+        }),
+      },
+      spaceDataDbBinding: {
+        upsert: vi.fn().mockImplementation(async (args) => {
+          if (args.where?.spaceId === spaceId) {
+            currentBinding = {
+              mode: 'byodb',
+              state: 'ready',
+              dataDbConnection: targetConnection,
+            };
+          }
+          return undefined;
+        }),
+      },
+      spaceDataDbMigrationJob: {
+        update: vi.fn().mockResolvedValue(undefined),
+      },
+    };
+    const migrationJob = {
+      id: mismatchJobId,
+      spaceId,
+      targetConnectionId: mismatchTargetConnectionId,
+      targetInternalSchema: targetMismatchSchema,
+      createdBy: 'usr',
+      startedAt: new Date('2026-05-06T00:00:00.000Z'),
+      completedAt: null,
+      inventory: buildCopyInventory(),
+      copyStats: null,
+      validationStats: null,
+      targetConnection: {
+        encryptedUrl: encryptDataDbUrl(targetUrl),
+      },
+    };
+    const prismaService = {
+      $tx: vi.fn(async (fn: (client: typeof txClient) => Promise<unknown>) => fn(txClient)),
+      base: {
+        findUnique: vi.fn().mockImplementation(async (args) => {
+          if (args.where?.id === baseId) {
+            return { spaceId };
+          }
+          return null;
+        }),
+      },
+      spaceDataDbBinding: {
+        findUnique: vi
+          .fn()
+          .mockImplementation(async (args) =>
+            args.where?.spaceId === spaceId ? currentBinding : null
+          ),
+      },
+      spaceDataDbMigrationJob: {
+        findUnique: vi.fn().mockResolvedValue(migrationJob),
+        update: vi.fn().mockResolvedValue(undefined),
+      },
+    };
+    const dataDbClientManager = {
+      getDataDatabaseForSpace: vi.fn().mockImplementation((_, options) => {
+        if (options?.previewBinding) {
+          return Promise.resolve({
+            cacheKey: mismatchTargetConnectionId,
+            connectionId: mismatchTargetConnectionId,
+            internalSchema: targetMismatchSchema,
+            isMetaFallback: false,
+            url: targetUrl,
+          });
+        }
+        return Promise.resolve({
+          cacheKey: 'meta-fallback',
+          connectionId: undefined,
+          internalSchema: undefined,
+          isMetaFallback: true,
+          url: sourceUrl,
+        });
+      }),
+      invalidateConnection: vi.fn(),
+    };
+    const sourceFallbackKnex = createKnex({
+      client: 'pg',
+      connection: sourceUrl,
+      pool: { min: 0, max: 1 },
+    });
+    const routingManager = new DataDbClientManager(
+      prismaService as never,
+      {} as never,
+      sourceFallbackKnex,
+      new DataDbRuntimeCacheService(),
+      new PgPoolRegistry((config) => new Pool(config))
+    );
+    const migrationService = new SpaceDataDbMigrationService(
+      prismaService as never,
+      {} as never,
+      undoTupleBaselineService,
+      dataDbClientManager as never,
+      service as never,
+      dataDbKnexClientFactory
+    );
+
+    try {
+      await migrationService.copyBaseSchemasForJob(mismatchJobId, {
+        workDir: path.join(rootDir, 'work-mismatch'),
+        jobs: 2,
+        timeoutMs: 30_000,
+      });
+      await service.copySharedTables(
+        buildMigrationSharedTablePsqlCopyPlans({
+          sourceUrl,
+          targetUrl,
+          sourceSchema: 'public',
+          targetSchema: targetMismatchSchema,
+          spaceId,
+          baseIds: [baseId],
+          tableIds: [tableId, linkedTableId],
+        }),
+        { timeoutMs: 30_000 }
+      );
+
+      const target = new Client({ connectionString: targetUrl });
+      await target.connect();
+      try {
+        await target.query(
+          `INSERT INTO "${baseId}"."${mainRelationName}" ("id", "__created_time", "name")
+           VALUES ('rec-target-extra', now(), 'Target extra row')`
+        );
+        await target.query(
+          `DELETE FROM "${targetMismatchSchema}"."computed_update_dead_letter_seed"
+           WHERE "task_id" = 'cudl1' AND "record_id" = 'rec-archive-2'`
+        );
+      } finally {
+        await target.end();
+      }
+
+      await expect(migrationService.validateAndSwitchJob(mismatchJobId)).rejects.toMatchObject({
+        data: expect.objectContaining({
+          errorCode: 'SPACE_DATA_DB_VALIDATION_MISMATCH',
+          mismatches: expect.arrayContaining([
+            expect.objectContaining({
+              object: `base:${baseId}.${mainRelationName}`,
+              sourceCount: 2,
+              targetCount: 3,
+            }),
+            expect.objectContaining({
+              object: 'shared:computed_update_dead_letter_seed',
+              sourceCount: 2,
+              targetCount: 1,
+            }),
+          ]),
+        }),
+      });
+      await expect(routingManager.dataKnexForBase(baseId)).resolves.toBe(sourceFallbackKnex);
+      expect(txClient.spaceDataDbBinding.upsert).not.toHaveBeenCalled();
+      expect(txClient.dataDbConnection.update).not.toHaveBeenCalled();
+      expect(dataDbClientManager.invalidateConnection).not.toHaveBeenCalled();
+      expect(prismaService.spaceDataDbMigrationJob.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: mismatchJobId },
+          data: expect.objectContaining({
+            state: 'failed',
+            lastError: 'Space data database migration validation failed',
+            validationStats: expect.objectContaining({ phase: 'validation_failed' }),
+          }),
+        })
+      );
+    } finally {
+      await Promise.all([routingManager.onModuleDestroy(), sourceFallbackKnex.destroy()]);
+    }
+  }, 60_000);
+
+  it('waits for active computed tasks in the source data DB before draining', async () => {
+    const sourceUrl = pgUrl(port, sourceDatabase);
+    const source = new Client({ connectionString: sourceUrl });
+    await source.connect();
+    try {
+      await source.query(
+        `INSERT INTO "public"."computed_update_outbox"
+          ("id", "base_id", "status", "locked_at", "created_at", "updated_at")
+         VALUES
+          ('cuo-active-drain', $1, 'processing', now(), now(), now()),
+          ('cuo-active-other-base', 'bseother', 'processing', now(), now(), now())
+         ON CONFLICT ("id") DO UPDATE
+         SET "base_id" = EXCLUDED."base_id",
+             "status" = EXCLUDED."status",
+             "locked_at" = EXCLUDED."locked_at",
+             "updated_at" = EXCLUDED."updated_at"`,
+        [baseId]
+      );
+    } finally {
+      await source.end();
+    }
+
+    const updates: unknown[] = [];
+    const migrationJob = {
+      id: jobId,
+      spaceId,
+      targetInternalSchema: targetSchema,
+      createdBy: 'usr',
+      startedAt: new Date('2026-05-06T00:00:00.000Z'),
+      inventory: {
+        baseIds: [baseId],
+        tableIds: [tableId],
+        dbTableNames: [`${baseId}.sheet1`],
+        physicalSchemas: [],
+      },
+      targetConnection: null,
+    };
+    const prismaService = {
+      spaceDataDbMigrationJob: {
+        findUnique: vi.fn().mockResolvedValue(migrationJob),
+        findFirst: vi.fn().mockResolvedValue({ id: jobId, spaceId, state: 'copying' }),
+        update: vi.fn().mockImplementation(async (args: unknown) => {
+          updates.push(args);
+          return undefined;
+        }),
+      },
+    };
+    const dataDbClientManager = {
+      getDataDatabaseForSpace: vi.fn().mockResolvedValue({
+        cacheKey: 'meta-fallback',
+        connectionId: undefined,
+        internalSchema: undefined,
+        isMetaFallback: true,
+        url: sourceUrl,
+      }),
+      invalidateConnection: vi.fn(),
+    };
+    const migrationService = new SpaceDataDbMigrationService(
+      prismaService as never,
+      {} as never,
+      { getLatestSchemaVersion: vi.fn().mockReturnValue(null) } as never,
+      dataDbClientManager as never,
+      new SpaceDataDbCopyService(new SpaceDataDbProcessRunnerService()) as never,
+      dataDbKnexClientFactory
+    );
+
+    const drain = migrationService.waitForSourceComputedDrainForJob(jobId, {
+      timeoutMs: 2000,
+      pollMs: 20,
+      processingLeaseMs: 120_000,
+    });
+
+    await waitUntil(() =>
+      updates.some((item) => {
+        const args = item as { data?: { copyStats?: { phase?: string; computedDrain?: unknown } } };
+        const computedDrain = args.data?.copyStats?.computedDrain as
+          | { activeCount?: number }
+          | undefined;
+        return (
+          args.data?.copyStats?.phase === 'computed_draining' && computedDrain?.activeCount === 1
+        );
+      })
+    );
+
+    const finisher = new Client({ connectionString: sourceUrl });
+    await finisher.connect();
+    try {
+      await finisher.query(
+        `UPDATE "public"."computed_update_outbox"
+         SET "status" = 'pending',
+             "locked_at" = NULL,
+             "updated_at" = now()
+         WHERE "id" = 'cuo-active-drain'`
+      );
+    } finally {
+      await finisher.end();
+    }
+
+    await expect(drain).resolves.toMatchObject({
+      activeCount: 0,
+      reclaimableCount: 0,
+    });
+    expect(prismaService.spaceDataDbMigrationJob.update).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        where: { id: jobId },
+        data: expect.objectContaining({
+          copyStats: expect.objectContaining({
+            phase: 'computed_drained',
+            computedDrain: expect.objectContaining({
+              activeCount: 0,
+              reclaimableCount: 0,
+            }),
+          }),
+        }),
+      })
+    );
+
+    const verifier = new Client({ connectionString: sourceUrl });
+    await verifier.connect();
+    try {
+      await expect(
+        queryCount(
+          verifier,
+          `SELECT COUNT(*) AS count
+           FROM "public"."computed_update_outbox"
+           WHERE "id" = 'cuo-active-other-base'
+             AND "base_id" = 'bseother'
+             AND "status" = 'processing'`
+        )
+      ).resolves.toBe(1);
+    } finally {
+      await verifier.end();
+    }
+  }, 30_000);
+});

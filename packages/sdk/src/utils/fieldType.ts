@@ -14,7 +14,11 @@ export const FIELD_TYPE_ORDER = [
   FieldType.Formula,
   FieldType.Link,
   FieldType.Rollup,
-  FieldType.AutoNumber,
+  FieldType.ConditionalRollup,
   FieldType.CreatedTime,
   FieldType.LastModifiedTime,
+  FieldType.CreatedBy,
+  FieldType.LastModifiedBy,
+  FieldType.AutoNumber,
+  FieldType.Button,
 ];

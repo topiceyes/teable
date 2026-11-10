@@ -1,5 +1,6 @@
 import { z } from '../../../zod';
-import { CellValueType } from '../constant';
+import { CellValueType, FieldType } from '../constant';
+import { longTextShowAsSchema } from '../derivate/long-text-option.schema';
 import { multiNumberShowAsSchema, numberShowAsSchema, singleNumberShowAsSchema } from './number';
 import { singleLineTextShowAsSchema } from './text';
 
@@ -8,7 +9,8 @@ export * from './text';
 
 export const getShowAsSchema = (
   cellValueType: CellValueType,
-  isMultipleCellValue: boolean | undefined
+  isMultipleCellValue: boolean | undefined,
+  fieldType?: FieldType
 ) => {
   if (cellValueType === CellValueType.Number) {
     return isMultipleCellValue
@@ -17,17 +19,21 @@ export const getShowAsSchema = (
   }
 
   if (cellValueType === CellValueType.String) {
+    if (fieldType === FieldType.LongText) {
+      return longTextShowAsSchema.optional();
+    }
     return singleLineTextShowAsSchema.optional();
   }
 
-  return z.undefined().openapi({
+  // `.optional()`: since zod 4.4 a `z.undefined()` object key must be present.
+  return z.undefined().optional().meta({
     description: 'Only string or number cell value type support show as',
   });
 };
 
 export const unionShowAsSchema = z
   .union([singleLineTextShowAsSchema.strict(), numberShowAsSchema])
-  .openapi({
+  .meta({
     description:
       'According to the results of expression parsing to determine different visual effects, where strings, numbers will provide customized "show as"',
   });

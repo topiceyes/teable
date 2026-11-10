@@ -4,9 +4,11 @@ import type { IDateTimeFieldOperator } from './operator';
 import {
   booleanFieldValidOperators,
   contains,
+  currentWeek,
   dateTimeFieldValidOperators,
   dateTimeFieldValidSubOperators,
   dateTimeFieldValidSubOperatorsByIsWithin,
+  dateRange,
   doesNotContain,
   getFilterOperatorMapping,
   getValidFilterOperators,
@@ -23,6 +25,7 @@ import {
   isWithIn,
   numberFieldValidOperators,
   textFieldValidOperators,
+  today,
 } from './operator';
 
 describe('Filter operators and sub-operators utility functions', () => {
@@ -82,6 +85,22 @@ describe('Filter operators and sub-operators utility functions', () => {
       expect(validOps).not.toContain(doesNotContain.value);
       expect(validOps).toContain(isAnyOf.value);
       expect(validOps).toContain(isNoneOf.value);
+
+      const multipleSelectField: any = {
+        cellValueType: CellValueType.String,
+        type: FieldType.SingleSelect,
+        isMultipleCellValue: true,
+      };
+
+      const validOpsWithMultiple = getValidFilterOperators(multipleSelectField);
+
+      // same with multiple select
+      expect(validOpsWithMultiple).not.toContain(contains.value);
+      expect(validOpsWithMultiple).not.toContain(doesNotContain.value);
+      expect(validOpsWithMultiple).toContain(hasAnyOf.value);
+      expect(validOpsWithMultiple).toContain(hasAllOf.value);
+      expect(validOpsWithMultiple).toContain(isExactly.value);
+      expect(validOpsWithMultiple).toContain(hasNoneOf.value);
     });
 
     it('should adjust operators based on the field type (MultipleSelect)', () => {
@@ -187,6 +206,9 @@ describe('Filter operators and sub-operators utility functions', () => {
 
       const subOperators = getValidFilterSubOperators(dateField.type, parentOp);
       expect(subOperators).toEqual(dateTimeFieldValidSubOperatorsByIsWithin);
+      expect(subOperators).toContain(today.value);
+      expect(subOperators).toContain(currentWeek.value);
+      expect(subOperators).not.toContain(dateRange.value);
     });
 
     it('should return valid date sub-operators when fieldType is Date and parent operator is NOT "isWithin"', () => {
@@ -198,7 +220,9 @@ describe('Filter operators and sub-operators utility functions', () => {
       const parentOp: IDateTimeFieldOperator = isAfter.value;
 
       const subOperators = getValidFilterSubOperators(dateField.type, parentOp);
-      expect(subOperators).toEqual(dateTimeFieldValidSubOperators);
+      expect(subOperators).toEqual(
+        dateTimeFieldValidSubOperators.filter((op) => op !== 'dateRange')
+      );
     });
   });
 });

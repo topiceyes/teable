@@ -1,32 +1,60 @@
-import { ViewType } from '@teable/core';
+import { ViewType, getUniqName } from '@teable/core';
 import { Plus } from '@teable/icons';
+import { useViews } from '@teable/sdk';
 import { useTablePermission } from '@teable/sdk/hooks';
-import { Button, Popover, PopoverContent, PopoverTrigger, cn } from '@teable/ui-lib/shadcn';
+import { Button, cn, Popover, PopoverContent, PopoverTrigger } from '@teable/ui-lib/shadcn';
+import { useTranslation } from 'next-i18next';
+import type { ReactNode } from 'react';
 import { useState } from 'react';
-import { GUIDE_CREATE_VIEW } from '@/components/Guide';
 import { VIEW_ICON_MAP } from '../../view/constant';
 import { useAddView } from '../../view/list/useAddView';
 
-const VIEW_INFO_LIST = [
-  {
-    name: 'Grid View',
-    type: ViewType.Grid,
-    Icon: VIEW_ICON_MAP[ViewType.Grid],
-  },
-  {
-    name: 'Form View',
-    type: ViewType.Form,
-    Icon: VIEW_ICON_MAP[ViewType.Form],
-  },
-];
+export interface IAddViewProps {
+  contentClassName?: string;
+  renderExtraSection?: (close: () => void) => ReactNode;
+}
 
-export const AddView: React.FC = () => {
+export const AddView: React.FC<IAddViewProps> = ({ contentClassName, renderExtraSection }) => {
   const addView = useAddView();
+  const views = useViews();
   const permission = useTablePermission();
   const [isOpen, setOpen] = useState(false);
+  const { t } = useTranslation('table');
+
+  const viewInfoList = [
+    {
+      name: t('view.category.table'),
+      type: ViewType.Grid,
+      Icon: VIEW_ICON_MAP[ViewType.Grid],
+    },
+    {
+      name: t('view.category.gallery'),
+      type: ViewType.Gallery,
+      Icon: VIEW_ICON_MAP[ViewType.Gallery],
+    },
+    {
+      name: t('view.category.kanban'),
+      type: ViewType.Kanban,
+      Icon: VIEW_ICON_MAP[ViewType.Kanban],
+    },
+    {
+      name: t('view.category.calendar'),
+      type: ViewType.Calendar,
+      Icon: VIEW_ICON_MAP[ViewType.Calendar],
+    },
+    {
+      name: t('view.category.form'),
+      type: ViewType.Form,
+      Icon: VIEW_ICON_MAP[ViewType.Form],
+    },
+  ];
 
   const onClick = (type: ViewType, name: string) => {
-    addView(type, name.split(' ')[0]);
+    const uniqueName = getUniqName(
+      name.split(' ')[0],
+      views?.map((view) => view.name)
+    );
+    addView(type, uniqueName);
     setOpen(false);
   };
 
@@ -37,16 +65,12 @@ export const AddView: React.FC = () => {
   return (
     <Popover open={isOpen} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
-        <Button
-          className={cn(GUIDE_CREATE_VIEW, 'size-7 shrink-0 px-0')}
-          size={'xs'}
-          variant={'outline'}
-        >
+        <Button className="shrink-0" size="icon-xs" variant="outline">
           <Plus className="size-4" />
         </Button>
       </PopoverTrigger>
-      <PopoverContent side="bottom" align="start" className="w-40 p-0">
-        {VIEW_INFO_LIST.map((item) => {
+      <PopoverContent side="bottom" align="start" className={cn('w-36 p-1', contentClassName)}>
+        {viewInfoList.map((item) => {
           const { name, type, Icon } = item;
           return (
             <Button
@@ -56,11 +80,12 @@ export const AddView: React.FC = () => {
               className="w-full justify-start font-normal"
               onClick={() => onClick(type, name)}
             >
-              <Icon className="pr-1 text-lg" />
+              <Icon className="pe-1 text-lg" />
               {name}
             </Button>
           );
         })}
+        {renderExtraSection?.(() => setOpen(false))}
       </PopoverContent>
     </Popover>
   );

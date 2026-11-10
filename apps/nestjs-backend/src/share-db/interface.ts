@@ -1,4 +1,4 @@
-import type { ISnapshotBase } from '@teable/core';
+import type { ISnapshotBase, IOtOperation } from '@teable/core';
 import type { CreateOp, DB, DeleteOp, EditOp } from 'sharedb';
 
 export interface IReadonlyAdapterService {
@@ -15,7 +15,20 @@ export interface IReadonlyAdapterService {
   ): Promise<{ ids: string[]; extra?: unknown }>;
 }
 
-export interface IAdapterService extends IReadonlyAdapterService {
+export interface IShareDbReadonlyAdapterService extends IReadonlyAdapterService {
+  // get current version and type of the document
+  getVersionAndType(
+    collectionId: string,
+    docId: string
+  ): Promise<{ version: number; type: RawOpType }>;
+
+  getVersionAndTypeMap(
+    collectionId: string,
+    docIds: string[]
+  ): Promise<Record<string, { version: number; type: RawOpType }>>;
+}
+
+export interface IAdapterService {
   create(collectionId: string, snapshot: unknown): Promise<void>;
 
   del(version: number, collectionId: string, docId: string): Promise<void>;
@@ -48,4 +61,13 @@ export interface IRawOpMap {
   [collection: string]: {
     [docId: string]: IRawOp;
   };
+}
+
+/**
+ * Per-subscription-type policy deciding whether an op can possibly affect a
+ * query subscription's results; see query-poll-skip.ts for the dispatch.
+ */
+export interface IQueryPollSkipStrategy {
+  /** return true when polling can be safely skipped for this op */
+  shouldSkip(collection: string, id: string, ops: IOtOperation[], query: unknown): boolean;
 }

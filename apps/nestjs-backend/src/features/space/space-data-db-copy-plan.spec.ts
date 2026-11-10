@@ -1,0 +1,706 @@
+import { describe, expect, it } from 'vitest';
+import {
+  assertPgDumpSupportsServer,
+  buildBaseSchemaDumpRestorePlan,
+  buildBaseSchemaDumpStreamRestorePlan,
+  buildBaseSchemaPgcopydbPlan,
+  buildBaseSchemaRestorePlan,
+  buildMigrationSharedTablePostgresFdwCopyPlans,
+  buildMigrationSharedTablePsqlCopyPlans,
+  buildMigrationSharedTableSqlCopyPlans,
+  buildServerVersionProbePlan,
+  buildSharedTablePostgresFdwCopyPlan,
+  buildSharedTableCopyPlan,
+  buildSharedTablePsqlCopyPlan,
+  parsePostgresMajorVersion,
+  postgresToolUrl,
+} from './space-data-db-copy-plan';
+
+const sourceHost = 'source.example';
+const targetHost = 'target.example';
+const sourceUrl = `postgresql://${sourceHost}/teable`;
+const targetUrl = `postgresql://${targetHost}/teable`;
+const workDir = '/tmp/sdmjxxx';
+const dumpFile = '/tmp/sdmjxxx/base-schemas.dump';
+const noOwnerArg = '--no-owner';
+const noAclArg = '--no-acl';
+const exitOnErrorArg = '--exit-on-error';
+const jobsArg = '--jobs';
+const pgcopydbWorkDirectory = '/tmp/sdmjxxx/pgcopydb-base-schemas';
+const pgcopydbFilterFile = '/tmp/sdmjxxx/pgcopydb-base-schemas.filter.ini';
+const psqlCommandArgs = ['--no-psqlrc', '--quiet', '--set', 'ON_ERROR_STOP=1', '--command'];
+const fdwSourceUrl =
+  'postgresql://source_user:source_secret@source.example:15432/teable_source?sslmode=require';
+
+describe('space data DB copy plan', () => {
+  it('strips Prisma-only query params from URLs passed to PostgreSQL client tools', () => {
+    expect(
+      postgresToolUrl(
+        'postgresql://teable:secret@127.0.0.1:5432/teable?schema=public&statement_cache_size=1&sslmode=require'
+      )
+    ).toBe('postgresql://teable:secret@127.0.0.1:5432/teable?sslmode=require');
+  });
+
+  it('percent-encodes user info for PostgreSQL client tool URIs', () => {
+    expect(
+      postgresToolUrl(
+        'postgresql://user.name:pa%ss$word@target.example:5432/teable?schema=public&sslmode=require'
+      )
+    ).toBe('postgresql://user.name:pa%25ss%24word@target.example:5432/teable?sslmode=require');
+  });
+
+  it('does not double-encode already encoded PostgreSQL client tool user info', () => {
+    expect(postgresToolUrl('postgresql://user%40name:pa%25ss%24word@target.example/teable')).toBe(
+      'postgresql://user%40name:pa%25ss%24word@target.example/teable'
+    );
+  });
+
+  it('maps the node-pg-only sslmode=no-verify to require for PostgreSQL client tools', () => {
+    expect(
+      postgresToolUrl(
+        'postgresql://teable:secret@127.0.0.1:5432/teable?sslmode=no-verify&connect_timeout=60'
+      )
+    ).toBe('postgresql://teable:secret@127.0.0.1:5432/teable?sslmode=require&connect_timeout=60');
+  });
+
+  it('keeps libpq-native sslmode values untouched for PostgreSQL client tools', () => {
+    expect(postgresToolUrl('postgresql://127.0.0.1:5432/teable?sslmode=disable')).toBe(
+      'postgresql://127.0.0.1:5432/teable?sslmode=disable'
+    );
+    expect(postgresToolUrl('postgresql://127.0.0.1:5432/teable?sslmode=verify-full')).toBe(
+      'postgresql://127.0.0.1:5432/teable?sslmode=verify-full'
+    );
+  });
+
+  it('builds pg_dump and pg_restore spawn-array plans for base schemas', () => {
+    const plan = buildBaseSchemaDumpRestorePlan({
+      sourceUrl,
+      targetUrl,
+      schemaNames: ['bsebbb', 'bseaaa'],
+      workDir,
+      jobs: 4,
+    });
+
+    expect(plan.dumpFile).toBe(dumpFile);
+    expect(plan.dump).toEqual({
+      command: 'pg_dump',
+      args: [
+        '--format=custom',
+        noOwnerArg,
+        noAclArg,
+        '--file',
+        dumpFile,
+        '--schema',
+        '"bseaaa"',
+        '--schema',
+        '"bsebbb"',
+        sourceUrl,
+      ],
+    });
+    expect(plan.restore).toEqual({
+      command: 'pg_restore',
+      args: [noOwnerArg, noAclArg, exitOnErrorArg, jobsArg, '4', '--dbname', targetUrl, dumpFile],
+    });
+  });
+
+  it('requires at least one schema for base schema copy planning', () => {
+    expect(() =>
+      buildBaseSchemaDumpRestorePlan({
+        sourceUrl,
+        targetUrl,
+        schemaNames: [],
+        workDir,
+      })
+    ).toThrow('At least one project schema');
+  });
+
+  it('builds streaming pg_dump to pg_restore plans for base schemas', () => {
+    const plan = buildBaseSchemaDumpStreamRestorePlan({
+      sourceUrl,
+      targetUrl,
+      schemaNames: ['bsebbb', 'bseaaa'],
+    });
+
+    expect(plan).toEqual({
+      label: 'base-schemas',
+      schemaNames: ['bseaaa', 'bsebbb'],
+      source: {
+        command: 'pg_dump',
+        args: [
+          '--format=custom',
+          noOwnerArg,
+          noAclArg,
+          '--schema',
+          '"bseaaa"',
+          '--schema',
+          '"bsebbb"',
+          sourceUrl,
+        ],
+      },
+      target: {
+        command: 'pg_restore',
+        args: [noOwnerArg, noAclArg, exitOnErrorArg, '--dbname', targetUrl],
+      },
+    });
+  });
+
+  it('passes exported PostgreSQL snapshots to pg_dump base schema plans', () => {
+    const dumpRestorePlan = buildBaseSchemaDumpRestorePlan({
+      sourceUrl,
+      targetUrl,
+      schemaNames: ['bsexxx'],
+      workDir,
+      snapshotId: '00000003-0000001A-1',
+    });
+    const streamPlan = buildBaseSchemaDumpStreamRestorePlan({
+      sourceUrl,
+      targetUrl,
+      schemaNames: ['bsexxx'],
+      snapshotId: '00000003-0000001A-1',
+    });
+
+    expect(dumpRestorePlan.dump.args).toContain('--snapshot');
+    expect(dumpRestorePlan.dump.args).toContain('00000003-0000001A-1');
+    expect(streamPlan.source.args).toContain('--snapshot');
+    expect(streamPlan.source.args).toContain('00000003-0000001A-1');
+  });
+
+  it('adds a pg_restore use-list file when base schema restore needs filtered TOC entries', () => {
+    const plan = buildBaseSchemaRestorePlan({
+      targetUrl,
+      dumpFile,
+      jobs: 2,
+      restoreListFile: '/tmp/sdmjxxx/base-schemas.restore.list',
+    });
+
+    expect(plan).toEqual({
+      command: 'pg_restore',
+      args: [
+        noOwnerArg,
+        noAclArg,
+        exitOnErrorArg,
+        jobsArg,
+        '2',
+        '--use-list',
+        '/tmp/sdmjxxx/base-schemas.restore.list',
+        '--dbname',
+        targetUrl,
+        dumpFile,
+      ],
+    });
+  });
+
+  it('uses PostgreSQL-tool-compatible URLs for physical copy commands', () => {
+    const plan = buildBaseSchemaDumpRestorePlan({
+      sourceUrl:
+        'postgresql://source.example/teable?schema=public&statement_cache_size=1&sslmode=require',
+      targetUrl:
+        'postgresql://target.example/teable?schema=public&connection_limit=10&sslmode=require',
+      schemaNames: ['bsexxx'],
+      workDir,
+    });
+
+    expect(plan.dump.args.at(-1)).toBe('postgresql://source.example/teable?sslmode=require');
+    expect(plan.dump.args).toContain('"bsexxx"');
+    expect(plan.restore.args).toContain('postgresql://target.example/teable?sslmode=require');
+  });
+
+  it('uses percent-encoded PostgreSQL-tool-compatible URLs in physical copy commands', () => {
+    const rawSourceUrl = 'postgresql://source_user:source%secret$@source.example/teable';
+    const rawTargetUrl = 'postgresql://target_user:target%secret$@target.example/teable';
+    const safeSourceUrl = 'postgresql://source_user:source%25secret%24@source.example/teable';
+    const safeTargetUrl = 'postgresql://target_user:target%25secret%24@target.example/teable';
+
+    const dumpRestorePlan = buildBaseSchemaDumpRestorePlan({
+      sourceUrl: rawSourceUrl,
+      targetUrl: rawTargetUrl,
+      schemaNames: ['bsexxx'],
+      workDir,
+    });
+    const streamPlan = buildBaseSchemaDumpStreamRestorePlan({
+      sourceUrl: rawSourceUrl,
+      targetUrl: rawTargetUrl,
+      schemaNames: ['bsexxx'],
+    });
+    const psqlPlan = buildSharedTablePsqlCopyPlan({
+      sourceUrl: rawSourceUrl,
+      targetUrl: rawTargetUrl,
+      sourceSchema: 'public',
+      targetSchema: 'teable_meta_target',
+      table: 'record_history',
+      columns: ['id'],
+      whereSql: `"table_id" = ANY(ARRAY['tblxxx']::text[])`,
+    });
+    const pgcopydbPlan = buildBaseSchemaPgcopydbPlan({
+      sourceUrl: rawSourceUrl,
+      targetUrl: rawTargetUrl,
+      schemaNames: ['bsexxx'],
+      workDir,
+    });
+
+    expect(dumpRestorePlan.dump.args.at(-1)).toBe(safeSourceUrl);
+    expect(dumpRestorePlan.restore.args).toContain(safeTargetUrl);
+    expect(streamPlan.source.args.at(-1)).toBe(safeSourceUrl);
+    expect(streamPlan.target.args).toContain(safeTargetUrl);
+    expect(psqlPlan.source.args.at(-1)).toBe(safeSourceUrl);
+    expect(psqlPlan.target.args.at(-1)).toBe(safeTargetUrl);
+    expect(pgcopydbPlan.copy.args).toContain(safeSourceUrl);
+    expect(pgcopydbPlan.copy.args).toContain(safeTargetUrl);
+  });
+
+  it('builds an explicitly selected pgcopydb plan with a schema include filter', () => {
+    const plan = buildBaseSchemaPgcopydbPlan({
+      sourceUrl,
+      targetUrl,
+      schemaNames: ['bsebbb', 'bseaaa'],
+      workDir,
+      jobs: 3,
+    });
+
+    expect(plan.workDirectory).toBe(pgcopydbWorkDirectory);
+    expect(plan.filterFile).toBe(pgcopydbFilterFile);
+    expect(plan.filterFileContent).toBe('[include-only-schema]\n"bseaaa"\n"bsebbb"\n');
+    expect(plan.copy).toEqual({
+      command: 'pgcopydb',
+      args: [
+        'copy',
+        'db',
+        '--source',
+        sourceUrl,
+        '--target',
+        targetUrl,
+        '--dir',
+        pgcopydbWorkDirectory,
+        '--table-jobs',
+        '3',
+        '--index-jobs',
+        '3',
+        '--restore-jobs',
+        '3',
+        noOwnerArg,
+        noAclArg,
+        '--skip-large-objects',
+        '--filters',
+        pgcopydbFilterFile,
+        '--fail-fast',
+        '--restart',
+      ],
+    });
+  });
+
+  it('uses PostgreSQL-tool-compatible URLs for pgcopydb commands', () => {
+    const plan = buildBaseSchemaPgcopydbPlan({
+      sourceUrl: 'postgresql://source.example/teable?schema=public',
+      targetUrl: 'postgresql://target.example/teable?statement_cache_size=1',
+      schemaNames: ['bsexxx'],
+      workDir,
+    });
+
+    expect(plan.copy.args).toContain('postgresql://source.example/teable');
+    expect(plan.copy.args).toContain('postgresql://target.example/teable');
+  });
+
+  it('builds streaming COPY plans with explicit columns and scoped filters', () => {
+    const plan = buildSharedTableCopyPlan({
+      sourceSchema: 'public',
+      targetSchema: 'teable_meta_target',
+      table: 'record_history',
+      columns: ['id', 'table_id', 'record_id', 'snapshot'],
+      whereSql: '"table_id" = ANY($1::text[])',
+      sourceBindings: [['tblxxx', 'tblyyy']],
+    });
+
+    expect(plan).toEqual({
+      sourceSql:
+        'COPY (SELECT "id", "table_id", "record_id", "snapshot" FROM "public"."record_history" WHERE "table_id" = ANY($1::text[])) TO STDOUT',
+      sourceBindings: [['tblxxx', 'tblyyy']],
+      targetSql:
+        'COPY "teable_meta_target"."record_history" ("id", "table_id", "record_id", "snapshot") FROM STDIN',
+    });
+  });
+
+  it('builds psql process plans for streaming shared-table COPY', () => {
+    const plan = buildSharedTablePsqlCopyPlan({
+      sourceUrl,
+      targetUrl,
+      sourceSchema: 'public',
+      targetSchema: 'teable_meta_target',
+      table: 'record_history',
+      columns: ['id', 'table_id', 'record_id'],
+      whereSql: `"table_id" = ANY(ARRAY['tblxxx']::text[])`,
+    });
+
+    expect(plan.table).toBe('record_history');
+    expect(plan.sourceSql).toBe(
+      `COPY (SELECT "id", "table_id", "record_id" FROM "public"."record_history" WHERE "table_id" = ANY(ARRAY['tblxxx']::text[])) TO STDOUT`
+    );
+    expect(plan.targetSql).toBe(
+      'COPY "teable_meta_target"."record_history" ("id", "table_id", "record_id") FROM STDIN'
+    );
+    expect(plan.source).toEqual({
+      command: 'psql',
+      args: [...psqlCommandArgs, plan.sourceSql, sourceUrl],
+    });
+    expect(plan.target).toEqual({
+      command: 'psql',
+      args: [...psqlCommandArgs, plan.targetSql, targetUrl],
+    });
+  });
+
+  it('wraps source shared-table COPY in the exported PostgreSQL snapshot transaction', () => {
+    const plan = buildSharedTablePsqlCopyPlan({
+      sourceUrl,
+      targetUrl,
+      sourceSchema: 'public',
+      targetSchema: 'teable_meta_target',
+      table: 'record_history',
+      columns: ['id', 'table_id', 'record_id'],
+      whereSql: `"table_id" = ANY(ARRAY['tblxxx']::text[])`,
+      snapshotId: '00000003-0000001A-1',
+    });
+
+    expect(plan.sourceSql).toContain('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;');
+    expect(plan.sourceSql).toContain("SET TRANSACTION SNAPSHOT '00000003-0000001A-1';");
+    expect(plan.sourceSql).toContain(
+      `COPY (SELECT "id", "table_id", "record_id" FROM "public"."record_history" WHERE "table_id" = ANY(ARRAY['tblxxx']::text[])) TO STDOUT;`
+    );
+    expect(plan.sourceSql).toContain('COMMIT;');
+    expect(plan.targetSql).toBe(
+      'COPY "teable_meta_target"."record_history" ("id", "table_id", "record_id") FROM STDIN'
+    );
+    expect(plan.target.args).toEqual([...psqlCommandArgs, plan.targetSql, targetUrl]);
+  });
+
+  it('uses PostgreSQL-tool-compatible URLs for psql shared-table copy commands', () => {
+    const plan = buildSharedTablePsqlCopyPlan({
+      sourceUrl: 'postgresql://source.example/teable?schema=public',
+      targetUrl: 'postgresql://target.example/teable?statement_cache_size=1',
+      sourceSchema: 'public',
+      targetSchema: 'teable_meta_target',
+      table: 'record_history',
+      columns: ['id'],
+      whereSql: `"table_id" = ANY(ARRAY['tblxxx']::text[])`,
+    });
+
+    expect(plan.source.args.at(-1)).toBe('postgresql://source.example/teable');
+    expect(plan.target.args.at(-1)).toBe('postgresql://target.example/teable');
+  });
+
+  it('builds postgres_fdw plans for explicitly selected shared-table DB-to-DB inserts', () => {
+    const plan = buildSharedTablePostgresFdwCopyPlan({
+      sourceUrl: fdwSourceUrl,
+      targetUrl,
+      sourceSchema: 'public',
+      targetSchema: 'teable_meta_target',
+      table: 'record_history',
+      columns: ['id', 'table_id', 'record_id'],
+      whereSql: `"table_id" = ANY(ARRAY['tblxxx']::text[])`,
+      fdwSchema: 'sdmjxxx_fdw_0',
+      serverName: 'sdmjxxx_srv_0',
+    });
+
+    expect(plan.table).toBe('record_history');
+    expect(plan.sql).toContain('CREATE EXTENSION IF NOT EXISTS postgres_fdw;');
+    expect(plan.sql).toContain('CREATE SCHEMA "sdmjxxx_fdw_0";');
+    expect(plan.sql).toContain(
+      `CREATE SERVER "sdmjxxx_srv_0" FOREIGN DATA WRAPPER postgres_fdw OPTIONS (host 'source.example', port '15432', dbname 'teable_source', sslmode 'require');`
+    );
+    expect(plan.sql).toContain(
+      `CREATE USER MAPPING FOR CURRENT_USER SERVER "sdmjxxx_srv_0" OPTIONS (user 'source_user', password 'source_secret');`
+    );
+    expect(plan.sql).toContain(
+      'IMPORT FOREIGN SCHEMA "public" LIMIT TO ("record_history") FROM SERVER "sdmjxxx_srv_0" INTO "sdmjxxx_fdw_0";'
+    );
+    expect(plan.sql).toContain(
+      `INSERT INTO "teable_meta_target"."record_history" ("id", "table_id", "record_id") SELECT "id", "table_id", "record_id" FROM "sdmjxxx_fdw_0"."record_history" WHERE "table_id" = ANY(ARRAY['tblxxx']::text[]);`
+    );
+    expect(plan.sql).toContain('DROP SERVER "sdmjxxx_srv_0" CASCADE;');
+    expect(plan.target).toEqual({
+      command: 'psql',
+      args: [...psqlCommandArgs, plan.sql, targetUrl],
+    });
+  });
+
+  it('maps sslmode=no-verify to require inside postgres_fdw server options', () => {
+    const plan = buildSharedTablePostgresFdwCopyPlan({
+      sourceUrl:
+        'postgresql://source_user:source_secret@source.example:15432/teable_source?sslmode=no-verify',
+      targetUrl,
+      sourceSchema: 'public',
+      targetSchema: 'teable_meta_target',
+      table: 'record_history',
+      columns: ['id'],
+      whereSql: `"table_id" = ANY(ARRAY['tblxxx']::text[])`,
+      fdwSchema: 'sdmjxxx_fdw_0',
+      serverName: 'sdmjxxx_srv_0',
+    });
+
+    expect(plan.sql).toContain(
+      `CREATE SERVER "sdmjxxx_srv_0" FOREIGN DATA WRAPPER postgres_fdw OPTIONS (host 'source.example', port '15432', dbname 'teable_source', sslmode 'require');`
+    );
+  });
+
+  it('builds scoped psql COPY plans for all migration shared tables', () => {
+    const plans = buildMigrationSharedTablePsqlCopyPlans({
+      sourceUrl,
+      targetUrl,
+      sourceSchema: 'public',
+      targetSchema: 'teable_meta_target',
+      spaceId: "spc'x",
+      baseIds: ['bsexxx', 'bseyyy'],
+      tableIds: ['tblxxx', 'tblyyy'],
+    });
+
+    expect(plans.map((plan) => plan.table)).toEqual([
+      'record_history',
+      'table_trash',
+      'record_trash',
+      'attachments_table',
+      'computed_update_outbox',
+      'computed_update_dead_letter',
+      'computed_update_dead_letter_seed',
+      'computed_update_run_history',
+      'computed_update_outbox_seed',
+      '__undo_log',
+      'record_removal_tombstone',
+      'domain_event_outbox',
+      'domain_event_delivery',
+      'domain_event_inbox',
+      'computed_reliability_issue',
+      'computed_reliability_scope',
+    ]);
+    expect(plans[0].sourceSql).toContain(`"table_id" = ANY(ARRAY['tblxxx', 'tblyyy']::text[])`);
+    expect(plans.find((plan) => plan.table === 'attachments_table')?.sourceSql).toContain(
+      `"table_id" = ANY(ARRAY['tblxxx', 'tblyyy']::text[])`
+    );
+    expect(plans.find((plan) => plan.table === 'computed_update_outbox')?.sourceSql).toContain(
+      `"base_id" = ANY(ARRAY['bsexxx', 'bseyyy']::text[])`
+    );
+    expect(plans.find((plan) => plan.table === 'computed_update_run_history')?.sourceSql).toContain(
+      `"base_id" = ANY(ARRAY['bsexxx', 'bseyyy']::text[])`
+    );
+    const outboxSeed = plans.find((plan) => plan.table === 'computed_update_outbox_seed');
+    expect(outboxSeed?.sourceSql).toContain(
+      'FROM "public"."computed_update_outbox" WHERE "base_id" = ANY'
+    );
+    const outboxSeedTargetResetSql = String(outboxSeed?.targetReset?.args.at(-2));
+    expect(outboxSeedTargetResetSql).toContain(
+      'FROM "teable_meta_target"."computed_update_outbox" WHERE "base_id" = ANY'
+    );
+    expect(outboxSeedTargetResetSql).not.toContain('FROM "public"."computed_update_outbox"');
+    expect(plans.find((plan) => plan.table === '__undo_log')?.sourceSql).toContain(
+      `split_part("table_name", '.', 1) = ANY(ARRAY['bsexxx', 'bseyyy']::text[])`
+    );
+    expect(plans.find((plan) => plan.table === 'record_removal_tombstone')?.sourceSql).toContain(
+      `"table_id" = ANY(ARRAY['tblxxx', 'tblyyy']::text[])`
+    );
+    expect(plans.find((plan) => plan.table === 'domain_event_outbox')?.sourceSql).toContain(
+      `"base_id" = ANY(ARRAY['bsexxx', 'bseyyy']::text[])`
+    );
+    const delivery = plans.find((plan) => plan.table === 'domain_event_delivery');
+    expect(delivery?.sourceSql).toContain(
+      `"event_id" IN (SELECT "id" FROM "public"."domain_event_outbox" WHERE`
+    );
+    const inbox = plans.find((plan) => plan.table === 'domain_event_inbox');
+    expect(inbox?.sourceSql).toContain(
+      `"event_id" IN (SELECT "id" FROM "public"."domain_event_outbox" WHERE`
+    );
+    const deliveryResetSql = String(delivery?.targetReset?.args.at(-2));
+    expect(deliveryResetSql).toContain(
+      'FROM "teable_meta_target"."domain_event_outbox" WHERE "base_id" = ANY'
+    );
+    expect(deliveryResetSql).not.toContain('FROM "public"."domain_event_outbox"');
+    const inboxResetSql = String(inbox?.targetReset?.args.at(-2));
+    expect(inboxResetSql).toContain(
+      'FROM "teable_meta_target"."domain_event_outbox" WHERE "base_id" = ANY'
+    );
+    expect(plans.every((plan) => plan.targetReset)).toBe(true);
+    expect(plans.every((plan) => plan.source.args.includes(sourceUrl))).toBe(true);
+    expect(plans.every((plan) => plan.target.args.includes(targetUrl))).toBe(true);
+  });
+
+  it('builds INSERT SELECT copy SQL from the same shared-table predicates as psql COPY', () => {
+    const plans = buildMigrationSharedTableSqlCopyPlans({
+      sourceSchema: 'public',
+      targetSchema: 'teable_meta_target',
+      spaceId: 'spcxxx',
+      baseIds: ['bsexxx'],
+      tableIds: ['tblxxx'],
+    });
+    const outbox = plans.find((plan) => plan.table === 'domain_event_outbox');
+    const delivery = plans.find((plan) => plan.table === 'domain_event_delivery');
+    expect(outbox?.copySql).toContain('INSERT INTO "teable_meta_target"."domain_event_outbox"');
+    expect(outbox?.copySql).toContain(
+      'FROM "public"."domain_event_outbox" WHERE "base_id" = ANY(ARRAY[\'bsexxx\']::text[])'
+    );
+    expect(delivery?.copySql).toContain(
+      'FROM "public"."domain_event_delivery" WHERE "event_id" IN (SELECT "id" FROM "public"."domain_event_outbox" WHERE "base_id" = ANY(ARRAY[\'bsexxx\']::text[]))'
+    );
+    expect(delivery?.resetSql).toContain(
+      'DELETE FROM "teable_meta_target"."domain_event_delivery" WHERE "event_id" IN (SELECT "id" FROM "teable_meta_target"."domain_event_outbox"'
+    );
+  });
+
+  it('uses deleted-table shared scope only for shared rows that reference table_id directly', () => {
+    const plans = buildMigrationSharedTablePsqlCopyPlans({
+      sourceUrl,
+      targetUrl,
+      sourceSchema: 'public',
+      targetSchema: 'teable_meta_target',
+      spaceId: 'spcxxx',
+      baseIds: ['bsexxx'],
+      tableIds: ['tblactive'],
+      sharedTableIds: ['tblactive', 'tbldeleted'],
+    });
+
+    expect(plans.find((plan) => plan.table === 'record_history')?.sourceSql).toContain(
+      `"table_id" = ANY(ARRAY['tblactive', 'tbldeleted']::text[])`
+    );
+    expect(plans.find((plan) => plan.table === 'table_trash')?.sourceSql).toContain(
+      `"table_id" = ANY(ARRAY['tblactive', 'tbldeleted']::text[])`
+    );
+    expect(plans.find((plan) => plan.table === 'record_trash')?.sourceSql).toContain(
+      `"table_id" = ANY(ARRAY['tblactive', 'tbldeleted']::text[])`
+    );
+    expect(plans.find((plan) => plan.table === 'record_removal_tombstone')?.sourceSql).toContain(
+      `"table_id" = ANY(ARRAY['tblactive', 'tbldeleted']::text[])`
+    );
+    expect(plans.find((plan) => plan.table === 'attachments_table')?.sourceSql).toContain(
+      `"table_id" = ANY(ARRAY['tblactive', 'tbldeleted']::text[])`
+    );
+    expect(plans.find((plan) => plan.table === 'computed_update_outbox_seed')?.sourceSql).toContain(
+      `"table_id" = ANY(ARRAY['tblactive']::text[])`
+    );
+    expect(plans.find((plan) => plan.table === 'computed_update_pause_scope')).toBeUndefined();
+  });
+
+  it('can still include pause scopes for base-move style copies', () => {
+    const plans = buildMigrationSharedTablePsqlCopyPlans({
+      sourceUrl,
+      targetUrl,
+      sourceSchema: 'public',
+      targetSchema: 'teable_meta_target',
+      spaceId: 'spcxxx',
+      baseIds: ['bsexxx'],
+      tableIds: ['tblactive'],
+      sharedTableIds: ['tblactive', 'tbldeleted'],
+      includePauseScopes: true,
+      includeSpacePauseScopes: false,
+    });
+
+    expect(plans.find((plan) => plan.table === 'computed_update_pause_scope')?.sourceSql).toContain(
+      `"scope_id" = ANY(ARRAY['tblactive', 'tbldeleted']::text[])`
+    );
+    expect(
+      plans.find((plan) => plan.table === 'computed_update_pause_scope')?.sourceSql
+    ).not.toContain(`"scope_type" = 'space'`);
+  });
+
+  it('builds scoped postgres_fdw plans for all migration shared tables', () => {
+    const plans = buildMigrationSharedTablePostgresFdwCopyPlans({
+      sourceUrl,
+      targetUrl,
+      sourceSchema: 'public',
+      targetSchema: 'teable_meta_target',
+      spaceId: "spc'x",
+      baseIds: ['bsexxx', 'bseyyy'],
+      tableIds: ['tblxxx', 'tblyyy'],
+      fdwSchemaPrefix: 'sdmjxxx_fdw',
+      serverNamePrefix: 'sdmjxxx_srv',
+    });
+
+    expect(plans.map((plan) => plan.table)).toEqual([
+      'record_history',
+      'table_trash',
+      'record_trash',
+      'attachments_table',
+      'computed_update_outbox',
+      'computed_update_dead_letter',
+      'computed_update_dead_letter_seed',
+      'computed_update_run_history',
+      'computed_update_outbox_seed',
+      '__undo_log',
+      'record_removal_tombstone',
+      'domain_event_outbox',
+      'domain_event_delivery',
+      'domain_event_inbox',
+      'computed_reliability_issue',
+      'computed_reliability_scope',
+    ]);
+    expect(plans[0].sql).toContain('FROM "sdmjxxx_fdw_0"."record_history"');
+    expect(plans[0].sql).toContain('DELETE FROM "teable_meta_target"."record_history"');
+    expect(plans.find((plan) => plan.table === 'computed_update_outbox')?.sql).toContain(
+      'FROM "sdmjxxx_fdw_4"."computed_update_outbox"'
+    );
+    const outboxSeedFdw = plans.find((plan) => plan.table === 'computed_update_outbox_seed');
+    expect(outboxSeedFdw?.sql).toContain(
+      'DELETE FROM "teable_meta_target"."computed_update_outbox_seed" WHERE "table_id" = ANY'
+    );
+    expect(outboxSeedFdw?.sql).toContain(
+      'FROM "teable_meta_target"."computed_update_outbox" WHERE "base_id" = ANY'
+    );
+    expect(plans.every((plan) => plan.target.args.includes(targetUrl))).toBe(true);
+  });
+
+  it('rejects unscoped shared table copy plans', () => {
+    expect(() =>
+      buildSharedTableCopyPlan({
+        sourceSchema: 'public',
+        targetSchema: 'teable_meta_target',
+        table: 'record_history',
+        columns: ['id'],
+        whereSql: '',
+      })
+    ).toThrow('requires a scoped WHERE clause');
+  });
+});
+
+describe('pg_dump server version compatibility (T6970)', () => {
+  const productionDumpVersion = 'pg_dump (PostgreSQL) 16.15 (Debian 16.15-1.pgdg12+2)';
+  const productionServerVersion = '18.4 (Debian 18.4-1.pgdg13+1)';
+
+  it('parses major versions from pg_dump and SHOW server_version text', () => {
+    expect(parsePostgresMajorVersion(productionDumpVersion)).toBe(16);
+    expect(parsePostgresMajorVersion(productionServerVersion)).toBe(18);
+    expect(parsePostgresMajorVersion('pg_dump (PostgreSQL) 18.6 (Homebrew)')).toBe(18);
+  });
+
+  it('T6970: pg_dump 16.15 cannot dump PostgreSQL 18.4', () => {
+    expect(() =>
+      assertPgDumpSupportsServer({
+        dumpVersionText: productionDumpVersion,
+        serverVersionText: productionServerVersion,
+      })
+    ).toThrow(/pg_dump version 16 cannot dump PostgreSQL 18/);
+  });
+
+  it('allows a newer pg_dump to dump equal or older servers', () => {
+    expect(
+      assertPgDumpSupportsServer({
+        dumpVersionText: 'pg_dump (PostgreSQL) 18.4 (Debian 18.4-1.pgdg13+1)',
+        serverVersionText: productionServerVersion,
+      })
+    ).toEqual({ dumpMajor: 18, serverMajor: 18 });
+    expect(
+      assertPgDumpSupportsServer({
+        dumpVersionText: 'pg_dump (PostgreSQL) 18.6 (Homebrew)',
+        serverVersionText: '16.11',
+      })
+    ).toEqual({ dumpMajor: 18, serverMajor: 16 });
+  });
+
+  it('builds a tuples-only SHOW server_version probe for the source URL', () => {
+    expect(buildServerVersionProbePlan(sourceUrl)).toEqual({
+      command: 'psql',
+      args: [
+        '--no-psqlrc',
+        '--quiet',
+        '--tuples-only',
+        '--no-align',
+        '--command',
+        'SHOW server_version',
+        sourceUrl,
+      ],
+    });
+  });
+});

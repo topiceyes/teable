@@ -2,23 +2,32 @@
   "$schema": "https://json.schemastore.org/tsconfig",
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "bundler",
     "emitDecoratorMetadata": true,
     "experimentalDecorators": true,
+    "isolatedModules": false,
     "target": "es2022",
-    "moduleResolution": "Node",
-    "declaration": true,
-    "declarationDir": "./dist",
-    "module": "CommonJS",
+    "lib": ["ES2024", "DOM", "DOM.Iterable", "ESNext.Disposable"],
     "noEmit": false,
     "sourceMap": true,
     "allowJs": false,
+    "rootDir": "../..",
     "outDir": "./dist",
     "paths": {
+      "@nestjs/common/interfaces": ["./node_modules/@nestjs/common/interfaces/index"],
       "@teable/core": ["../../packages/core/src"],
       "@teable/openapi": ["../../packages/openapi/src"],
       "@teable/db-main-prisma": ["../../packages/db-main-prisma/src"],
+      "@teable/db-data-prisma": ["../../packages/db-data-prisma/src"],
+      "@teable/v2-*": ["../../packages/v2/*/src/index"],
+      "@teable/v2-contract-http-implementation/handlers": [
+        "../../packages/v2/contract-http-implementation/src/handlers/index.ts"
+      ],
+      "@teable/formula": ["../../packages/formula/src"],
+      "@teable/i18n-keys": ["../../packages/i18n-keys/src"]
     },
-    "types": ["vitest/globals"],
+    "types": ["vitest/globals", "node"]
   },
-  "exclude": ["**/node_modules", "**/.*/", "dist"],
+  "exclude": ["**/node_modules", "**/.*/", "dist"]
 }

@@ -1,16 +1,19 @@
-import { useRef, useState } from 'react';
-import { useUnmount, useUpdateEffect } from 'react-use';
+import { useEffect, useRef, useState } from 'react';
+import { useUpdateEffect } from 'react-use';
 import type { IGridProps } from '../Grid';
 import type { ICellItem, ILinearRow, IMouseState, IPosition, IRange } from '../interface';
-import { RegionType, SelectionRegionType, SelectableType } from '../interface';
+import { RegionType, SelectionRegionType, SelectableType, RowControlType } from '../interface';
 import { CombinedSelection, type CoordinateManager } from '../managers';
 
 interface IUseSelectionProps {
   coordInstance: CoordinateManager;
   selectable?: SelectableType;
   isMultiSelectionEnable?: boolean;
+  isRowClickSelectionEnabled?: boolean;
   getLinearRow: (index: number) => ILinearRow;
   onSelectionChanged: IGridProps['onSelectionChanged'];
+  onRowControlClick?: IGridProps['onRowControlClick'];
+  onRowRangeSelected?: IGridProps['onRowRangeSelected'];
   setActiveCell: React.Dispatch<React.SetStateAction<ICellItem | null>>;
 }
 
@@ -19,16 +22,41 @@ export const useSelection = (props: IUseSelectionProps) => {
     coordInstance,
     selectable,
     isMultiSelectionEnable,
+    isRowClickSelectionEnabled = true,
     getLinearRow,
     setActiveCell,
     onSelectionChanged,
+    onRowControlClick,
+    onRowRangeSelected,
   } = props;
-  const onSelectionChangedRef = useRef<IGridProps['onSelectionChanged'] | undefined>();
+  const onSelectionChangedRef = useRef<IGridProps['onSelectionChanged'] | undefined>(undefined);
+  const onRowControlClickRef = useRef<IGridProps['onRowControlClick'] | undefined>(undefined);
+  const onRowRangeSelectedRef = useRef<IGridProps['onRowRangeSelected'] | undefined>(undefined);
   const prevSelectedRowIndex = useRef<number | null>(null);
   const [isSelecting, setSelecting] = useState(false);
   const [selection, setSelection] = useState(() => new CombinedSelection());
   const { pureRowCount } = coordInstance;
-  onSelectionChangedRef.current = onSelectionChanged;
+
+  useEffect(() => {
+    onSelectionChangedRef.current = onSelectionChanged;
+    return () => {
+      onSelectionChangedRef.current = undefined;
+    };
+  }, [onSelectionChanged]);
+
+  useEffect(() => {
+    onRowControlClickRef.current = onRowControlClick;
+    return () => {
+      onRowControlClickRef.current = undefined;
+    };
+  }, [onRowControlClick]);
+
+  useEffect(() => {
+    onRowRangeSelectedRef.current = onRowRangeSelected;
+    return () => {
+      onRowRangeSelectedRef.current = undefined;
+    };
+  }, [onRowRangeSelected]);
 
   const onSelectionStart = (
     event: React.MouseEvent<HTMLDivElement, MouseEvent>,
@@ -71,8 +99,15 @@ export const useSelection = (props: IUseSelectionProps) => {
     const { rowIndex, columnIndex } = mouseState;
 
     if (!isSelecting) return;
-    const { realIndex } = getLinearRow(rowIndex);
-    const newRange = [columnIndex, realIndex] as IRange;
+    // Dragging above/left of the grid makes getPosition return -Infinity for the
+    // row/column index. Left unguarded it poisons the selection range and feeds
+    // -Infinity offsets into coordinate/canvas math, freezing the browser. Snap
+    // only the non-finite case back to 0; the finite sentinels (-1 header, -2
+    // append column) flow through unchanged so existing behavior is untouched.
+    const safeRowIndex = Number.isFinite(rowIndex) ? rowIndex : 0;
+    const safeColumnIndex = Number.isFinite(columnIndex) ? columnIndex : 0;
+    const { realIndex } = getLinearRow(safeRowIndex);
+    const newRange = [safeColumnIndex, realIndex] as IRange;
     if (isCellSelection && !selection.equals([ranges[0], newRange])) {
       setSelection(selection.merge(newRange));
     }
@@ -118,6 +153,7 @@ export const useSelection = (props: IUseSelectionProps) => {
     };
 
     switch (type) {
+      case RegionType.ColumnIcon:
       case RegionType.ColumnHeader: {
         if (selectable !== SelectableType.All && selectable !== SelectableType.Column) return;
         const thresholdColIndex =
@@ -153,14 +189,44 @@ export const useSelection = (props: IUseSelectionProps) => {
           const newSelection = selection.expand(newRange);
           prevSelectedRowIndex.current = rowIndex;
           setActiveCell(null);
-          return setSelection(newSelection);
+          setSelection(newSelection);
+          onRowRangeSelectedRef.current?.([newRange]);
+          return;
         }
-        return pureSelectColumnOrRow(rowIndex, SelectionRegionType.Rows);
+
+        const isCurrentlySelected = selection.includes(range);
+        pureSelectColumnOrRow(rowIndex, SelectionRegionType.Rows);
+        onRowControlClickRef.current?.(rowIndex, RowControlType.Checkbox, !isCurrentlySelected);
+        return;
       }
       case RegionType.Cell: {
         const { realIndex: rowIndex } = getLinearRow(hoverRowIndex);
         if (selectable === SelectableType.Row) {
-          return pureSelectColumnOrRow(rowIndex, SelectionRegionType.Rows);
+          if (!isRowClickSelectionEnabled) return;
+          const range = [rowIndex, rowIndex] as IRange;
+          if (
+            isMultiSelectionEnable &&
+            isShiftKey &&
+            isPrevRowSelection &&
+            prevSelectedRowIndex.current != null
+          ) {
+            if (selection.includes(range)) return;
+            const prevIndex = prevSelectedRowIndex.current;
+            const newRange = [
+              Math.min(rowIndex, prevIndex),
+              Math.max(rowIndex, prevIndex),
+            ] as IRange;
+            const newSelection = selection.expand(newRange);
+            prevSelectedRowIndex.current = rowIndex;
+            setActiveCell(null);
+            setSelection(newSelection);
+            onRowRangeSelectedRef.current?.([newRange]);
+            return;
+          }
+          const isCurrentlySelected = selection.includes(range);
+          pureSelectColumnOrRow(rowIndex, SelectionRegionType.Rows);
+          onRowControlClickRef.current?.(rowIndex, RowControlType.Checkbox, !isCurrentlySelected);
+          return;
         }
         if (selectable === SelectableType.Column) {
           return pureSelectColumnOrRow(columnIndex, SelectionRegionType.Columns);
@@ -171,10 +237,13 @@ export const useSelection = (props: IUseSelectionProps) => {
         if (selectable !== SelectableType.All && selectable !== SelectableType.Row) return;
         const allRanges = [[0, pureRowCount - 1]] as IRange[];
         const isPrevAll = isPrevRowSelection && selection.equals(allRanges);
-        const newSelection = isPrevAll
-          ? selection.reset()
-          : selection.set(SelectionRegionType.Rows, allRanges);
-        return setSelection(newSelection);
+        if (isPrevAll) {
+          return setSelection(selection.reset());
+        }
+        const newSelection = selection.set(SelectionRegionType.Rows, allRanges);
+        setSelection(newSelection);
+        onRowRangeSelectedRef.current?.(allRanges);
+        return;
       }
     }
   };
@@ -185,7 +254,8 @@ export const useSelection = (props: IUseSelectionProps) => {
     // eslint-disable-next-line sonarjs/cognitive-complexity
   ) => {
     const { x, y, columnIndex, rowIndex: hoverRowIndex, type } = mouseState;
-    if ([RegionType.Blank, RegionType.ColumnStatistic].includes(type)) return;
+    if ([RegionType.Blank, RegionType.ColumnStatistic, RegionType.GroupStatistic].includes(type))
+      return;
     const {
       isCellSelection: isPrevCellSelection,
       isRowSelection: isPrevRowSelection,
@@ -236,10 +306,6 @@ export const useSelection = (props: IUseSelectionProps) => {
   useUpdateEffect(() => {
     onSelectionChangedRef.current?.(selection);
   }, [selection]);
-
-  useUnmount(() => {
-    onSelectionChangedRef.current = undefined;
-  });
 
   return {
     selection,

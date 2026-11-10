@@ -1,138 +1,82 @@
 import type { IDatetimeFormatting } from '@teable/core';
-import { DateFormattingPreset, TIME_ZONE_LIST, TimeFormatting } from '@teable/core';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-  Selector,
-} from '@teable/ui-lib';
+import { DateFormattingPreset, TimeFormatting } from '@teable/core';
+import { cn, Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@teable/ui-lib';
 import { Label } from '@teable/ui-lib/shadcn/ui/label';
 import dayjs from 'dayjs';
-import 'dayjs/plugin/utc';
+import timezone from 'dayjs/plugin/timezone';
+import utc from 'dayjs/plugin/utc';
+import { useTranslation } from 'next-i18next';
+import { useState } from 'react';
+import { Selector } from '@/components/Selector';
+import {
+  friendlyFormatStrings,
+  getFormatStringForLanguage,
+  localFormatStrings,
+} from './date-format-strings';
+import { TimeZoneFormatting } from './TimeZoneFormatting';
 
-const systemTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+dayjs.extend(utc);
+dayjs.extend(timezone);
 
-// | Locale | Date Format | Notes |
-// |--------|-------------|-------|
-// | en-US  | M/D/YYYY    | U.S. English (United States), e.g., 12/31/2023 |
-// | en-GB  | D/M/YYYY    | British English (United Kingdom, European), e.g., 31/12/2023 |
-// | fr-FR  | DD/MM/YYYY  | French (France), e.g., 31/12/2023 |
-// | de-DE  | DD.MM.YYYY  | German (Germany), e.g., 31.12.2023 |
-// | ja-JP  | YYYY/MM/DD  | Japanese (Japan), e.g., 2023/12/31 |
-// | zh-CN  | YYYY-MM-DD  | Simplified Chinese (China), e.g., 2023-12-31 |
-// | ko-KR  | YYYY.MM.DD  | Korean (South Korea), e.g., 2023.12.31 |
-const localFormatStrings: { [key: string]: string } = {
-  en: 'M/D/YYYY',
-  'en-GB': 'D/M/YYYY',
-  fr: 'DD/MM/YYYY',
-  de: 'DD.MM.YYYY',
-  ja: 'YYYY/MM/DD',
-  zh: 'YYYY-MM-DD',
-  ko: 'YYYY.MM.DD',
-};
-
-const friendlyFormatStrings: { [key: string]: string } = {
-  en: 'MMMM D, YYYY', // English
-  'en-GB': 'D MMMM YYYY', // English GB
-  zh: 'YYYY 年 M 月 D 日', // Chinese
-  fr: 'D MMM YYYY', // French
-  de: 'D. MMM YYYY', // German
-  es: 'D de MMM de YYYY', // Spanish
-  ru: 'D MMM YYYY г.', // Russian
-  ja: 'YYYY 年 M 月 D 日', // Japanese
-  ar: 'D MMMM, YYYY', // Arabic
-  pt: 'D de MMMM de YYYY', // Portuguese
-  hi: 'D MMMM, YYYY', // Hindi
-  bn: 'D MMMM, YYYY', // Bengali
-  jv: 'D MMMM YYYY', // Javanese
-  pa: 'D MMMM YYYY', // Punjabi
-  mr: 'D MMMM, YYYY', // Marathi
-  ta: 'D MMMM, YYYY', // Tamil
-};
-
-function getUTCOffset(timeZone: string): string {
-  const offsetMinutes = dayjs().tz(timeZone).utcOffset();
-
-  const offsetHours = offsetMinutes / 60;
-
-  return offsetHours >= 0 ? `UTC+${offsetHours}` : `UTC${offsetHours}`;
-}
-
-function getFormatStringForLanguage(language: string, preset: { [key: string]: string }) {
-  // If the full language tag is not found, fallback to the base language
-  const baseLanguage = language.split('-')[0];
-  return preset[language] || preset[baseLanguage] || preset['en']; // Default to 'en'
-}
+export const systemTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
 const useSelectInfoMap = (currentDateFormatting: string) => {
-  const friendlyDateFormatting = getFormatStringForLanguage(
-    navigator.language,
-    friendlyFormatStrings
-  );
-  const localDateFormatting = getFormatStringForLanguage(navigator.language, localFormatStrings);
+  const { t, i18n } = useTranslation(['common', 'table']);
+  const friendlyDateFormatting = getFormatStringForLanguage(i18n.language, friendlyFormatStrings);
+  const localDateFormatting = getFormatStringForLanguage(i18n.language, localFormatStrings);
 
-  const optionsWithExample = (text: string, formatting: string) => {
+  const optionsWithExample = (text: string, formatting: string, id = formatting) => {
     return {
+      id,
       text: `${text} (${dayjs().format(formatting)})`,
       value: formatting,
     };
   };
 
   const dateFormattingPresetOptions = [
-    optionsWithExample('Local', localDateFormatting),
-    optionsWithExample('Friendly', friendlyDateFormatting),
-    optionsWithExample('US', DateFormattingPreset.US),
-    optionsWithExample('European', DateFormattingPreset.European),
-    optionsWithExample('Asia', DateFormattingPreset.Asian),
+    optionsWithExample(t('table:field.default.date.local'), localDateFormatting, 'local'),
+    optionsWithExample(t('table:field.default.date.friendly'), friendlyDateFormatting, 'friendly'),
+    optionsWithExample(t('table:field.default.date.us'), DateFormattingPreset.US),
+    optionsWithExample(t('table:field.default.date.european'), DateFormattingPreset.European),
+    optionsWithExample(t('table:field.default.date.asia'), DateFormattingPreset.Asian),
+    optionsWithExample('ISO', DateFormattingPreset.ISO),
+    optionsWithExample(t('table:field.default.date.yearMonth'), DateFormattingPreset.YM),
+    optionsWithExample(t('table:field.default.date.monthDay'), DateFormattingPreset.MD),
+    optionsWithExample(t('table:field.default.date.year'), DateFormattingPreset.Y),
+    optionsWithExample(t('table:field.default.date.month'), DateFormattingPreset.M),
+    optionsWithExample(t('table:field.default.date.day'), DateFormattingPreset.D),
   ];
-  if (localDateFormatting !== DateFormattingPreset.ISO) {
-    dateFormattingPresetOptions.push(optionsWithExample('ISO', DateFormattingPreset.ISO));
-  }
-  dateFormattingPresetOptions.push(
-    optionsWithExample('Year/Month', DateFormattingPreset.YM),
-    optionsWithExample('Month/Day', DateFormattingPreset.MD),
-    optionsWithExample('Year', DateFormattingPreset.Y),
-    optionsWithExample('Month', DateFormattingPreset.M),
-    optionsWithExample('Day', DateFormattingPreset.D)
-  );
 
   // add [Custom] option if currentDateFormatting not in the list
-  if (!dateFormattingPresetOptions.find((option) => option.value === currentDateFormatting)) {
-    dateFormattingPresetOptions.push(optionsWithExample('Custom', currentDateFormatting));
+  if (!dateFormattingPresetOptions.some((option) => option.value === currentDateFormatting)) {
+    dateFormattingPresetOptions.push(
+      optionsWithExample(t('table:field.default.date.custom'), currentDateFormatting, 'custom')
+    );
   }
 
   const timeFormattingPresetOptions = [
     {
-      text: '24 hour',
+      text: t('table:field.default.date.24Hour'),
       value: TimeFormatting.Hour24,
     },
     {
-      text: '12 hour',
+      text: t('table:field.default.date.12Hour'),
       value: TimeFormatting.Hour12,
     },
     {
-      text: 'No display',
+      text: t('table:field.default.date.noDisplay'),
       value: TimeFormatting.None,
     },
   ];
 
   return {
     date: {
-      label: 'Date Formatting',
+      label: t('table:field.default.date.dateFormatting'),
       list: dateFormattingPresetOptions,
     },
     time: {
-      label: 'Time Formatting',
+      label: t('table:field.default.date.timeFormatting'),
       list: timeFormattingPresetOptions,
-    },
-    timeZone: {
-      label: 'Time Zone',
-      list: TIME_ZONE_LIST.map((item) => ({
-        text: `${item} (${systemTimeZone === item ? 'System' : getUTCOffset(item)})`,
-        value: item,
-      })),
     },
   };
 };
@@ -140,8 +84,9 @@ const useSelectInfoMap = (currentDateFormatting: string) => {
 interface IProps {
   formatting?: IDatetimeFormatting;
   onChange?: (formatting: IDatetimeFormatting) => void;
+  className?: string;
 }
-export const DatetimeFormatting: React.FC<IProps> = ({ formatting, onChange }) => {
+export const DatetimeFormatting: React.FC<IProps> = ({ formatting, onChange, className }) => {
   const localDateFormatting = getFormatStringForLanguage(navigator.language, localFormatStrings);
 
   formatting = {
@@ -150,7 +95,15 @@ export const DatetimeFormatting: React.FC<IProps> = ({ formatting, onChange }) =
     timeZone: formatting?.timeZone || systemTimeZone,
   };
 
-  const { date, time, timeZone } = useSelectInfoMap(formatting.date);
+  const currentDateFormatting = formatting.date;
+  const { date, time } = useSelectInfoMap(currentDateFormatting);
+  const [selectedPresetId, setSelectedPresetId] = useState<string>();
+  // Only the format is persisted. Reopening uses the first matching preset (Local
+  // when equivalent); within this editor, keep the explicitly selected identity.
+  const selectedDatePreset =
+    date.list.find(
+      (item) => item.id === selectedPresetId && item.value === currentDateFormatting
+    ) ?? date.list.find((item) => item.value === currentDateFormatting);
 
   const onFormattingChange = (value: string, typeKey: string) => {
     onChange?.({
@@ -160,23 +113,29 @@ export const DatetimeFormatting: React.FC<IProps> = ({ formatting, onChange }) =
   };
 
   return (
-    <div className="w-full space-y-2">
+    <div className={cn('w-full space-y-4 border-t pt-4', className)}>
       <div className="space-y-2">
-        <Label className="font-normal">{date.label}</Label>
+        <Label className="text-sm font-medium">{date.label}</Label>
         <Selector
           className="w-full"
-          candidates={date.list.map((item) => ({ id: item.value, name: item.text }))}
-          selectedId={formatting.date}
-          onChange={(value) => onFormattingChange(value, 'date')}
+          candidates={date.list.map((item) => ({ id: item.id, name: item.text }))}
+          selectedId={selectedDatePreset?.id}
+          onChange={(id) => {
+            const preset = date.list.find((item) => item.id === id);
+            if (preset) {
+              setSelectedPresetId(id);
+              onFormattingChange(preset.value, 'date');
+            }
+          }}
         />
       </div>
       <div className="space-y-2">
-        <Label className="font-normal">{time.label}</Label>
+        <Label className="text-sm font-medium">{time.label}</Label>
         <Select
           value={formatting.time}
           onValueChange={(value) => onFormattingChange(value, 'time')}
         >
-          <SelectTrigger className="h-8 w-full">
+          <SelectTrigger>
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -188,16 +147,10 @@ export const DatetimeFormatting: React.FC<IProps> = ({ formatting, onChange }) =
           </SelectContent>
         </Select>
       </div>
-      <div className="space-y-2">
-        <Label className="font-normal">{timeZone.label}</Label>
-        <Selector
-          className="w-full"
-          contentClassName="w-[333px]"
-          candidates={timeZone.list.map((item) => ({ id: item.value, name: item.text }))}
-          selectedId={formatting.timeZone}
-          onChange={(value) => onFormattingChange(value, 'timeZone')}
-        />
-      </div>
+      <TimeZoneFormatting
+        timeZone={formatting.timeZone}
+        onChange={(value) => onFormattingChange(value, 'timeZone')}
+      />
     </div>
   );
 };

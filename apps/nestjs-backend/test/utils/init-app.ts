@@ -1,12 +1,12 @@
 /* eslint-disable sonarjs/no-duplicate-string */
+import type { INestApplication } from '@nestjs/common';
 import { ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { WsAdapter } from '@nestjs/platform-ws';
 import type { TestingModule } from '@nestjs/testing';
 import { Test } from '@nestjs/testing';
 import type {
-  ICreateRecordsRo,
-  ICreateRecordsVo,
   IFieldRo,
   IFieldVo,
   IRecord,
@@ -14,17 +14,25 @@ import type {
   HttpError,
   IColumnMetaRo,
   IViewVo,
-  ICreateTableRo,
   IFilterRo,
   IViewRo,
+  IConditionalRollupFieldOptions,
+  IFilter,
+  IUpdateFieldRo,
+} from '@teable/core';
+import { FieldKeyType, FieldType } from '@teable/core';
+import type {
+  ICreateRecordsRo,
+  ICreateRecordsVo,
+  ICreateTableRo,
   IGetRecordsRo,
   IRecordsVo,
   IUpdateRecordRo,
   ITableFullVo,
-  IGetTableQuery,
-  ITableVo,
-} from '@teable/core';
-import { FieldKeyType } from '@teable/core';
+  ICreateSpaceRo,
+  ICreateBaseRo,
+  IRecordInsertOrderRo,
+} from '@teable/openapi';
 import {
   axios,
   signin as apiSignin,
@@ -35,49 +43,109 @@ import {
   getRecords as apiGetRecords,
   createRecords as apiCreateRecords,
   createField as apiCreateField,
+  updateField as apiUpdateField,
   deleteField as apiDeleteField,
   convertField as apiConvertField,
+  duplicateRecord as apiDuplicateRecord,
   getFields as apiGetFields,
   getField as apiGetField,
   getViewList as apiGetViewList,
-  getViewById as apiGetViewById,
+  getView as apiGetViewById,
   updateViewColumnMeta as apiSetViewColumnMeta,
   createTable as apiCreateTable,
-  deleteTableArbitrary as apiDeleteTableArbitrary,
+  deleteTable as apiDeleteTable,
+  permanentDeleteTable as apiPermanentDeleteTable,
   getTableById as apiGetTableById,
   updateViewFilter as apiSetViewFilter,
   createView as apiCreateView,
+  createSpace as apiCreateSpace,
+  deleteSpace as apiDeleteSpace,
+  createBase as apiCreateBase,
+  deleteBase as apiDeleteBase,
+  permanentDeleteSpace as apiPermanentDeleteSpace,
+  permanentDeleteBase as apiPermanentDeleteBase,
 } from '@teable/openapi';
 import { json, urlencoded } from 'express';
+import { ClsService } from 'nestjs-cls';
 import { AppModule } from '../../src/app.module';
+import type { IBaseConfig } from '../../src/configs/base.config';
+import { baseConfig } from '../../src/configs/base.config';
 import { SessionHandleService } from '../../src/features/auth/session/session-handle.service';
+import { BaseSqlExecutorModule } from '../../src/features/base-sql-executor/base-sql-executor.module';
+import { FieldOpenApiV2Service } from '../../src/features/field/open-api/field-open-api-v2.service';
 import { NextService } from '../../src/features/next/next.service';
+import { TableIndexService } from '../../src/features/table/table-index.service';
 import { GlobalExceptionFilter } from '../../src/filter/global-exception.filter';
+import type { IClsStore } from '../../src/types/cls';
+import {
+  nestModuleIdOptions,
+  nestRouteDiagnosticsOptions,
+} from '../../src/utils/nest-module-id-options';
+import { startQueueWorkers } from '../../src/utils/queue-processor';
 import { WsGateway } from '../../src/ws/ws.gateway';
 import { DevWsGateway } from '../../src/ws/ws.gateway.dev';
+import { acquireApp, getSharedBundle, setActiveAppOrigin } from './e2e-shared';
 import { TestingLogger } from './testing-logger';
 
 export async function initApp() {
-  const moduleFixture: TestingModule = await Test.createTestingModule({
-    imports: [AppModule],
-  })
+  // eslint-disable-next-line @typescript-eslint/no-misused-promises
+  if (globalThis.initApp) return await globalThis.initApp();
+
+  const cacheKey = 'community:default';
+  // Private apps (env customized by the spec, or sharing disabled) keep a real
+  // close() that also restores the axios singleton to this worker's shared app.
+  return acquireApp(
+    cacheKey,
+    bootApp,
+    ({ cookieInterceptorId }) => {
+      axios.interceptors.request.eject(cookieInterceptorId);
+      const shared = getSharedBundle(cacheKey);
+      if (shared) {
+        setActiveAppOrigin(shared.appUrl);
+        axios.defaults.baseURL = shared.appUrl + '/api';
+      }
+    },
+    axios
+  );
+}
+
+async function bootApp() {
+  if (process.env.E2E_PROBE) {
+    // eslint-disable-next-line no-console
+    console.log(`[e2e-probe] BOOT community pool=${process.env.VITEST_POOL_ID}`);
+  }
+  const moduleFixture: TestingModule = await Test.createTestingModule(
+    {
+      imports: [AppModule, BaseSqlExecutorModule],
+    },
+    nestModuleIdOptions
+  )
     .overrideProvider(NextService)
     .useValue({
       onModuleInit: () => {
         return;
       },
     })
+    // EventEmitterModule.forRoot() is evaluated once per process, so every test
+    // app would otherwise share one EventEmitter2: closing any app wipes all
+    // listeners (onApplicationShutdown -> removeAllListeners) and events double
+    // fire across coexisting apps. Give each app its own emitter.
+    .overrideProvider(EventEmitter2)
+    .useValue(new EventEmitter2({ wildcard: true, delimiter: '.' }))
     .overrideProvider(DevWsGateway)
     .useClass(WsGateway)
     .compile();
 
   const app = moduleFixture.createNestApplication({
     logger: new TestingLogger(),
+    ...nestRouteDiagnosticsOptions,
   });
 
   const configService = app.get(ConfigService);
 
-  app.useGlobalFilters(new GlobalExceptionFilter(configService));
+  app.useGlobalFilters(
+    new GlobalExceptionFilter(configService, app.get<ClsService<IClsStore>>(ClsService))
+  );
   app.useWebSocketAdapter(new WsAdapter(app));
   app.useGlobalPipes(
     new ValidationPipe({ transform: true, stopAtFirstError: true, forbidUnknownValues: false })
@@ -87,46 +155,112 @@ export async function initApp() {
   app.use(urlencoded({ limit: '50mb', extended: true }));
 
   await app.listen(0);
+  startQueueWorkers(app);
   const nestUrl = await app.getUrl();
-  const url = `http://127.0.0.1:${new URL(nestUrl).port}`;
+  const port = new URL(nestUrl).port;
+  const url = `http://127.0.0.1:${port}`;
 
-  console.log('url', url);
-
+  process.env.PORT = port;
+  // for attachment origin set
   process.env.STORAGE_PREFIX = url;
+  const baseConfigService = app.get(baseConfig.KEY) as IBaseConfig;
+  baseConfigService.storagePrefix = url;
+  baseConfigService.recordHistoryDisabled = true;
 
   axios.defaults.baseURL = url + '/api';
 
-  const cookie = (
-    await getCookie(globalThis.testConfig.email, globalThis.testConfig.password)
-  ).cookie.join(';');
+  const sessionHandleService = app.get<SessionHandleService>(SessionHandleService);
+  const createSession = async () => {
+    const cookie = (
+      await getCookie(globalThis.testConfig.email, globalThis.testConfig.password)
+    ).cookie.join(';');
+    const sessionID = await sessionHandleService.getSessionIdFromRequest({
+      headers: { cookie },
+      url: `${url}/socket`,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+    return { cookie, sessionID };
+  };
+  const session = await createSession();
 
-  axios.interceptors.request.use((config) => {
-    config.headers.Cookie = cookie;
+  const cookieInterceptorId = axios.interceptors.request.use((config) => {
+    // Never attach the shared session to signin/signup: passport regenerates the
+    // session attached to a login request, which would destroy this cookie's sid
+    // and break every later spec file sharing the app.
+    if (!/\/auth\/(?:signin|signup)\b/.test(config.url ?? '')) {
+      config.headers.Cookie = session.cookie;
+    }
     return config;
   });
 
   const now = new Date();
   const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   console.log(`> Test NODE_ENV is ${process.env.NODE_ENV}`);
+  console.log(`> Test V2_COMPUTED_UPDATE_MODE is ${process.env.V2_COMPUTED_UPDATE_MODE}`);
+  console.log(`> Test FORCE_V2_ALL is ${process.env.FORCE_V2_ALL}`);
   console.log(`> Test Ready on ${url}`);
   console.log('> Test System Time Zone:', timeZone);
   console.log('> Test Current System Time:', now.toString());
-  const sessionHandleService = app.get<SessionHandleService>(SessionHandleService);
-  return {
+
+  const bundle = {
     app,
     appUrl: url,
-    cookie,
-    sessionID: await sessionHandleService.getSessionIdFromRequest({
-      headers: { cookie },
-      url: `${url}/socket`,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    } as any),
+    ...session,
   };
+  const refreshSession = async () => {
+    const userId = await sessionHandleService.getUserId(session.sessionID);
+    if (userId !== globalThis.testConfig.userId) {
+      Object.assign(session, await createSession());
+    }
+    return session;
+  };
+  return { bundle, cookieInterceptorId, refreshSession };
+}
+
+/**
+ * Helper function to run code within CLS context with test user
+ */
+export async function runWithTestUser<T>(
+  clsService: ClsService<IClsStore>,
+  fn: () => Promise<T>,
+  userOverrides?: Partial<IClsStore['user']>
+): Promise<T> {
+  const testUser: IClsStore['user'] = {
+    id: globalThis.testConfig.userId,
+    name: globalThis.testConfig.userName,
+    email: globalThis.testConfig.email,
+    isAdmin: false,
+    ...userOverrides,
+  };
+
+  const clsStore: IClsStore = {
+    user: testUser,
+    origin: {
+      ip: '127.0.0.1',
+      byApi: false,
+      userAgent: 'test-agent',
+      referer: '',
+    },
+    tx: {},
+    permissions: [],
+  };
+
+  return clsService.runWith(clsStore, fn);
+}
+
+export async function getTableIndexService(app: INestApplication) {
+  return app.get<TableIndexService>(TableIndexService);
 }
 
 export async function createTable(baseId: string, tableVo: ICreateTableRo, expectStatus = 201) {
   try {
-    const res = await apiCreateTable(baseId, tableVo);
+    // The create-table API no longer generates 3 empty records by default (T6947).
+    // Inject them here (like the UI does) so existing specs keep their fixtures;
+    // pass an explicit `records: []` to create an empty table.
+    const res = await apiCreateTable(baseId, {
+      records: [{ fields: {} }, { fields: {} }, { fields: {} }],
+      ...tableVo,
+    });
     expect(res.status).toEqual(expectStatus);
 
     return res.data;
@@ -140,7 +274,7 @@ export async function createTable(baseId: string, tableVo: ICreateTableRo, expec
 
 export async function deleteTable(baseId: string, tableId: string, expectStatus?: number) {
   try {
-    const res = await apiDeleteTableArbitrary(baseId, tableId);
+    const res = await apiDeleteTable(baseId, tableId);
     expectStatus && expect(res.status).toEqual(expectStatus);
 
     return res.data;
@@ -152,17 +286,43 @@ export async function deleteTable(baseId: string, tableId: string, expectStatus?
   }
 }
 
+export async function permanentDeleteTable(baseId: string, tableId: string, expectStatus?: number) {
+  try {
+    const res = await apiPermanentDeleteTable(baseId, tableId);
+    expectStatus && expect(res.status).toEqual(expectStatus);
+
+    return res.data;
+  } catch (e: unknown) {
+    if (expectStatus && (e as HttpError).status !== expectStatus) {
+      throw e;
+    }
+    return {} as IRecord;
+  }
+}
+
+type IMakeOptional<T, K extends keyof T> = Omit<T, K> & Partial<Pick<T, K>>;
+
 export async function getTable(
   baseId: string,
   tableId: string,
-  query: IGetTableQuery = {}
-): Promise<ITableVo> {
-  const result = await apiGetTableById(baseId, tableId, query);
-
+  query?: { includeContent?: boolean; viewId?: string }
+): Promise<IMakeOptional<ITableFullVo, 'records' | 'views' | 'fields'>> {
+  const result = await apiGetTableById(baseId, tableId);
+  if (query?.includeContent) {
+    const { records } = await getRecords(tableId);
+    const fields = await getFields(tableId, query.viewId);
+    const views = await getViews(tableId);
+    return {
+      ...result.data,
+      records,
+      views,
+      fields,
+    };
+  }
   return result.data;
 }
 
-async function getCookie(email: string, password: string) {
+export async function getCookie(email: string, password: string) {
   const sessionResponse = await apiSignin({ email, password });
   return {
     access_token: sessionResponse.data,
@@ -248,9 +408,14 @@ export async function getRecord(
   expectStatus = 200
 ): Promise<IRecord> {
   try {
-    const res = await apiGetRecord(tableId, recordId, {
+    const query: { fieldKeyType: FieldKeyType; cellFormat?: CellFormat } = {
       fieldKeyType: FieldKeyType.Id,
-      cellFormat,
+    };
+    if (cellFormat) {
+      query.cellFormat = cellFormat;
+    }
+    const res = await apiGetRecord(tableId, recordId, {
+      ...query,
     });
 
     expect(res.status).toEqual(expectStatus);
@@ -267,6 +432,25 @@ export async function getRecords(tableId: string, query?: IGetRecordsRo): Promis
   const result = await apiGetRecords(tableId, query);
 
   return result.data;
+}
+
+export async function duplicateRecord(
+  tableId: string,
+  recordId: string,
+  order: IRecordInsertOrderRo,
+  expectStatus = 201
+) {
+  try {
+    const res = await apiDuplicateRecord(tableId, recordId, order);
+
+    expect(res.status).toEqual(expectStatus);
+    return res.data;
+  } catch (e: unknown) {
+    if ((e as HttpError).status !== expectStatus) {
+      throw e;
+    }
+    return {} as IRecord;
+  }
 }
 
 export async function createRecords(
@@ -292,13 +476,61 @@ export async function createRecords(
   }
 }
 
+const createDefaultConditionalRollupFilter = (fieldId: string): IFilter => ({
+  conjunction: 'and',
+  filterSet: [
+    {
+      fieldId,
+      operator: 'isNotEmpty',
+      value: null,
+    },
+  ],
+});
+
+const ensureConditionalRollupOptions = (fieldRo: IFieldRo): IFieldRo => {
+  if (fieldRo.type !== FieldType.ConditionalRollup) {
+    return fieldRo;
+  }
+
+  const options = fieldRo.options as Partial<IConditionalRollupFieldOptions> | undefined;
+  if (!options?.lookupFieldId) {
+    return fieldRo;
+  }
+
+  if (options.filter === null) {
+    return {
+      ...fieldRo,
+      options: {
+        ...options,
+        filter: undefined,
+      } as IConditionalRollupFieldOptions,
+    };
+  }
+
+  const hasFilterConditions =
+    options.filter?.filterSet != null && options.filter.filterSet.length > 0;
+
+  if (hasFilterConditions) {
+    return fieldRo;
+  }
+
+  return {
+    ...fieldRo,
+    options: {
+      ...options,
+      filter: createDefaultConditionalRollupFilter(options.lookupFieldId),
+    } as IConditionalRollupFieldOptions,
+  };
+};
+
 export async function createField(
   tableId: string,
   fieldRo: IFieldRo,
   expectStatus = 201
 ): Promise<IFieldVo> {
   try {
-    const res = await apiCreateField(tableId, fieldRo);
+    const normalizedField = ensureConditionalRollupOptions(fieldRo);
+    const res = await apiCreateField(tableId, normalizedField);
 
     expect(res.status).toEqual(expectStatus);
     return res.data;
@@ -308,6 +540,39 @@ export async function createField(
     }
     return {} as IFieldVo;
   }
+}
+
+export async function updateField(
+  tableId: string,
+  fieldId: string,
+  fieldRo: IUpdateFieldRo,
+  expectStatus = 200
+): Promise<IFieldVo> {
+  try {
+    const res = await apiUpdateField(tableId, fieldId, fieldRo);
+
+    expect(res.status).toEqual(expectStatus);
+    return res.data;
+  } catch (e: unknown) {
+    if ((e as HttpError).status !== expectStatus) {
+      throw e;
+    }
+    return {} as IFieldVo;
+  }
+}
+
+export async function createFields(
+  tableId: string,
+  fieldRos: IFieldRo[],
+  appInstance?: INestApplication
+): Promise<IFieldVo[]> {
+  const normalizedFields = fieldRos.map((field) => ensureConditionalRollupOptions(field));
+  const app = appInstance ?? (await initApp()).app;
+  const fieldOpenApiV2Service = app.get(FieldOpenApiV2Service);
+  const clsService = (fieldOpenApiV2Service as unknown as { cls: ClsService<IClsStore> }).cls;
+  return await runWithTestUser(clsService, async () =>
+    fieldOpenApiV2Service.createFields(tableId, normalizedFields)
+  );
 }
 
 export async function deleteField(tableId: string, fieldId: string) {
@@ -328,7 +593,8 @@ export async function convertField(
   expectStatus = 200
 ): Promise<IFieldVo> {
   try {
-    const res = await apiConvertField(tableId, fieldId, fieldRo);
+    const normalizedField = ensureConditionalRollupOptions(fieldRo);
+    const res = await apiConvertField(tableId, fieldId, normalizedField);
 
     expect(res.status).toEqual(expectStatus);
     return res.data;
@@ -343,9 +609,10 @@ export async function convertField(
 export async function getFields(
   tableId: string,
   viewId?: string,
-  filterHidden?: boolean
+  filterHidden?: boolean,
+  projection?: string[]
 ): Promise<IFieldVo[]> {
-  const result = await apiGetFields(tableId, { viewId, filterHidden });
+  const result = await apiGetFields(tableId, { viewId, filterHidden, projection });
 
   return result.data;
 }
@@ -394,5 +661,35 @@ export async function updateViewColumnMeta(
 
 export async function updateViewFilter(tableId: string, viewId: string, filterRo: IFilterRo) {
   const result = await apiSetViewFilter(tableId, viewId, filterRo);
+  return result.data;
+}
+
+export async function createSpace(spaceRo: ICreateSpaceRo) {
+  const result = await apiCreateSpace(spaceRo);
+  return result.data;
+}
+
+export async function deleteSpace(spaceId: string) {
+  const result = await apiDeleteSpace(spaceId);
+  return result.data;
+}
+
+export async function permanentDeleteSpace(spaceId: string) {
+  const result = await apiPermanentDeleteSpace(spaceId);
+  return result.data;
+}
+
+export async function createBase(baseRo: ICreateBaseRo) {
+  const result = await apiCreateBase(baseRo);
+  return result.data;
+}
+
+export async function deleteBase(baseId: string) {
+  const result = await apiDeleteBase(baseId);
+  return result.data;
+}
+
+export async function permanentDeleteBase(baseId: string) {
+  const result = await apiPermanentDeleteBase(baseId);
   return result.data;
 }

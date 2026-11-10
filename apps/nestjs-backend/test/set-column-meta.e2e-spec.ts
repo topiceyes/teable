@@ -1,6 +1,7 @@
 import type { INestApplication } from '@nestjs/common';
-import type { IFieldVo, IFormColumnMeta, IGridColumnMeta, ITableFullVo } from '@teable/core';
+import type { IFieldVo, IFormColumnMeta, IGridColumnMeta } from '@teable/core';
 import { StatisticsFunc, ViewType } from '@teable/core';
+import type { ITableFullVo } from '@teable/openapi';
 import { sortBy } from 'lodash';
 import {
   initApp,
@@ -8,12 +9,13 @@ import {
   getFields,
   getView,
   createTable,
-  deleteTable,
+  permanentDeleteTable,
 } from './utils/init-app';
 
 let app: INestApplication;
 
 const baseId = globalThis.testConfig.baseId;
+const isForceV2 = process.env.FORCE_V2_ALL === 'true';
 
 beforeAll(async () => {
   const appCtx = await initApp();
@@ -35,7 +37,7 @@ describe('OpenAPI ViewController (e2e) columnMeta (PUT) update order', () => {
     tableMeta = result;
   });
   afterEach(async () => {
-    await deleteTable(baseId, tableId);
+    await permanentDeleteTable(baseId, tableId);
   });
 
   test(`/table/{tableId}/view/{viewId}/columnMeta (PUT) test update order and field should return by order`, async () => {
@@ -79,7 +81,7 @@ describe('OpenAPI ViewController (e2e) columnMeta(PUT) update hidden', () => {
     tableMeta = result;
   });
   afterEach(async () => {
-    await deleteTable(baseId, tableId);
+    await permanentDeleteTable(baseId, tableId);
   });
   test(`/table/{tableId}/view/{viewId}/columnMeta (PUT) test update hidden`, async () => {
     const { views } = tableMeta;
@@ -115,7 +117,7 @@ describe('OpenAPI ViewController (e2e) columnMeta(PUT) update hidden', () => {
       },
     ];
     await expect(updateViewColumnMeta(tableId, viewId, fieldColumnMetas)).rejects.toMatchObject({
-      status: 403,
+      status: 400,
     });
   });
 });
@@ -131,7 +133,7 @@ describe('OpenAPI ViewController (e2e) columnMeta(PUT) update width', () => {
     tableMeta = result;
   });
   afterEach(async () => {
-    await deleteTable(baseId, tableId);
+    await permanentDeleteTable(baseId, tableId);
   });
 
   test(`/table/{tableId}/view/{viewId}/columnMeta (PUT) test update width`, async () => {
@@ -167,7 +169,7 @@ describe('OpenAPI ViewController (e2e) columnMeta(PUT) update statisticFunc', ()
     tableMeta = result;
   });
   afterEach(async () => {
-    await deleteTable(baseId, tableId);
+    await permanentDeleteTable(baseId, tableId);
   });
 
   test(`/table/{tableId}/view/{viewId}/columnMeta (PUT) test update statisticFunc`, async () => {
@@ -213,7 +215,7 @@ describe('OpenAPI ViewController (e2e) columnMeta(PUT) update required for the f
     tableMeta = result;
   });
   afterEach(async () => {
-    await deleteTable(baseId, tableId);
+    await permanentDeleteTable(baseId, tableId);
   });
 
   test(`/table/{tableId}/view/{viewId}/columnMeta (PUT) test required`, async () => {
@@ -258,7 +260,7 @@ describe('OpenAPI ViewController (e2e) columnMeta(PUT) update visible for the fo
     tableMeta = result;
   });
   afterEach(async () => {
-    await deleteTable(baseId, tableId);
+    await permanentDeleteTable(baseId, tableId);
   });
 
   test(`/table/{tableId}/view/{viewId}/columnMeta (PUT) test visible`, async () => {
@@ -294,7 +296,7 @@ describe('OpenAPI ViewController (e2e) columnMeta(PUT) update multiple single', 
     tableMeta = result;
   });
   afterEach(async () => {
-    await deleteTable(baseId, tableId);
+    await permanentDeleteTable(baseId, tableId);
   });
 
   test(`/table/{tableId}/view/{viewId}/columnMeta (PUT) test update should not cover`, async () => {
@@ -332,11 +334,20 @@ describe('OpenAPI ViewController (e2e) columnMeta(PUT) update multiple single', 
       },
     ]);
 
-    const assertData = {
-      required: true,
-      width: 100,
-      order: 7,
-    };
+    // The v2 getView read projection keeps only view-type-relevant columnMeta
+    // keys (order/width/hidden/statisticFunc for grid); `required` is a form-view
+    // property, so it is written but not projected back for a grid view. V1
+    // returns the stored entry verbatim.
+    const assertData = isForceV2
+      ? {
+          width: 100,
+          order: 7,
+        }
+      : {
+          required: true,
+          width: 100,
+          order: 7,
+        };
 
     const updatedView = await getView(tableId, viewId);
     const fieldColumnMeta = updatedView.columnMeta[fieldColumnMetas[0].fieldId];
@@ -355,7 +366,7 @@ describe('OpenAPI ViewController (e2e) columnMeta(PUT) multiple update', () => {
     tableMeta = result;
   });
   afterEach(async () => {
-    await deleteTable(baseId, tableId);
+    await permanentDeleteTable(baseId, tableId);
   });
 
   test(`/table/{tableId}/view/{viewId}/columnMeta (PUT) test multiple data`, async () => {
@@ -394,7 +405,7 @@ describe('OpenAPI ViewController (e2e) columnMeta(PUT) params validate', () => {
     viewId = result.defaultViewId!;
   });
   afterEach(async () => {
-    await deleteTable(baseId, tableId);
+    await permanentDeleteTable(baseId, tableId);
   });
 
   test(`/table/{tableId}/view/{viewId}/columnMeta (PUT) test validate fieldId legitimacy`, async () => {

@@ -1,32 +1,143 @@
 /* eslint-disable @typescript-eslint/naming-convention */
 import type {
+  IFieldRo,
+  IConvertFieldRo,
+  NotificationSeverityEnum,
+  NotificationStatesEnum,
+  IGetFieldsQuery,
+} from '@teable/core';
+import type {
+  IListBaseCollaboratorUserRo,
+  IShareViewRowCountRo,
+  IShareViewAggregationsRo,
   IAggregationRo,
   IGroupPointsRo,
-  IFieldRo,
   IQueryBaseRo,
-  IConvertFieldRo,
-  NotificationStatesEnum,
-} from '@teable/core';
-import type { IShareViewRowCountRo, IShareViewAggregationsRo } from '@teable/openapi';
+  ListSpaceCollaboratorRo,
+  ListSpaceUniqueCollaboratorRo,
+  IGetRecordsRo,
+  ListBaseCollaboratorRo,
+  ICalendarDailyCollectionRo,
+  IGetDepartmentListRo,
+  IGetDepartmentUserRo,
+  IShareViewCollaboratorsRo,
+  ICreateRecordsRo,
+  IUpdateRecordRo,
+  IUpdateRecordsRo,
+  IRecordInsertOrderRo,
+  IUpdateRecordOrdersRo,
+  IRecordGetCollaboratorsRo,
+  IGetArchiveItemsQuery,
+  IGetRecordHistoryQuery,
+  IGetTrashItemRecordsQuery,
+  ITableTrashItemsFilter,
+  TrashType,
+} from '@teable/openapi';
 
 export const ReactQueryKeys = {
+  space: (spaceId: string) => ['space', spaceId] as const,
+
   base: (baseId: string) => ['base', baseId] as const,
+
+  baseAll: () => ['base-all'] as const,
+
+  templateList: () => ['template-list'] as const,
+
+  templateCategoryList: () => ['template-category-list'] as const,
+
+  templateDetail: (templateId: string) => ['template-detail', templateId] as const,
+
+  publishedTemplateCategoryList: () => ['published-template-category-list'] as const,
+
+  publishedTemplateList: (categoryId: string | null, search: string, isFeatured?: boolean) => {
+    const parts: (string | null)[] = ['published-template-list'];
+    if (categoryId !== undefined) parts.push(categoryId);
+    if (search !== undefined) parts.push(search);
+    if (isFeatured !== undefined) {
+      parts.push(isFeatured.toString());
+    } else {
+      parts.push('undefined');
+    }
+    return parts;
+  },
+
+  baseList: (spaceId: string, params?: { orderBy: 'personal' }) =>
+    params ? (['base-list', spaceId, params] as const) : (['base-list', spaceId] as const),
+
+  pinList: () => ['pin-list'] as const,
 
   spaceList: () => ['space-list'] as const,
 
-  spaceCollaboratorList: (spaceId: string) => ['space-collaborator-list', spaceId] as const,
+  tableList: (baseId: string) => ['table-list', baseId] as const,
 
-  baseCollaboratorList: (baseId: string) => ['base-collaborator-list', baseId] as const,
+  // the seed's group structure and row set depend on the local collapse
+  // state, so that state is part of the identity
+  tableSeed: (tableId: string, viewId: string, collapsedGroupIds?: readonly string[]) =>
+    ['table-seed', tableId, viewId, collapsedGroupIds ?? null] as const,
 
-  notifyList: (filter: { status: NotificationStatesEnum }) =>
-    ['notification', 'list', filter] as const,
+  recordCommentCount: (tableId: string, recordId: string) =>
+    ['record-comment-count', tableId, recordId] as const,
+
+  commentList: (tableId: string, recordId: string) => ['comment-list', tableId, recordId] as const,
+
+  commentCount: (tableId: string, recordIds: string[]) =>
+    ['comment-count', tableId, recordIds] as const,
+
+  commentDetail: (tableId: string, recordId: string, commentId: string) =>
+    ['comment-detail', tableId, recordId, commentId] as const,
+
+  commentAttachment: (tableId: string, recordId: string, path: string) =>
+    ['comment-attachment', tableId, recordId, path] as const,
+
+  commentSubscribeStatus: (tableId: string, recordId: string) =>
+    ['comment-notify-status', tableId, recordId] as const,
+
+  subscriptionSummary: (spaceId: string) => ['subscription-summary', spaceId] as const,
+
+  subscriptionSummaryList: () => ['subscription-summary'] as const,
+
+  instanceUsage: () => ['instance-usage'] as const,
+
+  spaceCollaboratorList: (spaceId: string, options?: ListSpaceCollaboratorRo) =>
+    options
+      ? (['space-collaborator-list', spaceId, options] as const)
+      : (['space-collaborator-list', spaceId] as const),
+
+  spaceUniqueCollaboratorList: (spaceId: string, options?: ListSpaceUniqueCollaboratorRo) =>
+    options
+      ? (['space-unique-collaborator-list', spaceId, options] as const)
+      : (['space-unique-collaborator-list', spaceId] as const),
+
+  baseCollaboratorList: (baseId: string, options?: ListBaseCollaboratorRo) =>
+    options
+      ? (['base-collaborator-list', baseId, options] as const)
+      : (['base-collaborator-list', baseId] as const),
+
+  baseCollaboratorListUser: (baseId: string, options?: IListBaseCollaboratorUserRo) =>
+    options
+      ? (['base-collaborator-list-user', baseId, options] as const)
+      : (['base-collaborator-list-user', baseId] as const),
+
+  recordCollaboratorList: (tableId: string, options: IRecordGetCollaboratorsRo) =>
+    ['record-collaborator-list', tableId, options] as const,
+
+  notifyList: (filter?: { status: NotificationStatesEnum; severity?: NotificationSeverityEnum }) =>
+    filter ? (['notification', 'list', filter] as const) : (['notification', 'list'] as const),
+  notifySummary: () => ['notification', 'summary'] as const,
+  /** @deprecated The web app reads the unread count from `notifySummary`. */
   notifyUnreadCount: () => ['notification', 'unread-count'],
+  /** @deprecated The web app reads unread critical admin notices from `notifySummary`. */
+  notifyCriticalAdmin: () => ['notification', 'critical-admin'] as const,
+  /** @deprecated The web app reads unread collaborator invites from `notifySummary`. */
+  notifyUnreadInvite: () => ['notification', 'unread-invite'] as const,
 
   rowCount: (tableId: string, query: IQueryBaseRo) => ['row-count', tableId, query] as const,
   groupPoints: (tableId: string, query: IGroupPointsRo) =>
     ['group-points', tableId, query] as const,
   aggregations: (tableId: string, query: IAggregationRo) =>
     ['aggregations', tableId, query] as const,
+
+  shareView: (shareId: string) => ['share-view', shareId] as const,
 
   shareViewRowCount: (shareId: string, query: IShareViewRowCountRo) =>
     ['share-view-row-count', shareId, query] as const,
@@ -35,15 +146,174 @@ export const ReactQueryKeys = {
   shareViewAggregations: (shareId: string, query: IShareViewAggregationsRo) =>
     ['share-view-aggregations', shareId, query] as const,
 
+  createField: (tableId: string, fieldRo: IFieldRo) => ['create-field', tableId, fieldRo] as const,
+
+  deleteField: (tableId: string, fieldId: string) => ['delete-field', tableId, fieldId] as const,
+
+  convertField: (tableId: string, fieldId: string, fieldRo: IConvertFieldRo) =>
+    ['convert-field', tableId, fieldId, fieldRo] as const,
+
   planFieldCreate: (tableId: string, fieldRo: IFieldRo) =>
     ['create-field-plan', tableId, fieldRo] as const,
 
   planFieldConvert: (tableId: string, fieldId: string, fieldRo: IConvertFieldRo) =>
-    ['create-field-plan', tableId, fieldId, fieldRo] as const,
+    ['convert-field-plan', tableId, fieldId, fieldRo] as const,
 
   planField: (tableId: string, fieldId: string) => ['field-plan', tableId, fieldId] as const,
+
+  planFieldDelete: (tableId: string, fieldId: string) =>
+    ['delete-field-plan', tableId, fieldId] as const,
+
+  createRecords: (tableId: string, recordsRo: ICreateRecordsRo) =>
+    ['create-records', tableId, recordsRo] as const,
+
+  updateRecord: (tableId: string, recordId: string, recordRo: IUpdateRecordRo) =>
+    ['update-record', tableId, recordId, recordRo] as const,
+
+  updateRecords: (tableId: string, recordsRo: IUpdateRecordsRo) =>
+    ['update-records', tableId, recordsRo] as const,
+
+  duplicateRecord: (tableId: string, recordId: string, order: IRecordInsertOrderRo) =>
+    ['duplicate-record', tableId, recordId, order] as const,
+
+  updateRecordOrders: (tableId: string, viewId: string, order: IUpdateRecordOrdersRo) =>
+    ['update-record-orders', tableId, viewId, order] as const,
 
   personAccessTokenList: () => ['person-access-token-list'],
 
   personAccessToken: (id: string) => ['person-access-token-list', id],
+
+  tableInfo: (baseId: string, tableId: string) => ['table-info', baseId, tableId],
+
+  field: (tableId: string) => ['field-info', tableId],
+
+  shareViewCollaborators: (shareId: string, query?: IShareViewCollaboratorsRo) =>
+    query
+      ? (['share-view-collaborators', shareId, query] as const)
+      : (['share-view-collaborators', shareId] as const),
+
+  getViewFilterLinkRecords: (tableId: string, viewId: string) =>
+    ['get-view-filter-link-records', tableId, viewId] as const,
+
+  getFieldFilterLinkRecords: (tableId: string, fieldId: string) =>
+    ['get-field-filter-link-records', tableId, fieldId] as const,
+
+  shareViewLinkRecords: (shareId: string, fieldId: string, search?: string) =>
+    ['share-link-records', shareId, fieldId, search] as const,
+
+  getTablePermission: (baseId: string, tableId: string) =>
+    ['table-permission', baseId, tableId] as const,
+
+  getBasePermission: (baseId: string) => ['base-permission', baseId] as const,
+
+  getRecordHistory: (tableId: string, recordId?: string, query?: IGetRecordHistoryQuery) =>
+    ['record-history', tableId, recordId, query] as const,
+
+  getSharedBase: () => ['shared-base-list'] as const,
+
+  baseShareList: (baseId: string) => ['base-share-list', baseId] as const,
+
+  baseShareByNodeId: (baseId: string, nodeId: string) =>
+    ['base-share-by-node-id', baseId, nodeId] as const,
+
+  baseShareBase: (baseId: string) => ['base-share-base', baseId] as const,
+
+  getSpaceTrash: (resourceType: TrashType, spaceId?: string) =>
+    ['space-trash', resourceType, spaceId] as const,
+
+  // Without `query` the key is a prefix that matches every filter variant — use it for
+  // invalidation.
+  getTrashItemRecords: (trashId: string, query?: Omit<IGetTrashItemRecordsQuery, 'cursor'>) =>
+    query
+      ? (['trash-item-records', trashId, query] as const)
+      : (['trash-item-records', trashId] as const),
+
+  // Without `query` the key is a prefix that matches every query variant — use it for
+  // invalidation.
+  getTrashItems: (resourceId: string, query?: ITableTrashItemsFilter) =>
+    query ? (['trash-items', resourceId, query] as const) : (['trash-items', resourceId] as const),
+
+  // Without `query` the key is a prefix that matches every query variant — use it for
+  // invalidation.
+  getArchiveItems: (tableId: string, query?: IGetArchiveItemsQuery) =>
+    query ? (['archive-items', tableId, query] as const) : (['archive-items', tableId] as const),
+
+  getDashboardList: (baseId: string) => ['dashboard-list', baseId] as const,
+
+  getDashboard: (dashboardId: string) => ['dashboard', dashboardId] as const,
+
+  viewList: (tableId: string) => ['view-list', tableId] as const,
+
+  fieldList: (tableId: string, query?: IGetFieldsQuery) => ['field-list', tableId, query] as const,
+
+  calendarDailyCollection: (tableId: string, query: ICalendarDailyCollectionRo) =>
+    ['calendar-daily-collection', tableId, query] as const,
+
+  shareCalendarDailyCollection: (shareId: string, query: ICalendarDailyCollectionRo) =>
+    ['share-calendar-daily-collection', shareId, query] as const,
+
+  getDepartmentList: (ro?: IGetDepartmentListRo) => ['department-list', ro] as const,
+
+  getDepartmentUsers: (ro?: IGetDepartmentUserRo) => ['department-users', ro] as const,
+
+  getOrganizationMe: () => ['organization-me'] as const,
+
+  getIntegrationList: (spaceId: string) => ['integration-list', spaceId] as const,
+
+  getPluginPanelList: (tableId: string) => ['plugin-list', tableId] as const,
+
+  getPluginPanel: (tableId: string, panelId: string) => ['plugin', tableId, panelId] as const,
+
+  getPluginContextMenuPlugins: (tableId: string) =>
+    ['plugin-context-menu-plugins', tableId] as const,
+
+  getPluginContextMenuPlugin: (tableId: string, pluginInstallId: string) =>
+    ['plugin-context-menu-plugin', tableId, pluginInstallId] as const,
+
+  getPublicSetting: () => ['public-setting'] as const,
+
+  getGatewayModels: () => ['admin', 'gateway-models'] as const,
+
+  getEnterpriseLicenseStatus: () => ['enterprise-license-status'] as const,
+
+  userLastVisitMap: (baseId: string) => ['user-last-visit-map', baseId] as const,
+
+  // prefix-matched by ['base-entry-map'] in useEnterBase — keep the first
+  // segment stable
+  baseEntryMap: (spaceId: string) => ['base-entry-map', spaceId] as const,
+
+  pinEntryMap: () => ['pin-entry-map'] as const,
+
+  getTaskStatusCollection: (tableId: string) => ['task-status-collection', tableId] as const,
+
+  /** A base's chat list; a narrowed list (types, window) hangs under the same prefix so one invalidation refreshes every list. */
+  chatHistory: (baseId: string, params?: Record<string, unknown>) =>
+    params ? (['chat-history', baseId, params] as const) : (['chat-history', baseId] as const),
+  chatArchivedList: () => ['chat-archived-list'] as const,
+
+  chatMessage: (chatId: string) => ['chat-message', chatId] as const,
+
+  activeViewContext: (baseId: string) => ['active-view-context', baseId] as const,
+
+  gridSelection: (baseId: string) => ['grid-selection', baseId] as const,
+
+  recentlyBase: () => ['recently-base'] as const,
+
+  oauthAppList: () => ['oauth-app-list'] as const,
+
+  oauthApp: (clientId: string) => ['oauth-app', clientId] as const,
+
+  baseNodeTree: (baseId: string) => ['base-node-tree', baseId] as const,
+
+  linkEditorRecords: (tableId: string, query?: IGetRecordsRo) =>
+    ['link-editor-records', tableId, query] as const,
+
+  workflowItem: (baseId: string, workflowId: string) =>
+    ['workflow-item', baseId, workflowId] as const,
+
+  routineItem: (baseId: string, routineId: string) => ['routine', baseId, routineId] as const,
+
+  getApp: (baseId: string, appId: string) => ['app', baseId, appId] as const,
+
+  getUserIntegrations: () => ['user-integrations-list'] as const,
 };

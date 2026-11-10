@@ -10,24 +10,36 @@ const baseFormatting = z.object({
   precision: z.number().max(5).min(0),
 });
 
-export const decimalFormattingSchema = baseFormatting.extend({
-  type: z.literal(NumberFormattingType.Decimal),
-});
+export const decimalFormattingSchema = baseFormatting
+  .extend({
+    type: z.literal(NumberFormattingType.Decimal),
+  })
+  .strict();
 
-export const percentFormattingSchema = baseFormatting.extend({
-  type: z.literal(NumberFormattingType.Percent),
-});
+export const percentFormattingSchema = baseFormatting
+  .extend({
+    type: z.literal(NumberFormattingType.Percent),
+  })
+  .strict();
 
-export const currencyFormattingSchema = baseFormatting.extend({
-  type: z.literal(NumberFormattingType.Currency),
-  symbol: z.string(),
-});
+export const currencyFormattingSchema = baseFormatting
+  .extend({
+    type: z.literal(NumberFormattingType.Currency),
+    // Bound the symbol length as defense-in-depth; real currency symbols are a
+    // few characters at most. The SQL-side escaping is the primary protection.
+    symbol: z.string().max(10),
+  })
+  .strict();
 
-export const numberFormattingSchema = z.union([
-  decimalFormattingSchema,
-  percentFormattingSchema,
-  currencyFormattingSchema,
-]);
+export const numberFormattingSchema = z
+  .discriminatedUnion('type', [
+    decimalFormattingSchema,
+    percentFormattingSchema,
+    currencyFormattingSchema,
+  ])
+  .describe(
+    'Only be used in number field (number field or formula / rollup field with cellValueType equals Number'
+  );
 
 export type IDecimalFormatting = z.infer<typeof decimalFormattingSchema>;
 
@@ -42,18 +54,27 @@ export const defaultNumberFormatting: INumberFormatting = {
   precision: 2,
 };
 
-export const DEFAULT_CURRENCY_SYMBOL = '$';
+// Past MAX_SAFE_INTEGER toFixed prints the double's full binary expansion, digits the API never returns.
+const toFixedDigits = (value: number, precision: number): string => {
+  if (!Number.isFinite(value) || Math.abs(value) <= Number.MAX_SAFE_INTEGER) {
+    return value.toFixed(precision);
+  }
+  const digits = String(value);
+  const zeros = digits.includes('e') ? '' : '0'.repeat(precision);
+  return zeros ? `${digits}.${zeros}` : digits;
+};
 
-export const formatNumberToString = (value: number | undefined, formatting: INumberFormatting) => {
+export const formatNumberToString = (value: number | undefined, formatting?: INumberFormatting) => {
   if (value == null) {
     return '';
   }
 
   const cellValue = Number(value);
-  const { type, precision } = formatting;
+  const resolvedFormatting = formatting ?? defaultNumberFormatting;
+  const { type, precision } = resolvedFormatting;
 
   if (type === NumberFormattingType.Currency) {
-    const symbol = formatting.symbol ?? DEFAULT_CURRENCY_SYMBOL;
+    const symbol = resolvedFormatting.symbol ?? '$';
     const sign = cellValue < 0 ? '-' : '';
     const options =
       precision != null
@@ -68,26 +89,26 @@ export const formatNumberToString = (value: number | undefined, formatting: INum
   }
 
   if (type === NumberFormattingType.Percent) {
-    const formattedNumber = (cellValue * 100).toFixed(precision);
+    const formattedNumber = toFixedDigits(cellValue * 100, precision);
     return `${formattedNumber}%`;
   }
 
   if (precision != null) {
-    return cellValue.toFixed(precision);
+    return toFixedDigits(cellValue, precision);
   }
 
   return String(cellValue);
 };
 
 export const parseStringToNumber = (value: string | null, formatting?: INumberFormatting) => {
-  if (value == null) return null;
+  if (value == null || value === '') return null;
 
   const originStr = String(value);
   const isPercent = formatting?.type === NumberFormattingType.Percent || originStr.includes('%');
   const numberReg = /[^\d.+-]/g;
   const symbolReg = /([+\-.])+/g;
   const numStr = originStr.replace(numberReg, '').replace(symbolReg, '$1');
-  const num = parseFloat(numStr);
+  const num = Number.parseFloat(numStr);
 
   if (Number.isNaN(num)) {
     return null;

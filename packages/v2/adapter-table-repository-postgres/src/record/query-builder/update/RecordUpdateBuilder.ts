@@ -1,0 +1,733 @@
+import { FieldId, FieldType, domainError, ok } from '@teable/v2-core';
+import type {
+  ClearFieldValueSpec,
+  DomainError,
+  ICellValueSpec,
+  ICellValueSpecVisitor,
+  ISpecification,
+  ISpecVisitor,
+  LinkField,
+  RecordId,
+  SetAttachmentValueSpec,
+  SetButtonValueSpec,
+  SetCheckboxValueSpec,
+  SetDateValueSpec,
+  SetLinkValueByTitleSpec,
+  SetLongTextValueSpec,
+  SetMultipleSelectValueSpec,
+  SetNumberValueSpec,
+  SetRowOrderValueSpec,
+  SetRatingValueSpec,
+  SetSingleLineTextValueSpec,
+  SetSingleSelectValueSpec,
+  SetUserValueSpec,
+  SetUserValueByIdentifierSpec,
+  Table,
+  TableId,
+  SetLinkValueSpec,
+} from '@teable/v2-core';
+import { sql, type Kysely } from 'kysely';
+import { err, safeTry } from 'neverthrow';
+import type { Result } from 'neverthrow';
+
+import type { UpdateImpactHint } from '../../computed';
+import {
+  LinkChangeCollectorVisitor,
+  LinkExclusivityConstraintCollector,
+  createEmptyCollectedLinkChanges,
+  mergeCollectedLinkChange,
+  type CollectedLinkChanges,
+  type LinkExclusivityConstraint,
+} from '../../visitors';
+import { CellValueMutateVisitor } from '../../visitors/CellValueMutateVisitor';
+import type { CompiledSqlStatement, LinkedRecordLockInfo } from '../insert';
+import type { DynamicDB } from '../ITableRecordQueryBuilder';
+
+/**
+ * Result of building UPDATE SQLs for a record (compiled form).
+ */
+export interface RecordUpdateSqlResult {
+  /** The main UPDATE statement */
+  mainUpdate: CompiledSqlStatement;
+  /** Additional SQL statements (junction table updates, FK updates for link fields) */
+  additionalStatements: CompiledSqlStatement[];
+  /** Field IDs that were changed (for computed field propagation) */
+  changedFieldIds: FieldId[];
+  /** Computed update impact (used for propagation planning) */
+  impact: RecordUpdateImpact;
+  /** Added and removed foreign record IDs used by the update advisory-lock protocol */
+  linkedRecordLocks: LinkedRecordLockInfo[];
+}
+
+export interface RecordUpdateMutationPlan {
+  /** Raw SET clauses for repositories that need UPDATE ... RETURNING */
+  setClauses: Record<string, unknown>;
+  /** Additional SQL statements (junction table updates, FK updates for link fields) */
+  additionalStatements: CompiledSqlStatement[];
+  /** Field IDs that were changed (for computed field propagation) */
+  changedFieldIds: FieldId[];
+  /** Computed update impact (used for propagation planning) */
+  impact: RecordUpdateImpact;
+  /** Added and removed foreign record IDs used by the update advisory-lock protocol */
+  linkedRecordLocks: LinkedRecordLockInfo[];
+}
+
+/**
+ * Context for building update data.
+ */
+export interface RecordUpdateBuilderContext {
+  actorId: string;
+  now: string;
+  actorName?: string;
+  actorEmail?: string;
+  fillLinkTitles?: boolean;
+  fillLinkTitleForeignTables?: ReadonlyMap<string, Table>;
+  assumeEmptyLinkState?: boolean;
+}
+
+export type RecordUpdateSeedGroup = {
+  tableId: TableId;
+  recordIds: RecordId[];
+};
+
+export type RecordUpdateImpact = {
+  impactHint: UpdateImpactHint;
+  extraSeedRecords: ReadonlyArray<RecordUpdateSeedGroup>;
+  linkChanges: CollectedLinkChanges;
+  valueFieldIds: ReadonlyArray<FieldId>;
+  linkedRecordLocks: LinkedRecordLockInfo[];
+  /** Exclusivity constraints that need validation before persisting */
+  exclusivityConstraints: ReadonlyArray<LinkExclusivityConstraint>;
+};
+
+/**
+ * Builds UPDATE SQL statements for a record using mutation specification.
+ *
+ * This builder delegates to CellValueMutateVisitor to generate SQL statements,
+ * then wraps them with descriptions for EXPLAIN analysis.
+ *
+ * @example
+ * ```typescript
+ * const builder = new RecordUpdateBuilder(db);
+ * const result = await builder.build({
+ *   table,
+ *   tableName: 'my_table',
+ *   mutateSpec,
+ *   recordId: 'rec_xxx',
+ *   context: { actorId: 'usr_xxx', now: new Date().toISOString() },
+ * });
+ * ```
+ */
+export class RecordUpdateBuilder {
+  constructor(private readonly db: Kysely<DynamicDB>) {}
+
+  /**
+   * Build UPDATE SQL statements for a record using mutation specification.
+   * Use this for EXPLAIN analysis or when you need the actual SQL strings.
+   */
+  async build(params: {
+    table: Table;
+    tableName: string;
+    tableDisplayName?: string;
+    mutateSpec: ICellValueSpec;
+    recordId: string;
+    context: RecordUpdateBuilderContext;
+  }): Promise<Result<RecordUpdateSqlResult, DomainError>> {
+    const { tableName, tableDisplayName, recordId } = params;
+    const builder = this; // NOSONAR typescript:S7740 -- generator functions cannot be arrow functions, so `this` must be captured
+
+    return safeTry<RecordUpdateSqlResult, DomainError>(async function* () {
+      const { setClauses, additionalStatements, changedFieldIds, impact, linkedRecordLocks } =
+        yield* await builder.buildMutationPlan(params);
+
+      const mainUpdate = builder.db
+        .updateTable(tableName)
+        .set(setClauses)
+        .where('__id', '=', recordId)
+        .compile();
+
+      // Wrap with descriptions for EXPLAIN analysis
+      return ok({
+        mainUpdate: {
+          description: `Update record in ${tableDisplayName ?? tableName}`,
+          compiled: mainUpdate,
+        },
+        additionalStatements,
+        changedFieldIds,
+        impact,
+        linkedRecordLocks,
+      });
+    });
+  }
+
+  async buildMutationPlan(params: {
+    table: Table;
+    tableName: string;
+    mutateSpec: ICellValueSpec;
+    recordId: string;
+    context: RecordUpdateBuilderContext;
+  }): Promise<Result<RecordUpdateMutationPlan, DomainError>> {
+    const { table, tableName, mutateSpec, recordId, context } = params;
+    const db = this.db;
+    const builder = this; // NOSONAR typescript:S7740 -- generator functions cannot be arrow functions, so `this` must be captured
+
+    return safeTry<RecordUpdateMutationPlan, DomainError>(async function* () {
+      const mutateVisitor = CellValueMutateVisitor.create(db, table, tableName, {
+        recordId,
+        actorId: context.actorId,
+        now: context.now,
+        actorName: context.actorName,
+        actorEmail: context.actorEmail,
+        fillLinkTitles: context.fillLinkTitles,
+        fillLinkTitleForeignTables: context.fillLinkTitleForeignTables,
+      });
+
+      yield* mutateSpec.accept(mutateVisitor);
+      const statementsResult = mutateVisitor.build();
+      if (statementsResult.isErr()) {
+        return err(statementsResult.error);
+      }
+
+      const { setClauses, additionalStatements, changedFieldIds } = statementsResult.value;
+      const impactResult = await builder.collectUpdateImpact({
+        table,
+        tableName,
+        recordId,
+        mutateSpec,
+        changedFieldIds,
+        context,
+      });
+      if (impactResult.isErr()) {
+        return err(impactResult.error);
+      }
+
+      return ok({
+        setClauses,
+        additionalStatements: additionalStatements.map((stmt, index) => ({
+          description: `Additional statement ${index + 1}`,
+          compiled: stmt,
+          requiresSourceWrite: stmt.requiresSourceWrite,
+        })),
+        changedFieldIds,
+        impact: impactResult.value,
+        linkedRecordLocks: impactResult.value.linkedRecordLocks,
+      });
+    });
+  }
+
+  private async collectUpdateImpact(params: {
+    table: Table;
+    tableName: string;
+    recordId: string;
+    mutateSpec: ICellValueSpec;
+    changedFieldIds: ReadonlyArray<FieldId>;
+    context: RecordUpdateBuilderContext;
+  }): Promise<Result<RecordUpdateImpact, DomainError>> {
+    const { table, tableName, recordId, mutateSpec, changedFieldIds, context } = params;
+    const valueFieldIds: FieldId[] = [];
+
+    for (const fieldId of changedFieldIds) {
+      const fieldResult = table.getField((candidate) => candidate.id().equals(fieldId));
+      if (fieldResult.isErr()) {
+        return err(fieldResult.error);
+      }
+      const field = fieldResult.value;
+      if (!field.type().equals(FieldType.link())) {
+        valueFieldIds.push(fieldId);
+      }
+    }
+
+    const linkChangesResult = await collectLinkChanges({
+      db: this.db,
+      table,
+      tableName,
+      recordId,
+      mutateSpec,
+      assumeEmptyLinkState: context.assumeEmptyLinkState,
+    });
+    if (linkChangesResult.isErr()) {
+      return err(linkChangesResult.error);
+    }
+    const { linkChanges, exclusivityConstraints } = linkChangesResult.value;
+
+    const extraSeedRecordsResult = buildExtraSeedRecordsFromLinkChanges(linkChanges);
+    if (extraSeedRecordsResult.isErr()) {
+      return err(extraSeedRecordsResult.error);
+    }
+
+    // Collect linked record locks from link changes
+    const linkedRecordLocks = buildLinkedRecordLocksFromLinkChanges(linkChanges);
+
+    return ok({
+      impactHint: buildImpactHint(valueFieldIds, linkChanges.relationChangeFieldIds),
+      extraSeedRecords: extraSeedRecordsResult.value,
+      linkChanges,
+      valueFieldIds,
+      linkedRecordLocks,
+      exclusivityConstraints,
+    });
+  }
+}
+
+class LinkValueCollectorVisitor implements ICellValueSpecVisitor {
+  private readonly linkValues = new Map<string, unknown>();
+
+  values(): ReadonlyMap<string, unknown> {
+    return this.linkValues;
+  }
+
+  visitSetSingleLineTextValue(_spec: SetSingleLineTextValueSpec): Result<void, DomainError> {
+    return ok(undefined);
+  }
+
+  visitSetLongTextValue(_spec: SetLongTextValueSpec): Result<void, DomainError> {
+    return ok(undefined);
+  }
+
+  visitSetNumberValue(_spec: SetNumberValueSpec): Result<void, DomainError> {
+    return ok(undefined);
+  }
+
+  visitSetRatingValue(_spec: SetRatingValueSpec): Result<void, DomainError> {
+    return ok(undefined);
+  }
+
+  visitSetSingleSelectValue(_spec: SetSingleSelectValueSpec): Result<void, DomainError> {
+    return ok(undefined);
+  }
+
+  visitSetMultipleSelectValue(_spec: SetMultipleSelectValueSpec): Result<void, DomainError> {
+    return ok(undefined);
+  }
+
+  visitSetCheckboxValue(_spec: SetCheckboxValueSpec): Result<void, DomainError> {
+    return ok(undefined);
+  }
+
+  visitSetDateValue(_spec: SetDateValueSpec): Result<void, DomainError> {
+    return ok(undefined);
+  }
+
+  visitSetAttachmentValue(_spec: SetAttachmentValueSpec): Result<void, DomainError> {
+    return ok(undefined);
+  }
+
+  visitSetButtonValue(_spec: SetButtonValueSpec): Result<void, DomainError> {
+    return ok(undefined);
+  }
+
+  visitSetUserValue(_spec: SetUserValueSpec): Result<void, DomainError> {
+    return ok(undefined);
+  }
+
+  visitSetUserValueByIdentifier(_spec: SetUserValueByIdentifierSpec): Result<void, DomainError> {
+    return ok(undefined);
+  }
+
+  visitSetLinkValue(spec: SetLinkValueSpec): Result<void, DomainError> {
+    this.linkValues.set(spec.fieldId.toString(), spec.value.toValue());
+    return ok(undefined);
+  }
+
+  visitSetLinkValueByTitle(_spec: SetLinkValueByTitleSpec): Result<void, DomainError> {
+    // SetLinkValueByTitle doesn't have resolved IDs yet, so we don't collect link values
+    // The title resolution should happen before this point
+    return ok(undefined);
+  }
+
+  visitSetRowOrderValue(_spec: SetRowOrderValueSpec): Result<void, DomainError> {
+    return ok(undefined);
+  }
+
+  visitClearFieldValue(spec: ClearFieldValueSpec): Result<void, DomainError> {
+    if (spec.field.type().equals(FieldType.link())) {
+      this.linkValues.set(spec.field.id().toString(), null);
+    }
+    return ok(undefined);
+  }
+
+  visit(_spec: ISpecification<unknown, ISpecVisitor>): Result<void, DomainError> {
+    return ok(undefined);
+  }
+}
+
+const buildImpactHint = (
+  valueFieldIds: ReadonlyArray<FieldId>,
+  linkFieldIds: ReadonlyArray<FieldId>
+): UpdateImpactHint => {
+  return { valueFieldIds, linkFieldIds };
+};
+
+type CollectLinkChangesResult = {
+  linkChanges: CollectedLinkChanges;
+  exclusivityConstraints: LinkExclusivityConstraint[];
+};
+
+/** Old host-FK values scoped to one batch, read in its existing transaction. */
+export type BatchExistingLinkIds = ReadonlyMap<string, ReadonlyMap<string, string[]>>;
+
+export const loadBatchExistingHostLinkIds = async (params: {
+  db: Kysely<DynamicDB>;
+  table: Table;
+  tableName: string;
+  updates: ReadonlyArray<{ recordId: RecordId; mutateSpec: ICellValueSpec }>;
+}): Promise<Result<BatchExistingLinkIds, DomainError>> => {
+  const { db, table, tableName, updates } = params;
+  try {
+    const columns = new Map<string, string>();
+    const requested = new Map<string, Set<string>>();
+    for (const update of updates) {
+      const visitor = new LinkValueCollectorVisitor();
+      const accepted = update.mutateSpec.accept(visitor);
+      if (accepted.isErr()) return err(accepted.error);
+      for (const fieldId of visitor.values().keys()) {
+        const fieldResult = table.getField((field) => field.id().toString() === fieldId);
+        if (fieldResult.isErr()) return err(fieldResult.error);
+        const field = fieldResult.value;
+        if (!field.type().equals(FieldType.link())) continue;
+        const link = field as LinkField;
+        const relationship = link.relationship().toString();
+        if (relationship !== 'manyOne' && relationship !== 'oneOne') continue;
+        if (link.hasOrderColumn()) {
+          const orderColumn = link.orderColumnName();
+          if (orderColumn.isErr()) return err(orderColumn.error);
+        }
+        const foreignKey = link.foreignKeyNameString();
+        if (foreignKey.isErr()) return err(foreignKey.error);
+        // Inverse/symmetric links and junctions retain their ordered read path.
+        if (foreignKey.value === RECORD_ID_COLUMN) continue;
+        columns.set(fieldId, foreignKey.value);
+        const recordId = update.recordId.toString();
+        const fields = requested.get(recordId) ?? new Set<string>();
+        fields.add(fieldId);
+        requested.set(recordId, fields);
+      }
+    }
+    const result = new Map<string, Map<string, string[]>>();
+    const recordIds = [...requested.keys()];
+    for (let offset = 0; offset < recordIds.length; offset += 500) {
+      const ids = recordIds.slice(offset, offset + 500);
+      // Include absent/null rows as known empty values, without falling back to
+      // per-record reads. Only cache fields actually requested by that record.
+      for (const id of ids)
+        result.set(id, new Map([...requested.get(id)!].map((field) => [field, []])));
+      const rows = await db
+        .selectFrom(tableName)
+        .select([
+          sql.ref(RECORD_ID_COLUMN).as('__record_id'),
+          ...[...columns].map(([field, column]) => sql.ref(column).as(field)),
+        ])
+        .where(RECORD_ID_COLUMN, 'in', ids)
+        .execute();
+      for (const row of rows) {
+        const fields = result.get(String(row.__record_id));
+        if (!fields) continue;
+        for (const field of fields.keys()) {
+          const value = row[field];
+          fields.set(field, typeof value === 'string' && value.length > 0 ? [value] : []);
+        }
+      }
+    }
+    return ok(result);
+  } catch (error) {
+    return err(
+      domainError.infrastructure({
+        message: `Failed to batch load existing host links: ${String(error)}`,
+      })
+    );
+  }
+};
+
+/** Identify sources whose link mutations need an actual write snapshot or a no-op existence check. */
+export const collectLinkUpdateSourceRecordIds = (
+  updates: ReadonlyArray<{ recordId: RecordId; mutateSpec: ICellValueSpec }>
+): Result<string[], DomainError> => {
+  for (const update of updates) {
+    const visitor = new LinkValueCollectorVisitor();
+    const accepted = update.mutateSpec.accept(visitor);
+    if (accepted.isErr()) return err(accepted.error);
+    if (visitor.values().size > 0) {
+      return ok([...new Set(updates.map(({ recordId }) => recordId.toString()))]);
+    }
+  }
+  return ok([]);
+};
+
+export const collectLinkChanges = async (params: {
+  db: Kysely<DynamicDB>;
+  table: Table;
+  tableName: string;
+  recordId: string;
+  mutateSpec: ICellValueSpec;
+  assumeEmptyLinkState?: boolean;
+  existingLinkIds?: ReadonlyMap<string, string[]>;
+}): Promise<Result<CollectLinkChangesResult, DomainError>> => {
+  const { db, table, tableName, recordId, mutateSpec, assumeEmptyLinkState } = params;
+
+  try {
+    const linkValueVisitor = new LinkValueCollectorVisitor();
+    const acceptResult = mutateSpec.accept(linkValueVisitor);
+    if (acceptResult.isErr()) return err(acceptResult.error);
+
+    const collected = createEmptyCollectedLinkChanges();
+    const exclusivityConstraints: LinkExclusivityConstraint[] = [];
+
+    if (linkValueVisitor.values().size === 0) {
+      return ok({ linkChanges: collected, exclusivityConstraints });
+    }
+
+    for (const [fieldIdStr, newRawValue] of linkValueVisitor.values()) {
+      const fieldIdResult = FieldId.create(fieldIdStr);
+      if (fieldIdResult.isErr()) return err(fieldIdResult.error);
+      const fieldResult = table.getField((candidate) => candidate.id().equals(fieldIdResult.value));
+      if (fieldResult.isErr()) return err(fieldResult.error);
+      const field = fieldResult.value;
+      if (!field.type().equals(FieldType.link())) {
+        return err(domainError.validation({ message: 'Field is not a link field' }));
+      }
+
+      const linkField = field as LinkField;
+      const prefetched = params.existingLinkIds?.get(fieldIdStr);
+      const existingLinksResult = assumeEmptyLinkState
+        ? ok<string[], DomainError>([])
+        : prefetched !== undefined
+          ? ok<string[], DomainError>(prefetched)
+          : await loadExistingLinkRecordIds(db, tableName, recordId, linkField);
+      if (existingLinksResult.isErr()) return err(existingLinksResult.error);
+      const existingLinks = existingLinksResult.value;
+
+      // Collect link changes
+      const changeVisitor = LinkChangeCollectorVisitor.create({
+        recordId,
+        existingLinkIds: existingLinks,
+        newRawValue,
+      });
+      const changeResult = linkField.accept(changeVisitor);
+      if (changeResult.isErr()) return err(changeResult.error);
+      mergeCollectedLinkChange(collected, changeResult.value, linkField.foreignTableId());
+
+      // Collect exclusivity constraints (for oneOne and oneMany relationships)
+      const exclusivityVisitor = LinkExclusivityConstraintCollector.create({
+        recordId,
+        newRawValue,
+      });
+      const exclusivityResult = linkField.accept(exclusivityVisitor);
+      if (exclusivityResult.isErr()) return err(exclusivityResult.error);
+      if (exclusivityResult.value.hasConstraint) {
+        exclusivityConstraints.push(exclusivityResult.value.constraint);
+      }
+    }
+
+    return ok({ linkChanges: collected, exclusivityConstraints });
+  } catch (error) {
+    return err(
+      domainError.infrastructure({
+        message: `Failed to collect link changes: ${String(error)}`,
+      })
+    );
+  }
+};
+
+export const buildExtraSeedRecordsFromLinkChanges = (
+  collected: CollectedLinkChanges
+): Result<RecordUpdateSeedGroup[], DomainError> => {
+  const extraSeedMap = new Map<string, { tableId: TableId; recordIds: Map<string, RecordId> }>();
+
+  for (const group of collected.affectedForeignRecords.values()) {
+    if (group.recordIds.length === 0) continue;
+    const entry =
+      extraSeedMap.get(group.tableId.toString()) ??
+      ({
+        tableId: group.tableId,
+        recordIds: new Map<string, RecordId>(),
+      } as const);
+
+    for (const recordId of group.recordIds) {
+      entry.recordIds.set(recordId.toString(), recordId);
+    }
+
+    extraSeedMap.set(group.tableId.toString(), entry);
+  }
+
+  return ok(
+    [...extraSeedMap.values()].map((entry) => ({
+      tableId: entry.tableId,
+      recordIds: [...entry.recordIds.values()],
+    }))
+  );
+};
+
+const RECORD_ID_COLUMN = '__id';
+
+const resolveFkHostTableName = (field: LinkField): Result<string, DomainError> => {
+  return field
+    .fkHostTableName()
+    .split({ defaultSchema: 'public' })
+    .map((split) => (split.schema ? `${split.schema}.${split.tableName}` : split.tableName));
+};
+
+const loadExistingLinkRecordIds = async (
+  db: Kysely<DynamicDB>,
+  tableName: string,
+  recordId: string,
+  field: LinkField
+): Promise<Result<string[], DomainError>> => {
+  const relationship = field.relationship().toString();
+
+  const orderColumnNameResult = field.hasOrderColumn() ? field.orderColumnName() : ok(null);
+  if (orderColumnNameResult.isErr()) return err(orderColumnNameResult.error);
+  const orderColumnName = orderColumnNameResult.value;
+
+  const readRows = async (
+    targetTable: string,
+    columnName: string,
+    whereColumn: string,
+    orderColumn: string | null
+  ) => {
+    let query = db
+      .selectFrom(targetTable)
+      .select(sql.ref(columnName).as('record_id'))
+      .where(whereColumn, '=', recordId);
+    if (orderColumn) {
+      query = query.orderBy(orderColumn, 'asc');
+    }
+    const rows = await query.execute();
+
+    return rows
+      .map((row) => row.record_id)
+      .filter((value): value is string => typeof value === 'string' && value.length > 0);
+  };
+
+  try {
+    if (relationship === 'manyMany' || (relationship === 'oneMany' && field.isOneWay())) {
+      const junctionTableResult = resolveFkHostTableName(field);
+      if (junctionTableResult.isErr()) return err(junctionTableResult.error);
+      const selfKeyResult = field.selfKeyNameString();
+      if (selfKeyResult.isErr()) return err(selfKeyResult.error);
+      const foreignKeyResult = field.foreignKeyNameString();
+      if (foreignKeyResult.isErr()) return err(foreignKeyResult.error);
+
+      const junctionOrderColumn = orderColumnName ?? '__id';
+      const rows = await readRows(
+        junctionTableResult.value,
+        foreignKeyResult.value,
+        selfKeyResult.value,
+        junctionOrderColumn
+      );
+      return ok(rows);
+    }
+
+    if (relationship === 'manyOne' || relationship === 'oneOne') {
+      const foreignKeyResult = field.foreignKeyNameString();
+      if (foreignKeyResult.isErr()) return err(foreignKeyResult.error);
+      if (foreignKeyResult.value === RECORD_ID_COLUMN) {
+        const fkHostTableResult = resolveFkHostTableName(field);
+        if (fkHostTableResult.isErr()) return err(fkHostTableResult.error);
+        const selfKeyResult = field.selfKeyNameString();
+        if (selfKeyResult.isErr()) return err(selfKeyResult.error);
+        const orderColumnNameForSymmetric = field.hasOrderColumn()
+          ? `${selfKeyResult.value}_order`
+          : null;
+
+        const rows = await readRows(
+          fkHostTableResult.value,
+          RECORD_ID_COLUMN,
+          selfKeyResult.value,
+          orderColumnNameForSymmetric
+        );
+        return ok(rows);
+      }
+
+      const rows = await db
+        .selectFrom(tableName)
+        .select(sql.ref(foreignKeyResult.value).as('record_id'))
+        .where(RECORD_ID_COLUMN, '=', recordId)
+        .executeTakeFirst();
+
+      const value = rows?.record_id;
+      if (!value || typeof value !== 'string') return ok([]);
+      return ok([value]);
+    }
+
+    if (relationship === 'oneMany') {
+      const foreignTableResult = resolveFkHostTableName(field);
+      if (foreignTableResult.isErr()) return err(foreignTableResult.error);
+      const selfKeyResult = field.selfKeyNameString();
+      if (selfKeyResult.isErr()) return err(selfKeyResult.error);
+
+      const rows = await readRows(
+        foreignTableResult.value,
+        RECORD_ID_COLUMN,
+        selfKeyResult.value,
+        orderColumnName
+      );
+      return ok(rows);
+    }
+
+    return ok([]);
+  } catch (error) {
+    return err(
+      domainError.infrastructure({
+        message: `Failed to load existing link records: ${String(error)}`,
+      })
+    );
+  }
+};
+
+/**
+ * Preserve the update protocol's complete added/removed target set across fields,
+ * for both physical FK and junction mutations. The repository acquires this set
+ * after the source UPDATE and before executing additional relation statements.
+ */
+export const buildLinkedRecordLocksFromLinkChanges = (
+  collected: CollectedLinkChanges
+): LinkedRecordLockInfo[] => {
+  const locks: LinkedRecordLockInfo[] = [];
+
+  for (const linkChange of collected.linkChanges) {
+    // Skip if only reordering (no actual relation change needs locks)
+    if (linkChange.changeType === 'reorder') {
+      continue;
+    }
+
+    const foreignTableId = linkChange.symmetricTableId?.toString();
+    if (!foreignTableId) continue;
+
+    // Lock all added foreign records
+    for (const recordId of linkChange.addedForeignRecordIds) {
+      locks.push({
+        foreignTableId,
+        foreignRecordId: recordId.toString(),
+      });
+    }
+
+    // Lock all removed foreign records
+    for (const recordId of linkChange.removedForeignRecordIds) {
+      locks.push({
+        foreignTableId,
+        foreignRecordId: recordId.toString(),
+      });
+    }
+  }
+
+  return locks;
+};
+
+/**
+ * Collect linked record advisory locks for a single record update mutate spec.
+ * This is shared by single-update and batch-update builders to keep lock behavior consistent.
+ */
+export const collectLinkedRecordLocksForUpdate = async (params: {
+  db: Kysely<DynamicDB>;
+  table: Table;
+  tableName: string;
+  recordId: string;
+  mutateSpec: ICellValueSpec;
+}): Promise<Result<LinkedRecordLockInfo[], DomainError>> => {
+  const linkChangesResult = await collectLinkChanges(params);
+  if (linkChangesResult.isErr()) {
+    return err(linkChangesResult.error);
+  }
+
+  return ok(buildLinkedRecordLocksFromLinkChanges(linkChangesResult.value.linkChanges));
+};

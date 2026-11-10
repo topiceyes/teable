@@ -4,8 +4,9 @@ import { plainToInstance } from 'class-transformer';
 import { FieldType, DbFieldType, CellValueType, Relationship } from '../constant';
 import { FieldCore } from '../field';
 import type { IFieldVo } from '../field.schema';
+import { linkFieldOptionsRoSchema } from './link-option.schema';
 import type { ILinkCellValue } from './link.field';
-import { linkFieldOptionsRoSchema, LinkFieldCore } from './link.field';
+import { LinkFieldCore } from './link.field';
 
 describe('LinkFieldCore', () => {
   let field: LinkFieldCore;
@@ -24,6 +25,12 @@ describe('LinkFieldCore', () => {
       selfKeyName: '__id',
       foreignKeyName: '__fk_fldxxxxxxx',
       symmetricFieldId: 'fldxxxxxxx',
+      filterByViewId: 'viwxxxxxxx',
+      visibleFieldIds: ['fldxxxxxxx'],
+      filter: {
+        conjunction: 'and',
+        filterSet: [],
+      },
     },
     type: FieldType.Link,
     dbFieldType: DbFieldType.Json,
@@ -79,21 +86,30 @@ describe('LinkFieldCore', () => {
       id: 'recxxxxxxxx',
       title: 'record 1',
     };
+    const singleFieldFromArray = field.validateCellValue([cellValue]);
+    const lookupFieldFromArray = lookupField.validateCellValue([cellValue]);
+    const multipleFieldFromSingle = fieldMultiple.validateCellValue(cellValue);
 
     expect(field.validateCellValue(null as any).success).toBe(true);
     expect(field.validateCellValue(cellValue).success).toBe(true);
     expect(field.validateCellValue({ id: 'recXXXXXXXX ' }).success).toBe(true);
     expect(field.validateCellValue({ id: 'xxxxxxxxxxx ' }).success).toBe(false);
-    expect(field.validateCellValue([cellValue]).success).toBe(false);
+    expect(singleFieldFromArray.success).toBe(true);
+    expect(singleFieldFromArray.success && singleFieldFromArray.data).toEqual(cellValue);
 
     expect(lookupField.validateCellValue(null as any).success).toBe(true);
     expect(lookupField.validateCellValue(cellValue).success).toBe(true);
-    expect(lookupField.validateCellValue([cellValue]).success).toBe(false);
+    expect(lookupFieldFromArray.success).toBe(true);
+    expect(lookupFieldFromArray.success && lookupFieldFromArray.data).toEqual(cellValue);
 
     expect(fieldMultiple.validateCellValue(null as any).success).toBe(true);
-    expect(fieldMultiple.validateCellValue(cellValue).success).toBe(false);
+    expect(multipleFieldFromSingle.success).toBe(true);
+    expect(multipleFieldFromSingle.success && multipleFieldFromSingle.data).toEqual([cellValue]);
     expect(fieldMultiple.validateCellValue([cellValue, cellValue]).success).toBe(true);
     expect(fieldMultiple.validateCellValue([]).success).toBe(false);
+    const nullTitle = field.validateCellValue({ id: 'recxxxxxxxx', title: null });
+    expect(nullTitle.success).toBe(true);
+    expect(nullTitle.success && nullTitle.data).toEqual({ id: 'recxxxxxxxx' });
   });
 
   it('should convert string to cellValue', () => {
@@ -113,12 +129,13 @@ describe('LinkFieldCore', () => {
       title: 'record 1',
     };
     expect(field.repair(cellValue)).toEqual(cellValue);
+    expect(field.repair([cellValue])).toEqual(cellValue);
     expect(field.repair([{ id: 'actxxx' }])).toEqual(null);
 
     expect(lookupField.repair(cellValue)).toEqual(null);
     expect(lookupField.repair([{ id: 'actxxx' }])).toEqual(null);
 
-    expect(fieldMultiple.repair(cellValue)).toEqual(null);
+    expect(fieldMultiple.repair(cellValue)).toEqual([cellValue]);
     expect(fieldMultiple.repair([cellValue])).toEqual([cellValue]);
   });
 
@@ -142,12 +159,106 @@ describe('LinkFieldCore', () => {
         lookupFieldId: 'fldXWPHcgSGeKgFFuOI',
         dbForeignKeyName: '__fk_fldiBBKwOZuW8rlrtoW',
         symmetricFieldId: 'fld8bh5u0MkjdmtFCxv',
+        filterByViewId: 'viwXWPHcgSGeKgFFuOI',
+        visibleFieldIds: ['fldXWPHcgSGeKgFFuOI'],
+        filter: {
+          conjunction: 'and',
+          filterSet: [],
+        },
       };
       expect(linkFieldOptionsRoSchema.safeParse(object).success).toBeTruthy();
       expect(linkFieldOptionsRoSchema.parse(object)).toEqual({
         relationship: 'manyOne',
         foreignTableId: 'tblERSkHpp4KDRK1hvL',
+        lookupFieldId: 'fldXWPHcgSGeKgFFuOI',
+        filterByViewId: 'viwXWPHcgSGeKgFFuOI',
+        visibleFieldIds: ['fldXWPHcgSGeKgFFuOI'],
+        filter: {
+          conjunction: 'and',
+          filterSet: [],
+        },
       });
+    });
+  });
+
+  describe('getForeignTableId', () => {
+    it('should return the foreign table ID from options', () => {
+      expect(field.getForeignTableId()).toBe('tblxxxxxxx');
+    });
+
+    it('should return undefined if no foreign table ID is set', () => {
+      const fieldWithoutForeignTable = plainToInstance(LinkFieldCore, {
+        ...json,
+        options: {
+          ...json.options,
+          foreignTableId: undefined,
+        },
+      });
+      expect(fieldWithoutForeignTable.getForeignTableId()).toBeUndefined();
+    });
+  });
+
+  describe('getForeignLookupField', () => {
+    it('should return the lookup field when table IDs match', () => {
+      const mockLookupField = { id: 'fldxxxxxxx', name: 'Lookup Field' } as any;
+      const mockTableDomain = {
+        id: 'tblxxxxxxx', // Matches the foreign table ID
+        getField: vi.fn((fieldId: string) => {
+          if (fieldId === 'fldxxxxxxx') {
+            return mockLookupField;
+          }
+          return undefined;
+        }),
+      } as any;
+
+      const result = field.getForeignLookupField(mockTableDomain);
+
+      expect(result).toBe(mockLookupField);
+      expect(mockTableDomain.getField).toHaveBeenCalledWith('fldxxxxxxx');
+    });
+
+    it('should return undefined when table IDs do not match', () => {
+      const mockTableDomain = {
+        id: 'tblwrongid', // Different from foreign table ID
+        getField: vi.fn(),
+      } as any;
+
+      const result = field.getForeignLookupField(mockTableDomain);
+
+      expect(result).toBeUndefined();
+      expect(mockTableDomain.getField).not.toHaveBeenCalled();
+    });
+
+    it('should return undefined when lookup field ID is not set', () => {
+      const fieldWithoutLookup = plainToInstance(LinkFieldCore, {
+        ...json,
+        options: {
+          ...json.options,
+          lookupFieldId: undefined,
+        },
+      });
+
+      const mockTableDomain = {
+        id: 'tblxxxxxxx',
+        getField: vi.fn(),
+      } as any;
+
+      const result = fieldWithoutLookup.getForeignLookupField(mockTableDomain);
+
+      expect(result).toBeUndefined();
+      expect(mockTableDomain.getField).not.toHaveBeenCalled();
+    });
+
+    it('should return undefined when lookup field is not found in table domain', () => {
+      const mockTableDomain = {
+        id: 'tblxxxxxxx',
+        getField: vi.fn(() => undefined), // Field not found
+      } as any;
+
+      const result = field.getForeignLookupField(mockTableDomain);
+
+      expect(result).toBeUndefined();
+      expect(mockTableDomain.getField).toHaveBeenCalledWith('fldxxxxxxx');
     });
   });
 });

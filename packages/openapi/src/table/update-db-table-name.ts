@@ -12,9 +12,9 @@ export const dbTableNameRoSchema = z.object({
     .regex(/^[a-z_]\w{0,62}$/i, {
       message: 'Invalid name format',
     })
-    .openapi({
+    .meta({
       description:
-        'table name in backend database. Limitation: 1-63 characters, start with letter or underscore, can only contain letters, numbers and underscore, case sensitive, cannot be duplicated with existing table name in the base.',
+        'table name in backend database. Limitation: 1-63 characters, start with letter or underscore, can only contain letters, numbers and underscore, case sensitive, cannot be duplicated with existing table name in the project.',
     }),
 });
 
@@ -23,7 +23,9 @@ export type IDbTableNameRo = z.infer<typeof dbTableNameRoSchema>;
 export const updateDbTableNameRoute: RouteConfig = registerRoute({
   method: 'put',
   path: DB_TABLE_NAME,
-  description: 'Update physical database table name',
+  summary: 'Update db table name',
+  description:
+    'Update the physical database table name. Must be 1-63 characters, start with letter or underscore, contain only letters, numbers and underscore, and be unique within the project.',
   request: {
     params: z.object({
       baseId: z.string(),
@@ -39,7 +41,7 @@ export const updateDbTableNameRoute: RouteConfig = registerRoute({
   },
   responses: {
     200: {
-      description: 'Successfully update.',
+      description: 'Database table name successfully updated.',
     },
   },
   tags: ['table'],

@@ -1,4 +1,10 @@
-import type { DragEndEvent, DragOverEvent, DragStartEvent, DropAnimation } from '@dnd-kit/core';
+import type {
+  DragEndEvent,
+  DragOverEvent,
+  DragStartEvent,
+  DropAnimation,
+  UniqueIdentifier,
+} from '@dnd-kit/core';
 import {
   DndContext,
   DragOverlay,
@@ -18,6 +24,8 @@ import {
 import type { IFieldInstance } from '@teable/sdk/model';
 import { useEffect, useMemo, useState } from 'react';
 import { FieldSetting } from '../../grid/components';
+import { FORM_SIDEBAR_DROPPABLE_ID } from '../constant';
+import { isProtectedField } from '../util';
 import { FormEditorMain } from './FormEditorMain';
 import { FormFieldEditor } from './FormFieldEditor';
 import { DragItem, FormSidebar } from './FormSidebar';
@@ -36,11 +44,12 @@ export const FormEditor = () => {
   const view = useView();
   const isHydrated = useIsHydrated();
   const visibleFields = useFields();
-  const allFields = useFields({ withHidden: true });
+  const allFields = useFields({ withHidden: true, withDenied: true });
   const getFieldStatic = useFieldStaticGetter();
   const [innerVisibleFields, setInnerVisibleFields] = useState([...visibleFields]);
   const [activeField, setActiveField] = useState<IFieldInstance | null>(null);
   const [activeSidebarField, setActiveSidebarField] = useState<IFieldInstance | null>(null);
+  const [sidebarAdditionalFieldId, setSidebarAdditionalFieldId] = useState<string | null>(null);
   const [additionalFieldData, setAdditionalFieldData] = useState<{
     field: IFieldInstance;
     index: number;
@@ -73,6 +82,7 @@ export const FormEditor = () => {
     setActiveField(null);
     setActiveSidebarField(null);
     setAdditionalFieldData(null);
+    setSidebarAdditionalFieldId(null);
   };
 
   const onDragStart = (event: DragStartEvent) => {
@@ -93,17 +103,27 @@ export const FormEditor = () => {
     const { over, active } = event;
     const activeData = active.data?.current || {};
     const overData = over?.data?.current || {};
+    const overId: UniqueIdentifier | undefined = over?.id;
     const { fromSidebar, field } = activeData;
     const { index, isContainer } = overData;
 
-    if (fromSidebar && (index != null || isContainer)) {
+    if (fromSidebar && (index != null || isContainer) && !sidebarAdditionalFieldId) {
       setAdditionalFieldData({ field, index: index ?? 0 });
+    }
+
+    if (activeField && overId === FORM_SIDEBAR_DROPPABLE_ID && !additionalFieldData) {
+      const isProtected = isProtectedField(activeField);
+      if (!isProtected) {
+        const sourceDragId = activeField.id;
+        setSidebarAdditionalFieldId(sourceDragId);
+      }
     }
   };
 
   // eslint-disable-next-line sonarjs/cognitive-complexity
   const onDragEnd = async (event: DragEndEvent) => {
     const { over } = event;
+    const overId: UniqueIdentifier | undefined = over?.id;
     const overData = over?.data?.current || {};
 
     const { index: targetIndex, isContainer } = overData;
@@ -183,6 +203,21 @@ export const FormEditor = () => {
         },
       ]);
     }
+
+    if (activeField && overId === FORM_SIDEBAR_DROPPABLE_ID) {
+      const isProtected = isProtectedField(activeField);
+      if (!isProtected) {
+        const sourceDragId = activeField.id;
+        await view?.updateColumnMeta([
+          {
+            fieldId: sourceDragId,
+            columnMeta: {
+              visible: false,
+            },
+          },
+        ]);
+      }
+    }
   };
 
   return (
@@ -195,7 +230,7 @@ export const FormEditor = () => {
           sensors={sensors}
           autoScroll
         >
-          <FormSidebar />
+          <FormSidebar sidebarAdditionalFieldId={sidebarAdditionalFieldId} />
           <FormEditorMain fields={renderFields} />
           <FieldSetting />
           <DragOverlay adjustScale={false} dropAnimation={dropAnimation}>

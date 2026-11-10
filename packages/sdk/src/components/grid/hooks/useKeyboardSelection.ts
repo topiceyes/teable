@@ -1,42 +1,18 @@
-import Mousetrap from 'mousetrap';
-import type { ExtendedKeyboardEvent } from 'mousetrap';
-import { useEffect } from 'react';
+import { useHotkeys, isHotkeyPressed } from 'react-hotkeys-hook';
 import type { IEditorContainerProps, IEditorRef } from '../components';
-import { GRID_CONTAINER_ID } from '../configs';
 import { SelectionRegionType } from '../interface';
 import type { IRange } from '../interface';
-import { isAncestorOfActiveElement } from '../utils';
 
-const SELECTION_MOVE_HOTKEYS = [
-  'up',
-  'down',
-  'left',
-  'right',
-  'mod+up',
-  'mod+down',
-  'mod+left',
-  'mod+right',
-  'shift+up',
-  'shift+down',
-  'shift+left',
-  'shift+right',
-  'mod+shift+up',
-  'mod+shift+down',
-  'mod+shift+left',
-  'mod+shift+right',
-];
-
-interface ISelectionKeyboardProps
-  extends Omit<
-    IEditorContainerProps,
-    | 'theme'
-    | 'onChange'
-    | 'scrollState'
-    | 'activeCellBound'
-    | 'real2RowIndex'
-    | 'getCellContent'
-    | 'onCellActivated'
-  > {
+interface ISelectionKeyboardProps extends Omit<
+  IEditorContainerProps,
+  | 'theme'
+  | 'onChange'
+  | 'scrollState'
+  | 'activeCellBound'
+  | 'real2RowIndex'
+  | 'getCellContent'
+  | 'onCellActivated'
+> {
   editorRef: React.MutableRefObject<IEditorRef | null>;
 }
 
@@ -50,59 +26,83 @@ export const useKeyboardSelection = (props: ISelectionKeyboardProps) => {
     setEditing,
     setActiveCell,
     setSelection,
-    onCopy,
+    onUndo,
+    onRedo,
     onDelete,
-    onRowAppend,
     onRowExpand,
     editorRef,
+    scrollBy,
+    disableEnterMoveDown,
   } = props;
   const { pureRowCount, columnCount } = coordInstance;
 
-  // eslint-disable-next-line sonarjs/cognitive-complexity
-  useEffect(() => {
-    Mousetrap.prototype.stopCallback = () => {
-      return false;
-    };
+  useHotkeys(
+    'mod+z',
+    () => {
+      onUndo?.();
+    },
+    {
+      enabled: !isEditing && selection.type !== SelectionRegionType.None,
+      preventDefault: true,
+      enableOnFormTags: ['input', 'select', 'textarea'],
+    }
+  );
 
-    Mousetrap.bind(SELECTION_MOVE_HOTKEYS, (e: ExtendedKeyboardEvent, combo: string) => {
-      if (!activeCell || isEditing) return;
-      e.preventDefault();
-      const isSelectionExpand = combo.includes('shift');
+  useHotkeys(
+    ['mod+shift+z', 'mod+y'],
+    () => {
+      onRedo?.();
+    },
+    {
+      enabled: !isEditing && selection.type !== SelectionRegionType.None,
+      preventDefault: true,
+      enableOnFormTags: ['input', 'select', 'textarea'],
+    }
+  );
+
+  useHotkeys(
+    [
+      'up',
+      'down',
+      'left',
+      'right',
+      'mod+up',
+      'mod+down',
+      'mod+left',
+      'mod+right',
+      'shift+up',
+      'shift+down',
+      'shift+left',
+      'shift+right',
+      'mod+shift+up',
+      'mod+shift+down',
+      'mod+shift+left',
+      'mod+shift+right',
+    ],
+    (keyboardEvent, hotkeysEvent) => {
+      const { shift, mod } = hotkeysEvent;
+      const isMod = Boolean(mod);
+      const isSelectionExpand = Boolean(shift);
       let [columnIndex, rowIndex] = selection.ranges[isSelectionExpand ? 1 : 0];
 
-      switch (combo) {
-        case 'up':
-        case 'shift+up':
-          rowIndex = Math.max(rowIndex - 1, 0);
-          break;
-        case 'down':
-        case 'shift+down':
-          rowIndex = Math.min(rowIndex + 1, pureRowCount - 1);
-          break;
-        case 'left':
-        case 'shift+left':
-          columnIndex = Math.max(columnIndex - 1, 0);
-          break;
-        case 'right':
-        case 'shift+right':
-          columnIndex = Math.min(columnIndex + 1, columnCount - 1);
-          break;
-        case 'mod+up':
-        case 'mod+shift+up':
+      if (isMod) {
+        if (isHotkeyPressed('up')) {
           rowIndex = 0;
-          break;
-        case 'mod+down':
-        case 'mod+shift+down':
+        } else if (isHotkeyPressed('down')) {
           rowIndex = pureRowCount - 1;
-          break;
-        case 'mod+left':
-        case 'mod+shift+left':
+        } else if (isHotkeyPressed('left')) {
           columnIndex = 0;
-          break;
-        case 'mod+right':
-        case 'mod+shift+right':
+        } else if (isHotkeyPressed('right')) {
           columnIndex = columnCount - 1;
-          break;
+        }
+      } else if (isHotkeyPressed('up')) {
+        rowIndex = Math.max(rowIndex - 1, 0);
+      } else if (isHotkeyPressed('down')) {
+        rowIndex = Math.min(rowIndex + 1, pureRowCount - 1);
+      } else if (isHotkeyPressed('left')) {
+        columnIndex = Math.max(columnIndex - 1, 0);
+      } else if (isHotkeyPressed('right')) {
+        columnIndex = Math.min(columnIndex + 1, columnCount - 1);
       }
 
       const newRange = <IRange>[columnIndex, rowIndex];
@@ -111,14 +111,22 @@ export const useKeyboardSelection = (props: ISelectionKeyboardProps) => {
       scrollToItem([columnIndex, rowIndex]);
       !isSelectionExpand && setActiveCell(newRange);
       setSelection(selection.setRanges(ranges));
-    });
+    },
+    {
+      enabled: Boolean(activeCell && !isEditing),
+      enableOnFormTags: ['input', 'select', 'textarea'],
+    }
+  );
 
-    Mousetrap.bind(['tab'], (e: ExtendedKeyboardEvent) => {
-      if (!activeCell) return;
-      if (!isAncestorOfActiveElement(GRID_CONTAINER_ID)) return;
-      e.preventDefault();
+  useHotkeys(
+    ['tab', 'shift+tab'],
+    () => {
       const [columnIndex, rowIndex] = selection.ranges[0];
-      const newColumnIndex = Math.min(columnIndex + 1, columnCount - 1);
+
+      let newColumnIndex = Math.min(columnIndex + 1, columnCount - 1);
+      if (isHotkeyPressed('shift') && isHotkeyPressed('tab'))
+        newColumnIndex = Math.max(columnIndex - 1, 0);
+
       const newRange = <IRange>[newColumnIndex, rowIndex];
       const ranges = [newRange, newRange];
 
@@ -127,54 +135,73 @@ export const useKeyboardSelection = (props: ISelectionKeyboardProps) => {
       setEditing(false);
       setActiveCell(newRange);
       setSelection(selection.setRanges(ranges));
-    });
+    },
+    {
+      enabled: Boolean(activeCell),
+      enableOnFormTags: ['input', 'select', 'textarea'],
+    }
+  );
 
-    Mousetrap.bind('mod+a', (e: ExtendedKeyboardEvent) => {
-      if (!activeCell || isEditing) return;
-      e.preventDefault();
+  useHotkeys(
+    ['PageUp', 'PageDown'],
+    () => {
+      const delta = coordInstance.containerHeight - coordInstance.rowInitSize - 1;
+      scrollBy(0, isHotkeyPressed('PageUp') ? -delta : delta);
+    },
+    {
+      enabled: Boolean(activeCell && !isEditing),
+      enableOnFormTags: ['input', 'select', 'textarea'],
+    }
+  );
+  useHotkeys(
+    'mod+a',
+    () => {
       const ranges = [
         [0, 0],
         [columnCount - 1, pureRowCount - 1],
       ] as IRange[];
       setSelection(selection.setRanges(ranges));
-    });
+    },
+    {
+      enabled: Boolean(activeCell && !isEditing),
+      enableOnFormTags: ['input', 'select', 'textarea'],
+    }
+  );
 
-    Mousetrap.bind(
-      ['del', 'backspace', 'mod+v', 'f2'],
-      (e: ExtendedKeyboardEvent, combo: string) => {
-        if (!activeCell || isEditing) return;
-        if (!isAncestorOfActiveElement(GRID_CONTAINER_ID)) return;
-        switch (combo) {
-          case 'f2':
-            return setEditing(true);
-          case 'del':
-          case 'backspace':
-            return onDelete?.(selection);
-        }
+  useHotkeys(
+    ['delete', 'backspace', 'f2'],
+    () => {
+      if (isHotkeyPressed('f2')) {
+        return setEditing(true);
       }
-    );
+      if (isHotkeyPressed('backspace') || isHotkeyPressed('delete')) {
+        return onDelete?.(selection);
+      }
+    },
+    {
+      enabled: Boolean(activeCell && !isEditing),
+      enableOnFormTags: ['input', 'select', 'textarea'],
+    }
+  );
 
-    Mousetrap.bind(['mod+c'], () => {
-      if (isEditing) return;
-      if (!isAncestorOfActiveElement(GRID_CONTAINER_ID)) return;
-      if (selection.type === SelectionRegionType.None) return;
-      onCopy?.(selection);
-    });
+  useHotkeys(
+    ['enter'],
+    (keyboardEvent) => {
+      if (keyboardEvent.isComposing) return;
 
-    Mousetrap.bind(['enter', 'shift+enter'], (e: ExtendedKeyboardEvent, combo: string) => {
-      if (!activeCell) return;
       const { isColumnSelection, ranges: selectionRanges } = selection;
-      const isShiftEnter = combo === 'shift+enter';
       if (isEditing) {
         let range = selectionRanges[0];
         if (isColumnSelection) {
           range = [range[0], 0];
         }
         const [columnIndex, rowIndex] = range;
-        const nextRowIndex = isShiftEnter ? rowIndex + 1 : Math.min(rowIndex + 1, pureRowCount - 1);
+        // Stay on the edited cell so the caller can follow a record that re-positions on edit.
+        const nextRowIndex = disableEnterMoveDown
+          ? rowIndex
+          : Math.min(rowIndex + 1, pureRowCount - 1);
         const newRange = [columnIndex, nextRowIndex] as IRange;
         editorRef.current?.saveValue?.();
-        isShiftEnter && onRowAppend?.();
         setTimeout(() => {
           setSelection(selection.set(SelectionRegionType.Cells, [newRange, newRange]));
           setActiveCell(newRange);
@@ -184,21 +211,33 @@ export const useKeyboardSelection = (props: ISelectionKeyboardProps) => {
       } else {
         setEditing(true);
       }
-    });
+    },
+    {
+      enabled: Boolean(activeCell),
+      enableOnFormTags: ['input', 'select', 'textarea'],
+    }
+  );
 
-    Mousetrap.bind('esc', () => {
-      if (!activeCell) return;
+  useHotkeys(
+    'esc',
+    () => {
       setEditing(false);
-    });
+    },
+    {
+      enabled: Boolean(activeCell),
+      enableOnFormTags: ['input', 'select', 'textarea'],
+    }
+  );
 
-    Mousetrap.bind('space', () => {
-      if (!activeCell || isEditing) return;
-      const [, rowIndex] = activeCell;
+  useHotkeys(
+    'space',
+    () => {
+      const [, rowIndex] = activeCell!;
       onRowExpand?.(rowIndex);
-    });
-
-    return () => {
-      Mousetrap.reset();
-    };
-  });
+    },
+    {
+      enabled: Boolean(activeCell && !isEditing),
+      enableOnFormTags: ['input', 'select', 'textarea'],
+    }
+  );
 };

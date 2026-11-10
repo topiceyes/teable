@@ -1,0 +1,94 @@
+import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { updateUserIntegrationName, UserIntegrationProvider } from '@teable/openapi';
+import type { IUserIntegrationListVo } from '@teable/openapi';
+import { ReactQueryKeys } from '@teable/sdk/config';
+import { useLanDayjs } from '@teable/sdk/hooks';
+import { useState } from 'react';
+import { UserIntegrationProviderLogo } from '@/features/app/components/user-integration/ProviderLogo';
+import { useAvailableIntegrationProviders } from '@/features/app/hooks/useSetting';
+import { useConnectIntegration } from '../../../user-integration/useConnectIntegration';
+import { ActionMenu } from './ActionMenu';
+import { AccountItem } from './provider/AccountItem';
+import { SlackItem } from './provider/SlackItem';
+import { Rename } from './Rename';
+
+export const List = (props: { list?: IUserIntegrationListVo['integrations'] }) => {
+  const { list } = props;
+  const queryClient = useQueryClient();
+  const [editingId, setEditingId] = useState<string>();
+  const dayjs = useLanDayjs();
+  const availableIntegrationProviders = useAvailableIntegrationProviders();
+
+  const { mutate: updateUserIntegrationNameMutate } = useMutation({
+    mutationFn: ({ id, name }: { id: string; name: string }) => updateUserIntegrationName(id, name),
+    onSuccess: () => {
+      setEditingId(undefined);
+      queryClient.invalidateQueries({ queryKey: ReactQueryKeys.getUserIntegrations() });
+    },
+  });
+
+  const { connect } = useConnectIntegration();
+  const handleReconnectIntegration = (provider: UserIntegrationProvider, integrationId: string) => {
+    connect(provider, { integrationId });
+  };
+
+  return (
+    <div className="flex-1 overflow-auto">
+      {list?.map((integration) => (
+        <div
+          key={integration.id}
+          className="flex items-center justify-between gap-2 border-t py-3 sm:gap-4"
+        >
+          <div className="flex min-w-0 flex-1 items-center gap-3">
+            <UserIntegrationProviderLogo
+              provider={integration.provider}
+              className="size-10 shrink-0"
+            />
+            {integration.provider === UserIntegrationProvider.Slack ? (
+              <SlackItem item={integration}>
+                <Rename
+                  name={integration.name}
+                  setIsEditing={(editing) => setEditingId(editing ? integration.id : undefined)}
+                  isEditing={integration.id === editingId}
+                  onNameChange={(name) =>
+                    updateUserIntegrationNameMutate({ id: integration.id, name })
+                  }
+                />
+              </SlackItem>
+            ) : (
+              <AccountItem item={integration}>
+                <Rename
+                  name={integration.name}
+                  setIsEditing={(editing) => setEditingId(editing ? integration.id : undefined)}
+                  isEditing={integration.id === editingId}
+                  onNameChange={(name) =>
+                    updateUserIntegrationNameMutate({ id: integration.id, name })
+                  }
+                />
+              </AccountItem>
+            )}
+          </div>
+          <div className="flex shrink-0 items-center gap-2 sm:gap-4">
+            <div className="max-w-20 truncate text-xs text-muted-foreground">
+              {dayjs(integration.connectedTime).fromNow()}
+            </div>
+            <div className="flex items-center gap-4 text-sm text-muted-foreground">
+              <ActionMenu
+                integrationId={integration.id}
+                name={integration.name}
+                onRename={() => {
+                  setEditingId(integration.id);
+                }}
+                onReconnect={
+                  availableIntegrationProviders.includes(integration.provider)
+                    ? () => handleReconnectIntegration(integration.provider, integration.id)
+                    : undefined
+                }
+              />
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+};

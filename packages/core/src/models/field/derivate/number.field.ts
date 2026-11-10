@@ -1,27 +1,15 @@
 import { z } from 'zod';
 import type { FieldType, CellValueType } from '../constant';
 import { FieldCore } from '../field';
+import type { IFieldVisitor } from '../field-visitor.interface';
 import {
   defaultNumberFormatting,
   formatNumberToString,
   numberFormattingSchema,
   parseStringToNumber,
 } from '../formatting';
-import { getShowAsSchema, numberShowAsSchema } from '../show-as';
-
-export const numberFieldOptionsSchema = z.object({
-  formatting: numberFormattingSchema,
-  showAs: numberShowAsSchema.optional(),
-});
-
-export const numberFieldOptionsRoSchema = numberFieldOptionsSchema.partial({
-  formatting: true,
-  showAs: true,
-});
-
-export type INumberFieldOptionsRo = z.infer<typeof numberFieldOptionsRoSchema>;
-
-export type INumberFieldOptions = z.infer<typeof numberFieldOptionsSchema>;
+import { getShowAsSchema } from '../show-as';
+import { type INumberFieldOptions } from './number-option.schema';
 
 export const numberCellValueSchema = z.number();
 
@@ -32,12 +20,18 @@ export class NumberFieldCore extends FieldCore {
 
   options!: INumberFieldOptions;
 
+  meta?: undefined;
+
   cellValueType!: CellValueType.Number;
 
   static defaultOptions(): INumberFieldOptions {
     return {
       formatting: defaultNumberFormatting,
     };
+  }
+
+  getNumberFormatting() {
+    return this.options?.formatting ?? defaultNumberFormatting;
   }
 
   cellValue2String(cellValue?: unknown) {
@@ -53,7 +47,7 @@ export class NumberFieldCore extends FieldCore {
   }
 
   item2String(value?: unknown): string {
-    return formatNumberToString(value as number, this.options.formatting);
+    return formatNumberToString(value as number, this.getNumberFormatting());
   }
 
   convertStringToCellValue(value: string): number | null {
@@ -61,7 +55,7 @@ export class NumberFieldCore extends FieldCore {
       return null;
     }
 
-    return parseStringToNumber(value, this.options.formatting);
+    return parseStringToNumber(value, this.getNumberFormatting());
   }
 
   repair(value: unknown) {
@@ -92,5 +86,9 @@ export class NumberFieldCore extends FieldCore {
       return z.array(numberCellValueSchema).nonempty().nullable().safeParse(value);
     }
     return numberCellValueSchema.nullable().safeParse(value);
+  }
+
+  accept<T>(visitor: IFieldVisitor<T>): T {
+    return visitor.visitNumberField(this);
   }
 }

@@ -1,17 +1,26 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
-import type { ILinkCellValue, ILinkFieldOptions } from '@teable/core';
-import { FieldType, Relationship } from '@teable/core';
+/* eslint-disable sonarjs/cognitive-complexity */
+/* eslint-disable sonarjs/no-duplicate-string */
+import { Injectable, Logger } from '@nestjs/common';
+import type { ILinkCellValue, ILinkFieldOptions, IRecord, TableDomain } from '@teable/core';
+import { FieldType, HttpErrorCode, Relationship } from '@teable/core';
 import type { Field } from '@teable/db-main-prisma';
 import { PrismaService } from '@teable/db-main-prisma';
 import { Knex } from 'knex';
-import { cloneDeep, keyBy, difference, groupBy, isEqual, set } from 'lodash';
+import { cloneDeep, keyBy, difference, groupBy, isEqual, set, uniqBy } from 'lodash';
 import { InjectModel } from 'nest-knexjs';
+import { CustomHttpException } from '../../custom.exception';
+import { InjectDbProvider } from '../../db-provider/db.provider';
+import { IDbProvider } from '../../db-provider/db.provider.interface';
+import { DatabaseRouter } from '../../global/database-router.service';
+import { DATA_KNEX } from '../../global/knex/knex.module';
+import { Timing } from '../../utils/timing';
 import type { IFieldInstance, IFieldMap } from '../field/model/factory';
 import { createFieldInstanceByRaw } from '../field/model/factory';
 import type { LinkFieldDto } from '../field/model/field-dto/link-field.dto';
 import { SchemaType } from '../field/util';
+import { InjectRecordQueryBuilder, IRecordQueryBuilder } from '../record/query-builder';
 import { BatchService } from './batch.service';
-import type { ICellChange } from './utils/changes';
+import type { ICellChange, ICellContext } from './utils/changes';
 import { isLinkCellValue } from './utils/detect-link';
 
 export interface IFkRecordMap {
@@ -46,20 +55,36 @@ export interface ILinkCellContext {
   oldValue?: { id: string }[] | { id: string };
 }
 
-export interface ICellContext {
-  recordId: string;
-  fieldId: string;
-  newValue?: unknown;
-  oldValue?: unknown;
-}
-
 @Injectable()
 export class LinkService {
+  private readonly logger = new Logger(LinkService.name);
   constructor(
     private readonly prismaService: PrismaService,
+    private readonly databaseRouter: DatabaseRouter,
     private readonly batchService: BatchService,
-    @InjectModel('CUSTOM_KNEX') private readonly knex: Knex
+    @InjectRecordQueryBuilder() private readonly recordQueryBuilder: IRecordQueryBuilder,
+    @InjectDbProvider() private readonly dbProvider: IDbProvider,
+    @InjectModel(DATA_KNEX) private readonly knex: Knex
   ) {}
+
+  private async executeForTable(tableId: string, query: string) {
+    return await this.databaseRouter.executeDataPrismaForTable(tableId, query, {
+      useTransaction: true,
+    });
+  }
+
+  private async queryForTable<T>(tableId: string, query: string, ...values: unknown[]) {
+    return await this.databaseRouter.queryDataPrismaForTable<T>(
+      tableId,
+      query,
+      { useTransaction: true },
+      ...values
+    );
+  }
+
+  private isErroredLinkField(field: Field | IFieldInstance): boolean {
+    return Boolean((field as { hasError?: boolean | null }).hasError);
+  }
 
   private validateLinkCell(cell: ILinkCellContext) {
     if (!Array.isArray(cell.newValue)) {
@@ -68,7 +93,16 @@ export class LinkService {
     const checkSet = new Set<string>();
     cell.newValue.forEach((v) => {
       if (checkSet.has(v.id)) {
-        throw new BadRequestException(`Cannot set duplicate recordId: ${v.id} in the same cell`);
+        throw new CustomHttpException(
+          `Cannot set duplicate recordId: ${v.id} in the same cell`,
+          HttpErrorCode.VALIDATION_ERROR,
+          {
+            localization: {
+              i18nKey: 'httpErrors.field.linkCellRecordIdAlreadyExists',
+              context: { recordId: v.id },
+            },
+          }
+        );
       }
       checkSet.add(v.id);
     });
@@ -90,9 +124,51 @@ export class LinkService {
       });
   }
 
+  private buildFieldMapFromTables(
+    fieldIds: string[],
+    tables?: Map<string, TableDomain>
+  ): IFieldMapByTableId | undefined {
+    if (!tables?.size) {
+      return undefined;
+    }
+
+    const fieldMapByTableId: IFieldMapByTableId = {};
+
+    for (const [tableId, domain] of tables) {
+      for (const field of domain.fieldList) {
+        (fieldMapByTableId[tableId] ||= {})[field.id] = field as unknown as IFieldInstance;
+      }
+    }
+
+    const hasAllRequestedFields = fieldIds.every((fieldId) =>
+      Object.values(fieldMapByTableId).some((fields) => Boolean(fields?.[fieldId]))
+    );
+
+    return hasAllRequestedFields ? fieldMapByTableId : undefined;
+  }
+
+  private buildTableId2DbTableNameFromTables(
+    tableIds: string[],
+    tables?: Map<string, TableDomain>
+  ) {
+    if (!tables?.size) {
+      return undefined;
+    }
+
+    const result: { [tableId: string]: string } = {};
+    for (const tableId of tableIds) {
+      const domain = tables.get(tableId);
+      if (domain) {
+        result[tableId] = domain.dbTableName;
+      }
+    }
+
+    return Object.keys(result).length === tableIds.length ? result : undefined;
+  }
+
   private async getRelatedFieldMap(fieldIds: string[]): Promise<IFieldMapByTableId> {
     const fieldRaws = await this.prismaService.txClient().field.findMany({
-      where: { id: { in: fieldIds } },
+      where: { id: { in: fieldIds }, isLookup: null },
     });
     const fields = fieldRaws.map(createFieldInstanceByRaw) as LinkFieldDto[];
 
@@ -134,6 +210,57 @@ export class LinkService {
     );
   }
 
+  private formatTitleWithField(field: IFieldInstance, value: unknown): string | undefined {
+    try {
+      const formatted = field.cellValue2String(value);
+      if (typeof formatted === 'string' && formatted.trim().length > 0) {
+        return formatted;
+      }
+    } catch {
+      // Swallow formatting issues and fall back to generic extraction logic
+    }
+    return undefined;
+  }
+
+  private extractLinkTitle(value: unknown, field?: IFieldInstance): string | undefined {
+    if (value == null) {
+      return undefined;
+    }
+    if (field) {
+      const formatted = this.formatTitleWithField(field, value);
+      if (formatted) {
+        return formatted;
+      }
+    }
+    if (typeof value === 'string') {
+      return value;
+    }
+    if (typeof value === 'number' || typeof value === 'boolean') {
+      return String(value);
+    }
+    if (Array.isArray(value)) {
+      const titles = value
+        .map((item) => this.extractLinkTitle(item, field))
+        .filter((item): item is string => typeof item === 'string' && item.trim().length > 0);
+      return titles.length ? titles.join(', ') : undefined;
+    }
+    if (typeof value === 'object') {
+      const record = value as Record<string, unknown>;
+      const candidateKeys = ['title', 'name', 'text', 'label', 'email'];
+      for (const key of candidateKeys) {
+        const candidate = record[key];
+        if (typeof candidate === 'string' && candidate.trim()) {
+          return candidate;
+        }
+      }
+      const id = record.id;
+      if (typeof id === 'string' && id.trim()) {
+        return id;
+      }
+    }
+    return undefined;
+  }
+
   // eslint-disable-next-line sonarjs/cognitive-complexity
   private updateForeignCellForManyMany(params: {
     fkItem: IFkRecordItem;
@@ -142,6 +269,7 @@ export class LinkService {
     sourceLookedFieldId: string;
     sourceRecordMap: IRecordMapByTableId['tableId'];
     foreignRecordMap: IRecordMapByTableId['tableId'];
+    sourceLookupField?: IFieldInstance;
   }) {
     const {
       fkItem,
@@ -150,6 +278,7 @@ export class LinkService {
       sourceLookedFieldId,
       foreignRecordMap,
       sourceRecordMap,
+      sourceLookupField,
     } = params;
     const oldKey = (fkItem.oldKey || []) as string[];
     const newKey = (fkItem.newKey || []) as string[];
@@ -162,10 +291,13 @@ export class LinkService {
       toDelete.forEach((foreignRecordId) => {
         const foreignCellValue = foreignRecordMap[foreignRecordId][symmetricFieldId] as
           | ILinkCellValue[]
+          | ILinkCellValue
           | null;
 
         if (foreignCellValue) {
-          const filteredCellValue = foreignCellValue.filter((item) => item.id !== recordId);
+          const filteredCellValue = [foreignCellValue]
+            .flat()
+            .filter((item) => item.id !== recordId);
           foreignRecordMap[foreignRecordId][symmetricFieldId] = filteredCellValue.length
             ? filteredCellValue
             : null;
@@ -175,21 +307,34 @@ export class LinkService {
 
     if (toAdd.length) {
       toAdd.forEach((foreignRecordId) => {
-        const sourceRecordTitle = sourceRecordMap[recordId][sourceLookedFieldId] as
-          | string
-          | undefined;
+        const lookupValue =
+          sourceLookedFieldId != null
+            ? sourceRecordMap[recordId]?.[sourceLookedFieldId]
+            : undefined;
+        const sourceRecordTitle = this.extractLinkTitle(lookupValue, sourceLookupField);
         const newForeignRecord = foreignRecordMap[foreignRecordId];
         if (!newForeignRecord) {
-          throw new BadRequestException(
-            `Consistency error, recordId ${foreignRecordId} is not exist`
+          throw new CustomHttpException(
+            `Consistency error, recordId ${foreignRecordId} is not exist`,
+            HttpErrorCode.VALIDATION_ERROR,
+            {
+              localization: {
+                i18nKey: 'httpErrors.field.linkConsistencyError',
+                context: { recordId: foreignRecordId },
+              },
+            }
           );
         }
-        const foreignCellValue = newForeignRecord[symmetricFieldId] as ILinkCellValue[] | null;
+        const foreignCellValue = newForeignRecord[symmetricFieldId] as
+          | ILinkCellValue[]
+          | ILinkCellValue
+          | null;
         if (foreignCellValue) {
-          newForeignRecord[symmetricFieldId] = foreignCellValue.concat({
+          const newForeignCellValue = [foreignCellValue].flat().concat({
             id: recordId,
             title: sourceRecordTitle,
           });
+          newForeignRecord[symmetricFieldId] = uniqBy(newForeignCellValue, 'id');
         } else {
           newForeignRecord[symmetricFieldId] = [{ id: recordId, title: sourceRecordTitle }];
         }
@@ -204,6 +349,7 @@ export class LinkService {
     sourceLookedFieldId: string;
     sourceRecordMap: IRecordMapByTableId['tableId'];
     foreignRecordMap: IRecordMapByTableId['tableId'];
+    sourceLookupField?: IFieldInstance;
   }) {
     const {
       fkItem,
@@ -212,38 +358,60 @@ export class LinkService {
       sourceLookedFieldId,
       foreignRecordMap,
       sourceRecordMap,
+      sourceLookupField,
     } = params;
-    const oldKey = fkItem.oldKey as string | null;
+    const oldKey = (fkItem.oldKey || []) as string[];
     const newKey = fkItem.newKey as string | null;
 
     // Update link cell values for symmetric field of the foreign table
-    if (oldKey) {
-      const foreignCellValue = foreignRecordMap[oldKey][symmetricFieldId] as
-        | ILinkCellValue[]
-        | null;
+    if (oldKey?.length) {
+      oldKey.forEach((foreignRecordId) => {
+        const foreignCellValue = foreignRecordMap[foreignRecordId][symmetricFieldId] as
+          | ILinkCellValue[]
+          | ILinkCellValue
+          | null;
 
-      if (foreignCellValue) {
-        const filteredCellValue = foreignCellValue.filter((item) => item.id !== recordId);
-        foreignRecordMap[oldKey][symmetricFieldId] = filteredCellValue.length
-          ? filteredCellValue
-          : null;
-      }
+        if (foreignCellValue) {
+          const filteredCellValue = [foreignCellValue]
+            .flat()
+            .filter((item) => item.id !== recordId);
+
+          foreignRecordMap[foreignRecordId][symmetricFieldId] = filteredCellValue.length
+            ? filteredCellValue
+            : null;
+        } else {
+          foreignRecordMap[foreignRecordId][symmetricFieldId] = null;
+        }
+      });
     }
 
     if (newKey) {
-      const sourceRecordTitle = sourceRecordMap[recordId][sourceLookedFieldId] as
-        | string
-        | undefined;
+      const lookupValue =
+        sourceLookedFieldId != null ? sourceRecordMap[recordId]?.[sourceLookedFieldId] : undefined;
+      const sourceRecordTitle = this.extractLinkTitle(lookupValue, sourceLookupField);
       const newForeignRecord = foreignRecordMap[newKey];
       if (!newForeignRecord) {
-        throw new BadRequestException(`Consistency error, recordId ${newKey} is not exist`);
+        throw new CustomHttpException(
+          `Consistency error, recordId ${newKey} is not exist`,
+          HttpErrorCode.VALIDATION_ERROR,
+          {
+            localization: {
+              i18nKey: 'httpErrors.field.linkConsistencyError',
+              context: { recordId: newKey },
+            },
+          }
+        );
       }
-      const foreignCellValue = newForeignRecord[symmetricFieldId] as ILinkCellValue[] | null;
+      const foreignCellValue = newForeignRecord[symmetricFieldId] as
+        | ILinkCellValue[]
+        | ILinkCellValue
+        | null;
       if (foreignCellValue) {
-        newForeignRecord[symmetricFieldId] = foreignCellValue.concat({
+        const newForeignCellValue = [foreignCellValue].flat().concat({
           id: recordId,
           title: sourceRecordTitle,
         });
+        newForeignRecord[symmetricFieldId] = uniqBy(newForeignCellValue, 'id');
       } else {
         newForeignRecord[symmetricFieldId] = [{ id: recordId, title: sourceRecordTitle }];
       }
@@ -257,6 +425,7 @@ export class LinkService {
     sourceLookedFieldId: string;
     sourceRecordMap: IRecordMapByTableId['tableId'];
     foreignRecordMap: IRecordMapByTableId['tableId'];
+    sourceLookupField?: IFieldInstance;
   }) {
     const {
       fkItem,
@@ -265,6 +434,7 @@ export class LinkService {
       sourceLookedFieldId,
       foreignRecordMap,
       sourceRecordMap,
+      sourceLookupField,
     } = params;
 
     const oldKey = (fkItem.oldKey || []) as string[];
@@ -280,9 +450,9 @@ export class LinkService {
     }
 
     if (toAdd.length) {
-      const sourceRecordTitle = sourceRecordMap[recordId][sourceLookedFieldId] as
-        | string
-        | undefined;
+      const lookupValue =
+        sourceLookedFieldId != null ? sourceRecordMap[recordId]?.[sourceLookedFieldId] : undefined;
+      const sourceRecordTitle = this.extractLinkTitle(lookupValue, sourceLookupField);
 
       toAdd.forEach((foreignRecordId) => {
         foreignRecordMap[foreignRecordId][symmetricFieldId] = {
@@ -300,6 +470,7 @@ export class LinkService {
     sourceLookedFieldId: string;
     sourceRecordMap: IRecordMapByTableId['tableId'];
     foreignRecordMap: IRecordMapByTableId['tableId'];
+    sourceLookupField?: IFieldInstance;
   }) {
     const {
       fkItem,
@@ -308,19 +479,22 @@ export class LinkService {
       sourceLookedFieldId,
       foreignRecordMap,
       sourceRecordMap,
+      sourceLookupField,
     } = params;
 
-    const oldKey = fkItem.oldKey as string | undefined;
+    const oldKey = (fkItem.oldKey || []) as string[];
     const newKey = fkItem.newKey as string | undefined;
 
-    if (oldKey) {
-      foreignRecordMap[oldKey][symmetricFieldId] = null;
+    if (oldKey?.length) {
+      oldKey.forEach((foreignRecordId) => {
+        foreignRecordMap[foreignRecordId][symmetricFieldId] = null;
+      });
     }
 
     if (newKey) {
-      const sourceRecordTitle = sourceRecordMap[recordId][sourceLookedFieldId] as
-        | string
-        | undefined;
+      const lookupValue =
+        sourceLookedFieldId != null ? sourceRecordMap[recordId]?.[sourceLookedFieldId] : undefined;
+      const sourceRecordTitle = this.extractLinkTitle(lookupValue, sourceLookupField);
 
       foreignRecordMap[newKey][symmetricFieldId] = {
         id: recordId,
@@ -337,6 +511,7 @@ export class LinkService {
     foreignLookedFieldId: string;
     sourceRecordMap: IRecordMapByTableId['tableId'];
     foreignRecordMap: IRecordMapByTableId['tableId'];
+    foreignLookupField?: IFieldInstance;
   }) {
     const {
       newKey,
@@ -345,6 +520,7 @@ export class LinkService {
       foreignLookedFieldId,
       foreignRecordMap,
       sourceRecordMap,
+      foreignLookupField,
     } = params;
 
     if (!newKey) {
@@ -354,12 +530,17 @@ export class LinkService {
     if (Array.isArray(newKey)) {
       sourceRecordMap[recordId][linkFieldId] = newKey.map((key) => ({
         id: key,
-        title: foreignRecordMap[key][foreignLookedFieldId] as string | undefined,
+        title: this.extractLinkTitle(
+          foreignLookedFieldId != null ? foreignRecordMap[key]?.[foreignLookedFieldId] : undefined,
+          foreignLookupField
+        ),
       }));
       return;
     }
 
-    const foreignRecordTitle = foreignRecordMap[newKey][foreignLookedFieldId] as string | undefined;
+    const lookupValue =
+      foreignLookedFieldId != null ? foreignRecordMap[newKey]?.[foreignLookedFieldId] : undefined;
+    const foreignRecordTitle = this.extractLinkTitle(lookupValue, foreignLookupField);
     sourceRecordMap[recordId][linkFieldId] = { id: newKey, title: foreignRecordTitle };
   }
 
@@ -377,6 +558,10 @@ export class LinkService {
       const relationship = linkField.options.relationship;
       const foreignTableId = linkField.options.foreignTableId;
       const foreignLookedFieldId = linkField.options.lookupFieldId;
+      const foreignLookupField =
+        foreignLookedFieldId != null
+          ? fieldMapByTableId[foreignTableId]?.[foreignLookedFieldId]
+          : undefined;
 
       const sourceRecordMap = recordMapByTableId[tableId];
       const foreignRecordMap = recordMapByTableId[foreignTableId];
@@ -392,6 +577,7 @@ export class LinkService {
           foreignLookedFieldId,
           sourceRecordMap,
           foreignRecordMap,
+          foreignLookupField,
         });
 
         if (!symmetricFieldId) {
@@ -399,6 +585,10 @@ export class LinkService {
         }
         const symmetricField = fieldMapByTableId[foreignTableId][symmetricFieldId] as LinkFieldDto;
         const sourceLookedFieldId = symmetricField.options.lookupFieldId;
+        const sourceLookupField =
+          sourceLookedFieldId != null
+            ? fieldMapByTableId[tableId]?.[sourceLookedFieldId]
+            : undefined;
         const params = {
           fkItem,
           recordId,
@@ -406,6 +596,7 @@ export class LinkService {
           sourceLookedFieldId,
           sourceRecordMap,
           foreignRecordMap,
+          sourceLookupField,
         };
         if (relationship === Relationship.ManyMany) {
           this.updateForeignCellForManyMany(params);
@@ -442,9 +633,7 @@ export class LinkService {
       .whereNotNull(foreignKeyName)
       .toQuery();
 
-    return this.prismaService
-      .txClient()
-      .$queryRawUnsafe<{ id: string; foreignId: string }[]>(query);
+    return this.queryForTable<{ id: string; foreignId: string }[]>(options.foreignTableId, query);
   }
 
   async getAllForeignKeys(options: ILinkFieldOptions) {
@@ -459,9 +648,7 @@ export class LinkService {
       .whereNotNull(foreignKeyName)
       .toQuery();
 
-    return this.prismaService
-      .txClient()
-      .$queryRawUnsafe<{ id: string; foreignId: string }[]>(query);
+    return this.queryForTable<{ id: string; foreignId: string }[]>(options.foreignTableId, query);
   }
 
   private async getJoinedForeignKeys(linkRecordIds: string[], options: ILinkFieldOptions) {
@@ -469,19 +656,19 @@ export class LinkService {
 
     const query = this.knex(fkHostTableName)
       .select({
-        id: `a.${selfKeyName}`,
-        foreignId: `b.${foreignKeyName}`,
+        id: selfKeyName,
+        foreignId: foreignKeyName,
       })
-      .from(this.knex.ref(fkHostTableName).as('a'))
-      .join(`${fkHostTableName} AS b`, `a.${selfKeyName}`, '=', `b.${selfKeyName}`)
-      .whereIn(`a.${foreignKeyName}`, linkRecordIds)
-      .whereNotNull(`a.${selfKeyName}`)
-      .whereNotNull(`b.${foreignKeyName}`)
+      .whereIn(selfKeyName, function () {
+        this.select(selfKeyName)
+          .from(fkHostTableName)
+          .whereIn(foreignKeyName, linkRecordIds)
+          .whereNotNull(selfKeyName);
+      })
+      .whereNotNull(foreignKeyName)
       .toQuery();
 
-    return this.prismaService
-      .txClient()
-      .$queryRawUnsafe<{ id: string; foreignId: string }[]>(query);
+    return this.queryForTable<{ id: string; foreignId: string }[]>(options.foreignTableId, query);
   }
 
   /**
@@ -506,8 +693,15 @@ export class LinkService {
       if (Array.isArray(cellValue)) {
         cellValue.forEach((item) => {
           if (checkSet.has(item.id)) {
-            throw new BadRequestException(
-              `Consistency error, ${relationship} link field {${field.id}} unable to link a record (${item.id}) more than once`
+            throw new CustomHttpException(
+              `Consistency error, ${relationship} link field {${field.id}} unable to link a record (${item.id}) more than once`,
+              HttpErrorCode.VALIDATION_ERROR,
+              {
+                localization: {
+                  i18nKey: 'httpErrors.custom.linkFieldValueDuplicate',
+                  context: { fieldName: field.name },
+                },
+              }
             );
           }
           checkSet.add(item.id);
@@ -515,8 +709,15 @@ export class LinkService {
         return;
       }
       if (checkSet.has(cellValue.id)) {
-        throw new BadRequestException(
-          `Consistency error, ${relationship} link field {${field.id}} unable to link a record (${cellValue.id}) more than once`
+        throw new CustomHttpException(
+          `Consistency error, ${relationship} link field {${field.id}} unable to link a record (${cellValue.id}) more than once`,
+          HttpErrorCode.VALIDATION_ERROR,
+          {
+            localization: {
+              i18nKey: 'httpErrors.custom.linkFieldValueDuplicate',
+              context: { fieldName: field.name },
+            },
+          }
         );
       }
       checkSet.add(cellValue.id);
@@ -545,21 +746,47 @@ export class LinkService {
       const id = cellContext.recordId;
       const foreignKeys = foreignKeysIndexed[id];
       if (relationship === Relationship.OneOne || relationship === Relationship.ManyOne) {
+        const oldCellValue = cellContext.oldValue as ILinkCellValue | ILinkCellValue[] | undefined;
         const newCellValue = cellContext.newValue as ILinkCellValue | undefined;
-        if ((foreignKeys?.length ?? 0) > 1) {
-          throw new Error('duplicate foreign key from database');
+        if (Array.isArray(newCellValue)) {
+          throw new CustomHttpException(
+            `CellValue of ${relationship} link field values cannot be an array`,
+            HttpErrorCode.VALIDATION_ERROR,
+            {
+              localization: {
+                i18nKey:
+                  relationship === Relationship.OneOne
+                    ? 'httpErrors.field.oneOneLinkCellValueCannotBeArray'
+                    : 'httpErrors.field.manyOneLinkCellValueCannotBeArray',
+              },
+            }
+          );
         }
 
-        const foreignRecordId = foreignKeys?.[0].foreignId;
-        const oldKey = foreignRecordId || null;
+        if ((foreignKeys?.length ?? 0) > 1) {
+          throw new CustomHttpException(`Foreign key duplicate`, HttpErrorCode.VALIDATION_ERROR, {
+            localization: {
+              i18nKey: 'httpErrors.field.foreignKeyDuplicate',
+            },
+          });
+        }
+
+        const oldKey = oldCellValue ? [oldCellValue].flat().map((key) => key.id) : null;
         const newKey = newCellValue?.id || null;
-        if (oldKey === newKey) {
+        if (oldCellValue && !Array.isArray(oldCellValue) && isEqual(oldCellValue.id, newKey)) {
           return acc;
         }
 
         if (newKey && foreignKeysReverseIndexed?.[newKey]) {
-          throw new BadRequestException(
-            `Consistency error, ${relationship} link field {${field.id}} unable to link a record (${newKey}) more than once`
+          throw new CustomHttpException(
+            `Consistency error, ${relationship} link field {${field.id}} unable to link a record (${newKey}) more than once`,
+            HttpErrorCode.VALIDATION_ERROR,
+            {
+              localization: {
+                i18nKey: 'httpErrors.custom.linkFieldValueDuplicate',
+                context: { fieldName: field.name },
+              },
+            }
           );
         }
 
@@ -569,6 +796,21 @@ export class LinkService {
 
       if (relationship === Relationship.ManyMany || relationship === Relationship.OneMany) {
         const newCellValue = cellContext.newValue as ILinkCellValue[] | undefined;
+        if (newCellValue && !Array.isArray(newCellValue)) {
+          throw new CustomHttpException(
+            `CellValue of ${relationship} link field values should be an array`,
+            HttpErrorCode.VALIDATION_ERROR,
+            {
+              localization: {
+                i18nKey:
+                  relationship === Relationship.OneMany
+                    ? 'httpErrors.field.oneManyLinkCellValueShouldBeArray'
+                    : 'httpErrors.field.manyManyLinkCellValueShouldBeArray',
+              },
+            }
+          );
+        }
+
         const oldKey = foreignKeys?.map((key) => key.foreignId) ?? null;
         const newKey = newCellValue?.map((item) => item.id) ?? null;
 
@@ -576,8 +818,15 @@ export class LinkService {
 
         extraKey.forEach((key) => {
           if (foreignKeysReverseIndexed?.[key]) {
-            throw new BadRequestException(
-              `Consistency error, ${relationship} link field {${field.id}} unable to link a record (${key}) more than once`
+            throw new CustomHttpException(
+              `Consistency error, ${relationship} link field {${field.id}} unable to link a record (${key}) more than once`,
+              HttpErrorCode.VALIDATION_ERROR,
+              {
+                localization: {
+                  i18nKey: 'httpErrors.custom.linkFieldValueDuplicate',
+                  context: { fieldName: field.name },
+                },
+              }
             );
           }
         });
@@ -608,22 +857,36 @@ export class LinkService {
     for (const fieldId in cellGroupByFieldId) {
       const field = fieldMap[fieldId];
       if (!field) {
-        throw new BadRequestException(`Field ${fieldId} not found`);
+        throw new CustomHttpException(`Field ${fieldId} not found`, HttpErrorCode.NOT_FOUND, {
+          localization: {
+            i18nKey: 'httpErrors.field.notFound',
+          },
+        });
       }
 
       if (field.type !== FieldType.Link) {
-        throw new BadRequestException(`Field ${fieldId} is not link field`);
+        throw new CustomHttpException(
+          `Field ${fieldId} is not link field`,
+          HttpErrorCode.NOT_FOUND,
+          {
+            localization: {
+              i18nKey: 'httpErrors.field.notFound',
+            },
+          }
+        );
       }
 
       const recordIds = cellGroupByFieldId[fieldId].map((ctx) => ctx.recordId);
-      const linkRecordIds = cellGroupByFieldId[fieldId]
-        .map((ctx) =>
-          [ctx.oldValue, ctx.newValue]
-            .flat()
-            .filter(Boolean)
-            .map((item) => item?.id as string)
-        )
-        .flat();
+      const linkRecordIds = [
+        ...new Set(
+          cellGroupByFieldId[fieldId].flatMap((ctx) =>
+            [ctx.oldValue, ctx.newValue]
+              .flat()
+              .filter(Boolean)
+              .map((item) => item?.id as string)
+          )
+        ),
+      ];
 
       const foreignKeys = await this.getForeignKeys(recordIds, linkRecordIds, field.options);
       this.checkForIllegalDuplicateLinks(field, recordIds, indexedCellContext);
@@ -675,46 +938,86 @@ export class LinkService {
     return recordMapByTableId;
   }
 
+  private mergeProjectionByTable(
+    recordMapByTableId: IRecordMapByTableId,
+    fieldMapByTableId: { [tableId: string]: IFieldMap },
+    projectionByTable?: Record<string, string[]>
+  ): Record<string, string[]> | undefined {
+    const result: Record<string, Set<string>> = {};
+
+    for (const tableId in recordMapByTableId) {
+      const recordLookupFieldsMap = recordMapByTableId[tableId];
+      const fromCaller = projectionByTable?.[tableId] ?? [];
+      result[tableId] = new Set(fromCaller);
+
+      Object.values(recordLookupFieldsMap).forEach((lookupFieldMap) => {
+        if (!lookupFieldMap) return;
+        Object.keys(lookupFieldMap).forEach((fieldId) => {
+          if (fieldMapByTableId[tableId]?.[fieldId]) {
+            result[tableId]!.add(fieldId);
+          }
+        });
+      });
+    }
+
+    const finalized = Object.entries(result).reduce<Record<string, string[]>>((acc, [id, set]) => {
+      if (set.size) {
+        acc[id] = Array.from(set);
+      }
+      return acc;
+    }, {});
+
+    return Object.keys(finalized).length ? finalized : undefined;
+  }
+
   // eslint-disable-next-line sonarjs/cognitive-complexity
+  @Timing()
   private async fetchRecordMap(
     tableId2DbTableName: { [tableId: string]: string },
     fieldMapByTableId: { [tableId: string]: IFieldMap },
     recordMapByTableId: IRecordMapByTableId,
     cellContexts: ICellContext[],
-    fromReset?: boolean
+    projectionByTable: Record<string, string[]> | undefined,
+    fromReset?: boolean,
+    useQueryModel = false
   ): Promise<IRecordMapByTableId> {
     const cellContextGroup = keyBy(cellContexts, (ctx) => `${ctx.recordId}-${ctx.fieldId}`);
     for (const tableId in recordMapByTableId) {
       const recordLookupFieldsMap = recordMapByTableId[tableId];
       const recordIds = Object.keys(recordLookupFieldsMap);
-      const fieldIds = Array.from(
-        Object.values(recordLookupFieldsMap).reduce<Set<string>>((pre, cur) => {
-          for (const fieldId in cur) {
-            pre.add(fieldId);
+      const dbFieldName2FieldId: { [dbFieldName: string]: string } = {};
+      const tableProjection = projectionByTable?.[tableId];
+
+      for (const recordId of recordIds) {
+        const lookupFieldMap = recordLookupFieldsMap[recordId];
+        if (!lookupFieldMap) continue;
+        for (const fieldId of Object.keys(lookupFieldMap)) {
+          const field = fieldMapByTableId[tableId]?.[fieldId];
+          if (!field) continue;
+          for (const dbFieldName of field.dbFieldNames) {
+            dbFieldName2FieldId[dbFieldName] = fieldId;
           }
-          return pre;
-        }, new Set())
+        }
+      }
+
+      const { qb } = await this.recordQueryBuilder.createRecordQueryBuilder(
+        tableId2DbTableName[tableId],
+        {
+          tableId,
+          viewId: undefined,
+          projection: tableProjection,
+          rawProjection: true,
+          preferRawFieldReferences: true,
+          useQueryModel,
+        }
       );
 
-      const dbFieldName2FieldId: { [dbFieldName: string]: string } = {};
-      const dbFieldNames = fieldIds.map((fieldId) => {
-        const field = fieldMapByTableId[tableId][fieldId];
-        // dbForeignName is not exit in fieldMapByTableId
-        if (!field) {
-          return fieldId;
-        }
-        dbFieldName2FieldId[field.dbFieldName] = fieldId;
-        return field.dbFieldName;
-      });
-
-      const nativeQuery = this.knex(tableId2DbTableName[tableId])
-        .select(dbFieldNames.concat('__id'))
-        .whereIn('__id', recordIds)
-        .toQuery();
-
-      const recordRaw = await this.prismaService
-        .txClient()
-        .$queryRawUnsafe<{ [dbTableName: string]: unknown }[]>(nativeQuery);
+      const nativeQuery = qb.whereIn('__id', recordIds).toQuery();
+      this.logger.debug(`Fetch records with query: ${nativeQuery}`);
+      const recordRaw = await this.queryForTable<{ [dbTableName: string]: unknown }[]>(
+        tableId,
+        nativeQuery
+      );
 
       recordRaw.forEach((record) => {
         const recordId = record.__id as string;
@@ -768,6 +1071,7 @@ export class LinkService {
     }, {});
   }
 
+  // eslint-disable-next-line sonarjs/cognitive-complexity
   private diffLinkCellChange(
     fieldMapByTableId: { [tableId: string]: IFieldMap },
     originRecordMapByTableId: IRecordMapByTableId,
@@ -785,6 +1089,9 @@ export class LinkService {
         const updatedFields = updatedRecords[recordId];
 
         for (const fieldId in originFields) {
+          if (!fieldMap[fieldId]) {
+            continue;
+          }
           if (fieldMap[fieldId].type !== FieldType.Link) {
             continue;
           }
@@ -808,15 +1115,21 @@ export class LinkService {
     fieldMapByTableId: { [tableId: string]: IFieldMap },
     linkContexts: ILinkCellContext[],
     cellContexts: ICellContext[],
-    fromReset?: boolean
+    projectionByTable?: Record<string, string[]>,
+    fromReset?: boolean,
+    persistFk: boolean = true
   ): Promise<{
     cellChanges: ICellChange[];
-    saveForeignKeyToDb: () => Promise<void>;
+    fkRecordMap: IFkRecordMap;
   }> {
     const fieldMap = fieldMapByTableId[tableId];
     const recordMapStruct = this.getRecordMapStruct(tableId, fieldMapByTableId, linkContexts);
+    const mergedProjectionByTable = this.mergeProjectionByTable(
+      recordMapStruct,
+      fieldMapByTableId,
+      projectionByTable
+    );
 
-    // console.log('fieldMapByTableId', fieldMapByTableId);
     const fkRecordMap = await this.getFkRecordMap(fieldMap, linkContexts);
 
     const originRecordMapByTableId = await this.fetchRecordMap(
@@ -824,27 +1137,46 @@ export class LinkService {
       fieldMapByTableId,
       recordMapStruct,
       cellContexts,
-      fromReset
+      mergedProjectionByTable,
+      fromReset,
+      true
     );
 
-    const updatedRecordMapByTableId = await this.updateLinkRecord(
-      tableId,
-      fkRecordMap,
-      fieldMapByTableId,
-      originRecordMapByTableId
-    );
+    let updatedRecordMapByTableId: IRecordMapByTableId;
+
+    if (persistFk) {
+      await this.saveForeignKeyToDb(fieldMap, fkRecordMap);
+      const refreshedRecordMapStruct = this.getRecordMapStruct(
+        tableId,
+        fieldMapByTableId,
+        linkContexts
+      );
+      updatedRecordMapByTableId = await this.fetchRecordMap(
+        tableId2DbTableName,
+        fieldMapByTableId,
+        refreshedRecordMapStruct,
+        cellContexts,
+        mergedProjectionByTable,
+        fromReset,
+        true
+      );
+    } else {
+      updatedRecordMapByTableId = await this.updateLinkRecord(
+        tableId,
+        fkRecordMap,
+        fieldMapByTableId,
+        originRecordMapByTableId
+      );
+    }
 
     const cellChanges = this.diffLinkCellChange(
       fieldMapByTableId,
       originRecordMapByTableId,
       updatedRecordMapByTableId
     );
-
     return {
       cellChanges,
-      saveForeignKeyToDb: async () => {
-        return this.saveForeignKeyToDb(fieldMapByTableId[tableId], fkRecordMap);
-      },
+      fkRecordMap,
     };
   }
 
@@ -856,34 +1188,144 @@ export class LinkService {
 
     const toDelete: [string, string][] = [];
     const toAdd: [string, string][] = [];
+    const toDeleteAndReinsert: [string, string[]][] = [];
+
     for (const recordId in fkMap) {
       const fkItem = fkMap[recordId];
       const oldKey = (fkItem.oldKey || []) as string[];
       const newKey = (fkItem.newKey || []) as string[];
 
-      difference(oldKey, newKey).forEach((key) => toDelete.push([recordId, key]));
-      difference(newKey, oldKey).forEach((key) => toAdd.push([recordId, key]));
+      // Check if only order has changed (same elements but different order)
+      const hasOrderChanged =
+        oldKey.length === newKey.length &&
+        oldKey.length > 0 &&
+        newKey.length > 0 &&
+        oldKey.every((key) => newKey.includes(key)) &&
+        newKey.every((key) => oldKey.includes(key)) &&
+        !oldKey.every((key, index) => key === newKey[index]);
+
+      if (hasOrderChanged) {
+        // For order changes only: delete all and re-insert in correct order
+        toDeleteAndReinsert.push([recordId, newKey]);
+      } else {
+        // For add/remove changes: use differential approach
+        difference(oldKey, newKey).forEach((key) => toDelete.push([recordId, key]));
+        difference(newKey, oldKey).forEach((key) => toAdd.push([recordId, key]));
+      }
     }
 
+    // Handle order changes: delete all existing records for affected recordIds and re-insert
+    if (toDeleteAndReinsert.length) {
+      const recordIdsToDeleteAll = toDeleteAndReinsert.map(([recordId]) => recordId);
+      const deleteAllQuery = this.knex(fkHostTableName)
+        .whereIn(selfKeyName, recordIdsToDeleteAll)
+        .delete()
+        .toQuery();
+      await this.executeForTable(field.options.foreignTableId, deleteAllQuery);
+
+      // Re-insert all records in correct order
+      const reinsertData = toDeleteAndReinsert.flatMap(([recordId, newKeys]) =>
+        newKeys.map((foreignKey, index) => {
+          const data: Record<string, unknown> = {
+            [selfKeyName]: recordId,
+            [foreignKeyName]: foreignKey,
+          };
+          // Add order column if field has order column
+          if (field.getHasOrderColumn()) {
+            const linkField = field as LinkFieldDto;
+            data[linkField.getOrderColumnName()] = index + 1;
+          }
+          return data;
+        })
+      );
+
+      if (reinsertData.length) {
+        const reinsertQuery = this.knex(fkHostTableName).insert(reinsertData).toQuery();
+        await this.executeForTable(field.options.foreignTableId, reinsertQuery);
+      }
+    }
+
+    // Handle regular deletions
     if (toDelete.length) {
       const query = this.knex(fkHostTableName)
         .whereIn([selfKeyName, foreignKeyName], toDelete)
         .delete()
         .toQuery();
-      await this.prismaService.txClient().$executeRawUnsafe(query);
+      await this.executeForTable(field.options.foreignTableId, query);
     }
 
+    // Handle regular additions
     if (toAdd.length) {
-      const query = this.knex(fkHostTableName)
-        .insert(
-          toAdd.map(([source, target]) => ({
-            [selfKeyName]: source,
-            [foreignKeyName]: target,
-          }))
-        )
-        .toQuery();
-      await this.prismaService.txClient().$executeRawUnsafe(query);
+      // Group additions by source record to maintain per-source ordering
+      const sourceGroups = new Map<string, string[]>();
+      for (const [sourceRecordId, targetRecordId] of toAdd) {
+        if (!sourceGroups.has(sourceRecordId)) {
+          sourceGroups.set(sourceRecordId, []);
+        }
+        sourceGroups.get(sourceRecordId)!.push(targetRecordId);
+      }
+
+      const insertData: Array<Record<string, unknown>> = [];
+
+      for (const [sourceRecordId, targetRecordIds] of sourceGroups) {
+        let currentMaxOrder = 0;
+
+        // Get current max order for this source record if field has order column
+        if (field.getHasOrderColumn()) {
+          currentMaxOrder = await this.getMaxOrderForTarget(
+            field.options.foreignTableId,
+            fkHostTableName,
+            selfKeyName,
+            sourceRecordId,
+            field.getOrderColumnName()
+          );
+        }
+
+        // Add records with incremental order values per source
+        for (let i = 0; i < targetRecordIds.length; i++) {
+          const targetRecordId = targetRecordIds[i];
+          const data: Record<string, unknown> = {
+            [selfKeyName]: sourceRecordId,
+            [foreignKeyName]: targetRecordId,
+          };
+
+          if (field.getHasOrderColumn()) {
+            const linkField = field as LinkFieldDto;
+            data[linkField.getOrderColumnName()] = currentMaxOrder + i + 1;
+          }
+
+          insertData.push(data);
+        }
+      }
+
+      const query = this.knex(fkHostTableName).insert(insertData).toQuery();
+      await this.executeForTable(field.options.foreignTableId, query);
     }
+  }
+
+  /**
+   * Get the maximum order value for a specific target record in a link relationship
+   */
+  private async getMaxOrderForTarget(
+    routingTableId: string,
+    tableName: string,
+    foreignKeyColumn: string,
+    targetRecordId: string,
+    orderColumnName: string
+  ): Promise<number> {
+    const maxOrderQuery = this.knex(tableName)
+      .where(foreignKeyColumn, targetRecordId)
+      .max(`${orderColumnName} as maxOrder`)
+      .first()
+      .toQuery();
+
+    const maxOrderResult = await this.queryForTable<{ maxOrder: unknown }[]>(
+      routingTableId,
+      maxOrderQuery
+    );
+    const raw = maxOrderResult[0]?.maxOrder as unknown;
+    // Coerce aggregate results safely into number; default to 0
+    return raw == null ? 0 : Number(raw);
   }
 
   private async saveForeignKeyForManyOne(
@@ -896,32 +1338,117 @@ export class LinkService {
     const toAdd: [string, string][] = [];
     for (const recordId in fkMap) {
       const fkItem = fkMap[recordId];
-      const oldKey = fkItem.oldKey as string | null;
+      const oldKey = (fkItem.oldKey || []) as string[];
       const newKey = fkItem.newKey as string | null;
-
-      oldKey && toDelete.push([recordId, oldKey]);
+      oldKey && oldKey.forEach((key) => toDelete.push([recordId, key]));
       newKey && toAdd.push([recordId, newKey]);
     }
 
+    const affectedForeignIds = [
+      ...new Set(
+        toDelete.map(([, foreignId]) => foreignId).concat(toAdd.map(([, foreignId]) => foreignId))
+      ),
+    ];
+    await this.lockForeignRecords(field.options.foreignTableId, affectedForeignIds);
+
     if (toDelete.length) {
+      const updateFields: Record<string, null> = { [foreignKeyName]: null };
+      // Also clear order column if field has order column
+      if (field.getHasOrderColumn()) {
+        updateFields[`${foreignKeyName}_order`] = null;
+      }
+
       const query = this.knex(fkHostTableName)
-        .update({ [foreignKeyName]: null })
+        .update(updateFields)
         .whereIn([selfKeyName, foreignKeyName], toDelete)
         .toQuery();
-      await this.prismaService.txClient().$executeRawUnsafe(query);
+      await this.executeForTable(field.options.foreignTableId, query);
     }
 
     if (toAdd.length) {
+      const dbFields = [{ dbFieldName: foreignKeyName, schemaType: SchemaType.String }];
+      // Add order column if field has order column
+      if (field.getHasOrderColumn()) {
+        dbFields.push({ dbFieldName: `${foreignKeyName}_order`, schemaType: SchemaType.Integer });
+      }
+
+      // Group toAdd by target record to handle order correctly
+      const targetGroups = new Map<string, string[]>();
+      for (const [recordId, foreignRecordId] of toAdd) {
+        if (!targetGroups.has(foreignRecordId)) {
+          targetGroups.set(foreignRecordId, []);
+        }
+        targetGroups.get(foreignRecordId)!.push(recordId);
+      }
+
+      const updateData: Array<{ id: string; values: Record<string, unknown> }> = [];
+
+      for (const [foreignRecordId, recordIds] of targetGroups) {
+        let currentMaxOrder = 0;
+
+        // Get current max order for this target record if field has order column
+        if (field.getHasOrderColumn()) {
+          currentMaxOrder = await this.getMaxOrderForTarget(
+            field.options.foreignTableId,
+            fkHostTableName,
+            foreignKeyName,
+            foreignRecordId,
+            field.getOrderColumnName()
+          );
+        }
+
+        // Add records with incremental order values
+        for (let i = 0; i < recordIds.length; i++) {
+          const recordId = recordIds[i];
+          const values: Record<string, unknown> = { [foreignKeyName]: foreignRecordId };
+
+          if (field.getHasOrderColumn()) {
+            values[`${foreignKeyName}_order`] = currentMaxOrder + i + 1;
+          }
+
+          updateData.push({
+            id: recordId,
+            values,
+          });
+        }
+      }
+
       await this.batchService.batchUpdateDB(
         fkHostTableName,
         selfKeyName,
-        [{ dbFieldName: foreignKeyName, schemaType: SchemaType.String }],
-        toAdd.map(([recordId, foreignRecordId]) => ({
-          id: recordId,
-          values: { [foreignKeyName]: foreignRecordId },
-        }))
+        dbFields,
+        updateData,
+        field.options.foreignTableId
       );
     }
+  }
+
+  private async lockForeignRecords(tableId: string, recordIds: string[]) {
+    if (!recordIds.length) {
+      return;
+    }
+
+    const client = (this.knex.client.config as { client?: string } | undefined)?.client;
+    if (client !== 'pg' && client !== 'postgresql') {
+      return;
+    }
+
+    const tableMeta = await this.prismaService.txClient().tableMeta.findFirst({
+      where: { id: tableId, deletedTime: null },
+      select: { dbTableName: true },
+    });
+
+    if (!tableMeta) {
+      return;
+    }
+
+    const lockQuery = this.knex(tableMeta.dbTableName)
+      .select('__id')
+      .whereIn('__id', recordIds)
+      .forUpdate()
+      .toQuery();
+
+    await this.queryForTable(tableId, lockQuery);
   }
 
   private async saveForeignKeyForOneMany(
@@ -934,38 +1461,148 @@ export class LinkService {
       this.saveForeignKeyForManyMany(field, fkMap);
       return;
     }
-    const toDelete: [string, string][] = [];
-    const toAdd: [string, string][] = [];
+
+    // Process each record individually to maintain order
     for (const recordId in fkMap) {
       const fkItem = fkMap[recordId];
       const oldKey = (fkItem.oldKey || []) as string[];
       const newKey = (fkItem.newKey || []) as string[];
 
-      difference(oldKey, newKey).forEach((key) => toDelete.push([recordId, key]));
-      difference(newKey, oldKey).forEach((key) => toAdd.push([recordId, key]));
-    }
+      // Check if only order has changed (same elements but different order)
+      const hasOrderChanged =
+        oldKey.length === newKey.length &&
+        oldKey.length > 0 &&
+        newKey.length > 0 &&
+        oldKey.every((key) => newKey.includes(key)) &&
+        newKey.every((key) => oldKey.includes(key)) &&
+        !oldKey.every((key, index) => key === newKey[index]);
 
-    if (toDelete.length) {
-      const query = this.knex(fkHostTableName)
-        .update({ [selfKeyName]: null })
-        .whereIn([selfKeyName, foreignKeyName], toDelete)
-        .toQuery();
-      await this.prismaService.txClient().$executeRawUnsafe(query);
-    }
+      if (hasOrderChanged && field.getHasOrderColumn()) {
+        // For order changes: clear all existing links and re-establish with correct order
+        const clearFields: Record<string, null> = {
+          [selfKeyName]: null,
+          [`${selfKeyName}_order`]: null,
+        };
 
-    if (toAdd.length) {
-      await this.batchService.batchUpdateDB(
-        fkHostTableName,
-        foreignKeyName,
-        [{ dbFieldName: selfKeyName, schemaType: SchemaType.String }],
-        toAdd.map(([recordId, foreignRecordId]) => ({
-          id: foreignRecordId,
-          values: { [selfKeyName]: recordId },
-        }))
-      );
+        const clearQuery = this.knex(fkHostTableName)
+          .update(clearFields)
+          .where(selfKeyName, recordId)
+          .toQuery();
+        await this.executeForTable(field.options.foreignTableId, clearQuery);
+
+        // Re-establish all links with correct order
+        const dbFields = [
+          { dbFieldName: selfKeyName, schemaType: SchemaType.String },
+          { dbFieldName: `${selfKeyName}_order`, schemaType: SchemaType.Integer },
+        ];
+
+        const updateData = newKey.map((foreignRecordId, index) => {
+          const orderValue = index + 1;
+          return {
+            id: foreignRecordId,
+            values: {
+              [selfKeyName]: recordId,
+              [`${selfKeyName}_order`]: orderValue,
+            },
+          };
+        });
+
+        await this.batchService.batchUpdateDB(
+          fkHostTableName,
+          foreignKeyName,
+          dbFields,
+          updateData,
+          field.options.foreignTableId
+        );
+      } else {
+        // Handle regular add/remove operations
+        const toDelete = difference(oldKey, newKey);
+
+        // Delete old links
+        if (toDelete.length) {
+          const updateFields: Record<string, null> = { [selfKeyName]: null };
+          // Also clear order column if field has order column
+          if (field.getHasOrderColumn()) {
+            updateFields[`${selfKeyName}_order`] = null;
+          }
+
+          const deleteConditions = toDelete.map((key) => [recordId, key]);
+          const query = this.knex(fkHostTableName)
+            .update(updateFields)
+            .whereIn([selfKeyName, foreignKeyName], deleteConditions)
+            .toQuery();
+          await this.executeForTable(field.options.foreignTableId, query);
+        }
+
+        // Add new links and update order for all current links
+        if (newKey.length > 0) {
+          if (field.getHasOrderColumn()) {
+            // Find truly new links that need to be added
+            const toAdd = difference(newKey, oldKey);
+
+            if (toAdd.length > 0) {
+              // Get the current maximum order value for this target record
+              const currentMaxOrder = await this.getMaxOrderForTarget(
+                field.options.foreignTableId,
+                fkHostTableName,
+                selfKeyName,
+                recordId,
+                field.getOrderColumnName()
+              );
+
+              // Add new links with correct incremental order values
+              const orderColumnName = field.getOrderColumnName();
+              const dbFields = [
+                { dbFieldName: selfKeyName, schemaType: SchemaType.String },
+                { dbFieldName: orderColumnName, schemaType: SchemaType.Integer },
+              ];
+
+              const addData = toAdd.map((foreignRecordId, index) => ({
+                id: foreignRecordId,
+                values: {
+                  [selfKeyName]: recordId,
+                  [orderColumnName]: currentMaxOrder + index + 1,
+                },
+              }));
+
+              await this.batchService.batchUpdateDB(
+                fkHostTableName,
+                foreignKeyName,
+                dbFields,
+                addData,
+                field.options.foreignTableId
+              );
+            }
+          } else {
+            // One-many without an order column stores the FK directly on the foreign table.
+            // Only update rows where the foreign key actually changes.
+            const toAdd = difference(newKey, oldKey);
+
+            if (toAdd.length > 0) {
+              const dbFields = [{ dbFieldName: selfKeyName, schemaType: SchemaType.String }];
+
+              const addData = toAdd.map((foreignRecordId) => ({
+                id: foreignRecordId,
+                values: {
+                  [selfKeyName]: recordId,
+                },
+              }));
+
+              await this.batchService.batchUpdateDB(
+                fkHostTableName,
+                foreignKeyName,
+                dbFields,
+                addData,
+                field.options.foreignTableId
+              );
+            }
+          }
+        }
+      }
     }
   }
 
+  // eslint-disable-next-line sonarjs/cognitive-complexity
   private async saveForeignKeyForOneOne(
     field: LinkFieldDto,
     fkMap: { [recordId: string]: IFkRecordItem }
@@ -978,30 +1615,50 @@ export class LinkService {
       const toAdd: [string, string][] = [];
       for (const recordId in fkMap) {
         const fkItem = fkMap[recordId];
-        const oldKey = fkItem.oldKey as string | null;
+        const oldKey = (fkItem.oldKey || []) as string[];
         const newKey = fkItem.newKey as string | null;
 
-        oldKey && toDelete.push([recordId, oldKey]);
+        oldKey && oldKey.forEach((key) => toDelete.push([recordId, key]));
         newKey && toAdd.push([recordId, newKey]);
       }
 
       if (toDelete.length) {
+        const updateFields: Record<string, null> = { [selfKeyName]: null };
+        // Also clear order column if field has order column
+        if (field.getHasOrderColumn()) {
+          updateFields[`${selfKeyName}_order`] = null;
+        }
+
         const query = this.knex(fkHostTableName)
-          .update({ [selfKeyName]: null })
+          .update(updateFields)
           .whereIn([selfKeyName, foreignKeyName], toDelete)
           .toQuery();
-        await this.prismaService.txClient().$executeRawUnsafe(query);
+        await this.executeForTable(field.options.foreignTableId, query);
       }
 
       if (toAdd.length) {
+        const dbFields = [{ dbFieldName: selfKeyName, schemaType: SchemaType.String }];
+        // Add order column if field has order column
+        if (field.getHasOrderColumn()) {
+          dbFields.push({ dbFieldName: `${selfKeyName}_order`, schemaType: SchemaType.Integer });
+        }
+
         await this.batchService.batchUpdateDB(
           fkHostTableName,
           foreignKeyName,
-          [{ dbFieldName: selfKeyName, schemaType: SchemaType.String }],
-          toAdd.map(([recordId, foreignRecordId]) => ({
-            id: foreignRecordId,
-            values: { [selfKeyName]: recordId },
-          }))
+          dbFields,
+          toAdd.map(([recordId, foreignRecordId]) => {
+            const values: Record<string, unknown> = { [selfKeyName]: recordId };
+            // For OneOne relationship, order is always 1 since each record can only link to one target
+            if (field.getHasOrderColumn()) {
+              values[`${selfKeyName}_order`] = 1;
+            }
+            return {
+              id: foreignRecordId,
+              values,
+            };
+          }),
+          field.options.foreignTableId
         );
       }
     }
@@ -1035,13 +1692,33 @@ export class LinkService {
    * 3. check and generate op to update main table by cached recordIds
    * 4. check and generate op to update foreign table by cached recordIds
    */
-  async getDerivateByLink(tableId: string, cellContexts: ICellContext[], fromReset?: boolean) {
-    const linkContexts = this.filterLinkContext(cellContexts as ILinkCellContext[]);
-    if (!linkContexts.length) {
+  async getDerivateByLink(
+    tableId: string,
+    cellContexts: ICellContext[],
+    fromReset?: boolean,
+    projectionByTable?: Record<string, string[]>
+  ) {
+    const linkLikeContexts = this.filterLinkContext(cellContexts as ILinkCellContext[]);
+    if (!linkLikeContexts.length) {
       return;
     }
-    const fieldIds = linkContexts.map((ctx) => ctx.fieldId);
+    const fieldIds = linkLikeContexts.map((ctx) => ctx.fieldId);
     const fieldMapByTableId = await this.getRelatedFieldMap(fieldIds);
+    const fieldMap = fieldMapByTableId[tableId];
+    const linkContexts = linkLikeContexts.filter((ctx) => {
+      const field = fieldMap[ctx.fieldId];
+      if (!field) {
+        return false;
+      }
+      if (this.isErroredLinkField(field)) {
+        return false;
+      }
+      if (field.type !== FieldType.Link || field.isLookup) {
+        return false;
+      }
+      return true;
+    });
+
     const tableId2DbTableName = await this.getTableId2DbTableName(Object.keys(fieldMapByTableId));
 
     return this.getDerivateByCellContexts(
@@ -1050,8 +1727,81 @@ export class LinkService {
       fieldMapByTableId,
       linkContexts,
       cellContexts,
-      fromReset
+      projectionByTable,
+      fromReset,
+      true
     );
+  }
+
+  /**
+   * Plan link derivations without persisting foreign keys.
+   * Returns the same derivation structure as getDerivateByLink but does NOT
+   * call saveForeignKeyToDb. Useful when consumers need to capture old values
+   * for computed events before the FK writes are visible in the same tx.
+   */
+  @Timing()
+  async planDerivateByLink(
+    tableId: string,
+    cellContexts: ICellContext[],
+    fromReset?: boolean,
+    tables?: Map<string, TableDomain>,
+    projectionByTable?: Record<string, string[]>
+  ): Promise<{ cellChanges: ICellChange[]; fkRecordMap: IFkRecordMap } | undefined> {
+    const linkLikeContexts = this.filterLinkContext(cellContexts as ILinkCellContext[]);
+    if (!linkLikeContexts.length) {
+      return undefined;
+    }
+    const fieldIds = linkLikeContexts.map((ctx) => ctx.fieldId);
+    const fieldMapByTableId =
+      this.buildFieldMapFromTables(fieldIds, tables) ?? (await this.getRelatedFieldMap(fieldIds));
+    const fieldMap = fieldMapByTableId[tableId];
+    const linkContexts = linkLikeContexts.filter((ctx) => {
+      const field = fieldMap[ctx.fieldId];
+      if (!field) {
+        return false;
+      }
+      if (this.isErroredLinkField(field)) {
+        return false;
+      }
+      if (field.type !== FieldType.Link || field.isLookup) {
+        return false;
+      }
+      return true;
+    });
+
+    const tableId2DbTableName =
+      this.buildTableId2DbTableNameFromTables(Object.keys(fieldMapByTableId), tables) ??
+      (await this.getTableId2DbTableName(Object.keys(fieldMapByTableId)));
+
+    const derivate = await this.getDerivateByCellContexts(
+      tableId,
+      tableId2DbTableName,
+      fieldMapByTableId,
+      linkContexts,
+      cellContexts,
+      projectionByTable,
+      fromReset,
+      false
+    );
+
+    return derivate as { cellChanges: ICellChange[]; fkRecordMap: IFkRecordMap };
+  }
+
+  /**
+   * Persist foreign key changes previously planned via planDerivateByLink.
+   * Rebuilds the necessary field map and writes junction table updates.
+   */
+  async commitForeignKeyChanges(
+    tableId: string,
+    fkRecordMap?: IFkRecordMap,
+    tables?: Map<string, TableDomain>
+  ): Promise<void> {
+    if (!fkRecordMap || !Object.keys(fkRecordMap).length) return;
+    const fieldIds = Object.keys(fkRecordMap);
+    const fieldMapByTableId =
+      this.buildFieldMapFromTables(fieldIds, tables) ?? (await this.getRelatedFieldMap(fieldIds));
+    const fieldMap = fieldMapByTableId[tableId];
+    await this.saveForeignKeyToDb(fieldMap, fkRecordMap);
   }
 
   private parseFkRecordItemToDelete(
@@ -1071,7 +1821,11 @@ export class LinkService {
       const foreignKeys = foreignKeysIndexed[id];
       if (relationship === Relationship.OneOne || relationship === Relationship.ManyOne) {
         if ((foreignKeys?.length ?? 0) > 1) {
-          throw new Error('duplicate foreign key from database');
+          throw new CustomHttpException(`Foreign key duplicate`, HttpErrorCode.VALIDATION_ERROR, {
+            localization: {
+              i18nKey: 'httpErrors.field.foreignKeyDuplicate',
+            },
+          });
         }
 
         const foreignRecordId = foreignKeys?.[0].foreignId;
@@ -1106,23 +1860,37 @@ export class LinkService {
     }, {});
   }
 
-  private async getContextByDelete(linkFieldRaws: Field[], recordIds: string[]) {
+  /**
+   * Build cell contexts for record deletion.
+   * @param tableId - The table being deleted from
+   * @param relatedLinkFieldRaws - Link fields from OTHER tables that reference the current table
+   * @param currentTableLinkFields - Link fields belonging to the current table itself
+   * @param records - Records being deleted
+   */
+  private async getContextByDelete(
+    tableId: string,
+    relatedLinkFieldRaws: Field[],
+    currentTableLinkFields: Field[],
+    records: IRecord[]
+  ) {
     const cellContextsMap: { [tableId: string]: ICellContext[] } = {};
+    const recordIds = records.map((record) => record.id);
 
     const keyToValue = (key: string | string[] | null) =>
       key ? (Array.isArray(key) ? key.map((id) => ({ id })) : { id: key }) : null;
 
-    for (const fieldRaws of linkFieldRaws) {
+    // Process link fields from OTHER tables that reference the current table
+    for (const fieldRaws of relatedLinkFieldRaws) {
       const options = JSON.parse(fieldRaws.options as string) as ILinkFieldOptions;
-      const tableId = fieldRaws.tableId;
+      const fieldTableId = fieldRaws.tableId;
       const foreignKeys = await this.getJoinedForeignKeys(recordIds, options);
       const fieldItems = this.parseFkRecordItemToDelete(options, recordIds, foreignKeys);
-      if (!cellContextsMap[tableId]) {
-        cellContextsMap[tableId] = [];
+      if (!cellContextsMap[fieldTableId]) {
+        cellContextsMap[fieldTableId] = [];
       }
       Object.keys(fieldItems).forEach((recordId) => {
         const { oldKey, newKey } = fieldItems[recordId];
-        cellContextsMap[tableId].push({
+        cellContextsMap[fieldTableId].push({
           fieldId: fieldRaws.id,
           recordId,
           oldValue: keyToValue(oldKey),
@@ -1131,40 +1899,128 @@ export class LinkService {
       });
     }
 
+    // Process link fields belonging to the current table itself
+    // Query junction tables directly to handle cases where record.fields has null values
+    // but junction table still has data (data inconsistency)
+    for (const linkField of currentTableLinkFields) {
+      const options = JSON.parse(linkField.options as string) as ILinkFieldOptions;
+      const foreignKeys = await this.getDirectForeignKeys(recordIds, options);
+
+      if (foreignKeys.length > 0) {
+        if (!cellContextsMap[tableId]) {
+          cellContextsMap[tableId] = [];
+        }
+
+        // Group foreign keys by record id
+        const fkByRecordId = groupBy(foreignKeys, 'id');
+
+        for (const recordId of Object.keys(fkByRecordId)) {
+          const fks = fkByRecordId[recordId];
+          const oldValue = fks.map((fk) => ({ id: fk.foreignId }));
+
+          cellContextsMap[tableId].push({
+            fieldId: linkField.id,
+            recordId,
+            oldValue: oldValue.length === 1 ? oldValue[0] : oldValue,
+            newValue: null,
+          });
+        }
+      }
+    }
+
     return cellContextsMap;
   }
 
-  async getRelatedLinkFieldRaws(tableId: string) {
-    const { id: primaryFieldId } = await this.prismaService
-      .txClient()
-      .field.findFirstOrThrow({
-        where: { tableId, deletedTime: null, isPrimary: true },
-        select: { id: true },
+  /**
+   * Get foreign keys from junction table where selfKeyName matches the given record IDs.
+   * This is used for cleaning up junction table data when deleting records from the source table.
+   */
+  private async getDirectForeignKeys(
+    recordIds: string[],
+    options: ILinkFieldOptions
+  ): Promise<{ id: string; foreignId: string }[]> {
+    const { fkHostTableName, selfKeyName, foreignKeyName } = options;
+
+    const query = this.knex(fkHostTableName)
+      .select({
+        id: selfKeyName,
+        foreignId: foreignKeyName,
       })
-      .catch(() => {
-        throw new BadRequestException(`Primary field not found`);
-      });
+      .whereIn(selfKeyName, recordIds)
+      .whereNotNull(selfKeyName)
+      .whereNotNull(foreignKeyName)
+      .toQuery();
+
+    return this.queryForTable<{ id: string; foreignId: string }[]>(options.foreignTableId, query);
+  }
+
+  async getRelatedLinkFieldRaws(tableId: string) {
+    const fieldRaws = await this.prismaService.txClient().field.findMany({
+      where: { tableId, deletedTime: null },
+      select: { id: true },
+    });
 
     const references = await this.prismaService.txClient().reference.findMany({
-      where: { fromFieldId: primaryFieldId },
+      where: { fromFieldId: { in: fieldRaws.map((f) => f.id) } },
       select: { toFieldId: true },
     });
 
     const referenceFieldIds = references.map((ref) => ref.toFieldId);
 
-    return await this.prismaService.txClient().field.findMany({
+    const relatedFieldsByReference = referenceFieldIds.length
+      ? await this.prismaService.txClient().field.findMany({
+          where: {
+            id: { in: referenceFieldIds },
+            type: FieldType.Link,
+            isLookup: null,
+            deletedTime: null,
+          },
+        })
+      : [];
+    const activeRelatedFieldsByReference = relatedFieldsByReference.filter(
+      (field) => !this.isErroredLinkField(field)
+    );
+
+    // Fallback: reference graph might be missing for legacy data, so look for link fields whose
+    // options still point to this table as their foreign target.
+    const knownFieldIds = new Set(activeRelatedFieldsByReference.map((field) => field.id));
+
+    const foreignTableSql = this.dbProvider.optionsQuery(FieldType.Link, 'foreignTableId', tableId);
+    const relatedFieldsByForeignTable = await this.prismaService
+      .txClient()
+      .$queryRawUnsafe<Field[]>(foreignTableSql);
+
+    const merged = new Map<string, Field>();
+    activeRelatedFieldsByReference.forEach((field) => merged.set(field.id, field));
+    relatedFieldsByForeignTable
+      .filter(
+        (field) =>
+          !knownFieldIds.has(field.id) && !field.deletedTime && !this.isErroredLinkField(field)
+      )
+      .forEach((field) => merged.set(field.id, field));
+
+    return Array.from(merged.values());
+  }
+
+  async getDeleteRecordUpdateContext(tableId: string, records: IRecord[]) {
+    // Get link fields from OTHER tables that reference the current table
+    const relatedLinkFieldRaws = await this.getRelatedLinkFieldRaws(tableId);
+
+    // Get link fields belonging to the current table itself
+    const currentTableLinkFields = await this.prismaService.txClient().field.findMany({
       where: {
-        id: { in: referenceFieldIds },
+        tableId,
         type: FieldType.Link,
         isLookup: null,
         deletedTime: null,
       },
     });
-  }
 
-  async getDeleteRecordUpdateContext(tableId: string, recordIds: string[]) {
-    const linkFieldRaws = await this.getRelatedLinkFieldRaws(tableId);
-
-    return await this.getContextByDelete(linkFieldRaws, recordIds);
+    return await this.getContextByDelete(
+      tableId,
+      relatedLinkFieldRaws,
+      currentTableLinkFields.filter((field) => !this.isErroredLinkField(field)),
+      records
+    );
   }
 }

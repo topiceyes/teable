@@ -6,8 +6,9 @@
     "noEmit": true,
     "incremental": true,
     "allowJs": true,
-    "checkJs": true
+    "checkJs": true,
+    "types": ["node"]
   },
   "exclude": ["node_modules", "dist", "build"],
-  "include": [".eslintrc.*", "**/*.ts", "**/*.js", "**/*.cjs", "**/*.mjs", "**/*.json"]
+  "include": ["**/*.ts", "**/*.js", "**/*.cjs", "**/*.mjs", "**/*.json"]
 }

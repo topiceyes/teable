@@ -5,7 +5,6 @@ import type {
 } from '@teable/core';
 import { NotificationTypeEnum } from '@teable/core';
 import { Avatar, AvatarFallback, AvatarImage } from '@teable/ui-lib';
-import { getImageProps } from 'next/image';
 import React, { useCallback } from 'react';
 import { UserAvatar } from '@/features/app/components/user/UserAvatar';
 
@@ -14,46 +13,52 @@ interface NotificationIconProps {
   notifyType: NotificationTypeEnum;
 }
 
+const IconAvatar = ({ iconUrl, label }: { iconUrl?: string; label: string }) => (
+  <Avatar className="size-9 overflow-visible">
+    {iconUrl && <AvatarImage src={iconUrl} alt={label} />}
+    <AvatarFallback>{label.slice(0, 1)}</AvatarFallback>
+  </Avatar>
+);
+
 const NotificationIcon = (props: NotificationIconProps) => {
   const { notifyIcon, notifyType } = props;
 
   const dynamicComponent = useCallback(() => {
     switch (notifyType) {
-      case NotificationTypeEnum.System: {
+      case NotificationTypeEnum.ExportBase:
+      case NotificationTypeEnum.System:
+      case NotificationTypeEnum.AdminNotice: {
         const { iconUrl } = notifyIcon as INotificationSystemIcon;
-
-        const systemProps =
-          iconUrl &&
-          getImageProps({
-            width: 36,
-            height: 36,
-            src: iconUrl,
-            alt: 'System',
-          }).props;
-
-        return (
-          <Avatar className="size-9">
-            {systemProps && <AvatarImage {...systemProps} />}
-            <AvatarFallback>{'System'.slice(0, 1)}</AvatarFallback>
-          </Avatar>
-        );
+        return <IconAvatar iconUrl={iconUrl} label="System" />;
       }
+      case NotificationTypeEnum.OAuthApp: {
+        // the logo the sending app registered
+        const { iconUrl } = notifyIcon as INotificationSystemIcon;
+        return <IconAvatar iconUrl={iconUrl} label="App" />;
+      }
+      case NotificationTypeEnum.Comment:
       case NotificationTypeEnum.CollaboratorCellTag:
-      case NotificationTypeEnum.CollaboratorMultiRowTag: {
+      case NotificationTypeEnum.CollaboratorMultiRowTag:
+      case NotificationTypeEnum.CollaboratorInvite: {
         const { userAvatarUrl, userName } = notifyIcon as INotificationUserIcon;
-        return (
-          <UserAvatar
-            className="size-9"
-            width={36}
-            height={36}
-            user={{ name: userName, avatar: userAvatarUrl }}
-          />
-        );
+        return <UserAvatar className="size-9" user={{ name: userName, avatar: userAvatarUrl }} />;
+      }
+      default: {
+        // A type newer than this build: draw whichever icon shape it came with.
+        if ('userName' in notifyIcon) {
+          return (
+            <UserAvatar
+              className="size-9"
+              user={{ name: notifyIcon.userName, avatar: notifyIcon.userAvatarUrl }}
+            />
+          );
+        }
+        return <IconAvatar iconUrl={notifyIcon.iconUrl} label="System" />;
       }
     }
   }, [notifyIcon, notifyType]);
   return (
-    <div className="relative flex flex-none items-center self-start pr-2">{dynamicComponent()}</div>
+    <div className="relative flex flex-none items-center self-start pe-2">{dynamicComponent()}</div>
   );
 };
 

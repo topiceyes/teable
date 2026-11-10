@@ -1,4 +1,5 @@
-import { ThemeKey, useTheme } from '@teable/sdk';
+import { useTheme } from '@teable/ui-lib';
+import { cn } from '@teable/ui-lib/shadcn';
 import { Button } from '@teable/ui-lib/shadcn/ui/button';
 import {
   DropdownMenu,
@@ -7,39 +8,34 @@ import {
   DropdownMenuRadioItem,
   DropdownMenuTrigger,
 } from '@teable/ui-lib/shadcn/ui/dropdown-menu';
-import classNames from 'classnames';
 export const ThemePicker: React.FC<{ className?: string }> = ({ className }) => {
-  const { theme, isAutoTheme, setTheme } = useTheme();
-  const value = isAutoTheme ? '' : theme;
+  const { theme, setTheme } = useTheme();
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button className={classNames('capitalize', className)} size={'xs'} variant="ghost">
-          {value || 'system'}
+        <Button className={cn('capitalize', className)} size={'xs'} variant="ghost">
+          {theme || 'system'}
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent className="w-56">
         <DropdownMenuRadioGroup
-          value={value}
+          value={theme}
           onValueChange={(value) => {
-            setTheme(value === '' ? null : (value as ThemeKey));
+            setTheme(value);
           }}
         >
-          {[ThemeKey.Light, ThemeKey.Dark].map((item) => {
+          {['light', 'dark', 'system'].map((item) => {
             return (
               <DropdownMenuRadioItem
                 className="capitalize"
                 key={item}
-                disabled={!isAutoTheme && theme === item}
+                disabled={theme === item}
                 value={item}
               >
                 {item}
               </DropdownMenuRadioItem>
             );
           })}
-          <DropdownMenuRadioItem disabled={isAutoTheme} value="">
-            system
-          </DropdownMenuRadioItem>
         </DropdownMenuRadioGroup>
       </DropdownMenuContent>
     </DropdownMenu>

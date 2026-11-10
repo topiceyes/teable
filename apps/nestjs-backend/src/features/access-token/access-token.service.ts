@@ -1,5 +1,5 @@
-import { Injectable, UnauthorizedException } from '@nestjs/common';
-import type { AllActions } from '@teable/core';
+import { ForbiddenException, Injectable, UnauthorizedException } from '@nestjs/common';
+import type { Action } from '@teable/core';
 import { generateAccessTokenId, getRandomString } from '@teable/core';
 import { PrismaService } from '@teable/db-main-prisma';
 import type {
@@ -7,15 +7,45 @@ import type {
   RefreshAccessTokenRo,
   UpdateAccessTokenRo,
 } from '@teable/openapi';
+import { isEqual } from 'lodash';
 import { ClsService } from 'nestjs-cls';
+import { Events } from '../../event-emitter/events';
+import { PerformanceCacheService } from '../../performance-cache';
+import { generateAccessTokenCacheKey } from '../../performance-cache/generate-keys';
 import type { IClsStore } from '../../types/cls';
+import { AuditScope } from '../audit/audit-scope';
+import { Audit } from '../audit/audit.decorator';
+import { AccessTokenModel } from '../model/access-token';
 import { getAccessToken } from './access-token.encryptor';
+
+const lastUsedTimeUpdateIntervalMs = 5 * 60 * 1000;
+
+// Settings an update can change; the audit row records each one that did, before and after.
+const auditedTokenSettings = [
+  'name',
+  'description',
+  'scopes',
+  'spaceIds',
+  'baseIds',
+  'hasFullAccess',
+] as const;
+
+const shouldUpdateLastUsedTime = (
+  lastUsedTime: Date | string | null | undefined,
+  now: Date
+): boolean => {
+  if (!lastUsedTime) return true;
+  return now.getTime() - new Date(lastUsedTime).getTime() >= lastUsedTimeUpdateIntervalMs;
+};
 
 @Injectable()
 export class AccessTokenService {
   constructor(
     private readonly prismaService: PrismaService,
-    private readonly cls: ClsService<IClsStore>
+    private readonly cls: ClsService<IClsStore>,
+    private readonly accessTokenModel: AccessTokenModel,
+    private readonly performanceCacheService: PerformanceCacheService,
+    private readonly audit: AuditScope
   ) {}
 
   private transformAccessTokenEntity<
@@ -27,45 +57,71 @@ export class AccessTokenService {
       createdTime?: Date;
       lastUsedTime?: Date | null;
       expiredTime?: Date;
+      hasFullAccess?: boolean | null;
     },
   >(accessTokenEntity: T) {
-    const { scopes, spaceIds, baseIds, createdTime, lastUsedTime, expiredTime, description } =
-      accessTokenEntity;
+    const {
+      scopes,
+      spaceIds,
+      baseIds,
+      createdTime,
+      lastUsedTime,
+      expiredTime,
+      description,
+      hasFullAccess,
+    } = accessTokenEntity;
     return {
       ...accessTokenEntity,
       description: description || undefined,
-      scopes: JSON.parse(scopes) as AllActions[],
+      scopes: JSON.parse(scopes) as Action[],
       spaceIds: spaceIds ? (JSON.parse(spaceIds) as string[]) : undefined,
       baseIds: baseIds ? (JSON.parse(baseIds) as string[]) : undefined,
       createdTime: createdTime?.toISOString(),
       lastUsedTime: lastUsedTime?.toISOString(),
       expiredTime: expiredTime?.toISOString(),
+      hasFullAccess: hasFullAccess ?? undefined,
     };
   }
 
   async validate(splitAccessTokenObj: { accessTokenId: string; sign: string }) {
     const { accessTokenId, sign } = splitAccessTokenObj;
-
-    const accessTokenEntity = await this.prismaService.txClient().accessToken.findUniqueOrThrow({
-      where: { id: accessTokenId },
-      select: {
-        userId: true,
-        id: true,
-        sign: true,
-        expiredTime: true,
-      },
-    });
+    const accessTokenEntity = await this.accessTokenModel.getAccessTokenRawById(accessTokenId);
+    if (!accessTokenEntity) {
+      throw new UnauthorizedException('token not found');
+    }
     if (sign !== accessTokenEntity.sign) {
       throw new UnauthorizedException('sign error');
     }
     // expiredTime 1ms tolerance
-    if (accessTokenEntity.expiredTime.getTime() < Date.now() + 1000) {
+    if (
+      accessTokenEntity.expiredTime &&
+      new Date(accessTokenEntity.expiredTime).getTime() < Date.now() + 1000
+    ) {
       throw new UnauthorizedException('token expired');
     }
-    await this.prismaService.txClient().accessToken.update({
-      where: { id: accessTokenId },
-      data: { lastUsedTime: new Date().toISOString() },
-    });
+    const now = new Date();
+    if (shouldUpdateLastUsedTime(accessTokenEntity.lastUsedTime, now)) {
+      const updated = await this.prismaService.accessToken.updateMany({
+        where: {
+          id: accessTokenId,
+          OR: [
+            { lastUsedTime: null },
+            { lastUsedTime: { lt: new Date(now.getTime() - lastUsedTimeUpdateIntervalMs) } },
+          ],
+        },
+        data: { lastUsedTime: now.toISOString() },
+      });
+      if (updated.count === 0) {
+        const currentToken = await this.prismaService.accessToken.findUnique({
+          where: { id: accessTokenId },
+          select: { id: true },
+        });
+        if (!currentToken) {
+          await this.performanceCacheService.del(generateAccessTokenCacheKey(accessTokenId));
+          throw new UnauthorizedException('token not found');
+        }
+      }
+    }
 
     return {
       userId: accessTokenEntity.userId,
@@ -76,7 +132,7 @@ export class AccessTokenService {
   async listAccessToken() {
     const userId = this.cls.get('user.id');
     const list = await this.prismaService.accessToken.findMany({
-      where: { userId },
+      where: { userId, clientId: null },
       select: {
         id: true,
         name: true,
@@ -84,6 +140,7 @@ export class AccessTokenService {
         scopes: true,
         spaceIds: true,
         baseIds: true,
+        hasFullAccess: true,
         createdTime: true,
         expiredTime: true,
         lastUsedTime: true,
@@ -93,12 +150,55 @@ export class AccessTokenService {
     return list.map(this.transformAccessTokenEntity);
   }
 
-  async createAccessToken(createAccessToken: CreateAccessTokenRo) {
-    const userId = this.cls.get('user.id');
-    const { name, description, scopes, spaceIds, baseIds, expiredTime } = createAccessToken;
+  /**
+   * A token minted for an agent sandbox carries the user's identity but not their consent:
+   * letting it mint a personal access token would launder that marker away (the PAT
+   * strategy sets no `authSource`), so everything gated on "the user did this themselves"
+   * would open up to the sandbox.
+   */
+  private assertNotSandboxCaller() {
+    if (this.cls.get('authSource') === 'sandbox') {
+      throw new ForbiddenException(
+        'Personal access tokens cannot be created from a sandbox session'
+      );
+    }
+  }
+
+  @Audit({
+    action: Events.ACCESS_TOKEN_CREATE,
+    resourceId: (input: { userId?: string }, ctx) => input.userId ?? ctx.cls.get('user.id')!,
+    userId: (input: { userId?: string }, ctx) => input.userId ?? ctx.cls.get('user.id'),
+    // Record the token's settings so the audit row shows what access was granted. NEVER the secret:
+    // the token `sign` is generated server-side and is not part of the input, so this is safe.
+    // `clientId` separates user-created PATs (absent) from the short-lived machine tokens
+    // minted for OAuth apps / plugins (present) — analytics listeners rely on it.
+    params: (input: CreateAccessTokenRo & { clientId?: string }) => ({
+      name: input.name,
+      description: input.description,
+      scopes: input.scopes,
+      spaceIds: input.spaceIds,
+      baseIds: input.baseIds,
+      expiredTime: input.expiredTime,
+      hasFullAccess: input.hasFullAccess,
+      clientId: input.clientId,
+    }),
+    // Machine tokens are re-minted every 10 minutes for as long as an OAuth app or
+    // plugin session stays alive — the exchange is automatic, not something the user did,
+    // so it is noise in the audit log (it outnumbered real PAT creations 10:1). The user's
+    // consent is already audited once as OAUTH_APP_AUTHORIZE / plugin install; only
+    // user-created PATs get an ACCESS_TOKEN_CREATE row.
+    emit: (_result: unknown, input: { clientId?: string }) => !input.clientId,
+  })
+  async createAccessToken(
+    createAccessToken: CreateAccessTokenRo & { clientId?: string; userId?: string }
+  ) {
+    this.assertNotSandboxCaller();
+    const userId = createAccessToken.userId ?? this.cls.get('user.id')!;
+    const { name, description, scopes, spaceIds, baseIds, expiredTime, clientId, hasFullAccess } =
+      createAccessToken;
     const id = generateAccessTokenId();
     const sign = getRandomString(16);
-    const accessTokenEntity = await this.prismaService.accessToken.create({
+    const accessTokenEntity = await this.prismaService.txClient().accessToken.create({
       data: {
         id,
         name,
@@ -108,7 +208,9 @@ export class AccessTokenService {
         baseIds: baseIds === null ? null : JSON.stringify(baseIds),
         userId,
         sign,
+        clientId,
         expiredTime: new Date(expiredTime).toISOString(),
+        hasFullAccess,
       },
       select: {
         id: true,
@@ -120,6 +222,7 @@ export class AccessTokenService {
         expiredTime: true,
         createdTime: true,
         lastUsedTime: true,
+        hasFullAccess: true,
       },
     });
     return {
@@ -128,6 +231,12 @@ export class AccessTokenService {
     };
   }
 
+  @Audit({
+    action: Events.ACCESS_TOKEN_DELETE,
+    resourceId: (_id: string, ctx) => ctx.cls.get('user.id') as string,
+    params: (id: string) => ({ accessTokenId: id }),
+    emit: true,
+  })
   async deleteAccessToken(id: string) {
     const userId = this.cls.get('user.id');
     await this.prismaService.accessToken.delete({
@@ -136,6 +245,7 @@ export class AccessTokenService {
   }
 
   async refreshAccessToken(id: string, refreshAccessTokenRo?: RefreshAccessTokenRo) {
+    this.assertNotSandboxCaller();
     const userId = this.cls.get('user.id');
 
     const sign = getRandomString(16);
@@ -157,6 +267,17 @@ export class AccessTokenService {
         lastUsedTime: true,
       },
     });
+    await this.performanceCacheService.del(generateAccessTokenCacheKey(id));
+    // The new expiry only: the regenerated token itself never goes into the audit log.
+    await this.audit.emitAtomic({
+      action: 'access-token.refresh',
+      resourceId: id,
+      params: {
+        accessTokenId: id,
+        name: accessTokenEntity.name,
+        expiredTime: accessTokenEntity.expiredTime?.toISOString(),
+      },
+    });
     return {
       ...this.transformAccessTokenEntity(accessTokenEntity),
       token: getAccessToken(id, sign),
@@ -165,7 +286,18 @@ export class AccessTokenService {
 
   async updateAccessToken(id: string, updateAccessToken: UpdateAccessTokenRo) {
     const userId = this.cls.get('user.id');
-    const { name, description, scopes, spaceIds, baseIds } = updateAccessToken;
+    const { name, description, scopes, spaceIds, baseIds, hasFullAccess } = updateAccessToken;
+    const previous = await this.prismaService.accessToken.findFirst({
+      where: { id, userId },
+      select: {
+        name: true,
+        description: true,
+        scopes: true,
+        spaceIds: true,
+        baseIds: true,
+        hasFullAccess: true,
+      },
+    });
     const accessTokenEntity = await this.prismaService.accessToken.update({
       where: { id, userId },
       data: {
@@ -174,6 +306,7 @@ export class AccessTokenService {
         scopes: JSON.stringify(scopes),
         spaceIds: spaceIds === null ? null : JSON.stringify(spaceIds),
         baseIds: baseIds === null ? null : JSON.stringify(baseIds),
+        hasFullAccess,
       },
       select: {
         id: true,
@@ -182,9 +315,37 @@ export class AccessTokenService {
         scopes: true,
         spaceIds: true,
         baseIds: true,
+        hasFullAccess: true,
       },
     });
-    return this.transformAccessTokenEntity(accessTokenEntity);
+    await this.performanceCacheService.del(generateAccessTokenCacheKey(id));
+    const updated = this.transformAccessTokenEntity(accessTokenEntity);
+    await this.auditAccessTokenUpdate(
+      id,
+      previous && this.transformAccessTokenEntity(previous),
+      updated
+    );
+    return updated;
+  }
+
+  /** One row per update that changed a setting, with each changed setting before and after. */
+  private async auditAccessTokenUpdate(
+    id: string,
+    previous: Record<(typeof auditedTokenSettings)[number], unknown> | null,
+    updated: Record<(typeof auditedTokenSettings)[number], unknown> & { name: string }
+  ) {
+    const changes: Record<string, { before: unknown; after: unknown }> = {};
+    for (const key of auditedTokenSettings) {
+      const before = previous?.[key] ?? null;
+      const after = updated[key] ?? null;
+      if (!isEqual(before, after)) changes[key] = { before, after };
+    }
+    if (Object.keys(changes).length === 0) return;
+    await this.audit.emitAtomic({
+      action: 'access-token.update',
+      resourceId: id,
+      params: { accessTokenId: id, name: updated.name, changes },
+    });
   }
 
   async getAccessToken(accessTokenId: string) {
@@ -201,8 +362,32 @@ export class AccessTokenService {
         createdTime: true,
         expiredTime: true,
         lastUsedTime: true,
+        hasFullAccess: true,
       },
     });
-    return this.transformAccessTokenEntity(item);
+    const res = this.transformAccessTokenEntity(item);
+    // filter deleted spaceIds and baseIds
+    const { spaceIds, baseIds } = res;
+    let filteredSpaceIds: string[] | undefined;
+    let filteredBaseIds: string[] | undefined;
+    if (spaceIds) {
+      const spaces = await this.prismaService.space.findMany({
+        where: { id: { in: spaceIds }, deletedTime: null },
+        select: { id: true },
+      });
+      filteredSpaceIds = spaces.map((space) => space.id);
+    }
+    if (baseIds) {
+      const bases = await this.prismaService.base.findMany({
+        where: { id: { in: baseIds }, deletedTime: null },
+        select: { id: true },
+      });
+      filteredBaseIds = bases.map((base) => base.id);
+    }
+    return {
+      ...res,
+      spaceIds: filteredSpaceIds,
+      baseIds: filteredBaseIds,
+    };
   }
 }

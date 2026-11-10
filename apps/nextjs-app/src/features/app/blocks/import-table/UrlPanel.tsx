@@ -1,10 +1,11 @@
 import type { UseMutateAsyncFunction } from '@tanstack/react-query';
-import type { SUPPORTEDTYPE, FieldType } from '@teable/core';
-import { importTypeMap } from '@teable/core';
+import type { FieldType } from '@teable/core';
+import type { SUPPORTEDTYPE } from '@teable/openapi';
+import { importTypeMap } from '@teable/openapi';
 import { Input, Button, Spin } from '@teable/ui-lib';
 import type { AxiosResponse } from 'axios';
+import { useTranslation } from 'next-i18next';
 import { useState } from 'react';
-import { useTranslation } from 'react-i18next';
 import { z } from 'zod';
 
 interface IUrlPanel {
@@ -48,7 +49,7 @@ const UrlPanel = (props: IUrlPanel) => {
         <Input
           type="url"
           placeholder={importTypeMap[fileType].exampleUrl}
-          className="mr-2 w-full"
+          className="me-2"
           value={linkUrl}
           onChange={(e) => {
             const { value } = e.target;
@@ -73,7 +74,7 @@ const UrlPanel = (props: IUrlPanel) => {
             });
           }}
         >
-          {isFinished && <Spin className="mr-1 size-4" />}
+          {isFinished && <Spin className="me-1 size-4" />}
           {t('table:import.title.upload')}
         </Button>
       </div>

@@ -1,22 +1,17 @@
+import { ConversionVisitor, FieldReferenceVisitor } from '@teable/formula';
 import { z } from 'zod';
-import { ConversionVisitor, EvalVisitor } from '../../../formula';
-import { FieldReferenceVisitor } from '../../../formula/field-reference.visitor';
-import type { FieldType, CellValueType } from '../constant';
+import { EvalVisitor } from '../../../formula';
+import type { TableDomain } from '../../table/table-domain';
+import type { CellValueType } from '../constant';
+import { FieldType } from '../constant';
 import type { FieldCore } from '../field';
-import { unionFormattingSchema, getFormattingSchema, getDefaultFormatting } from '../formatting';
-import { getShowAsSchema, unionShowAsSchema } from '../show-as';
+import type { IFieldVisitor } from '../field-visitor.interface';
+import { isLinkField } from '../field.util';
+import { getFormattingSchema, getDefaultFormatting } from '../formatting';
+import { getShowAsSchema } from '../show-as';
 import { FormulaAbstractCore } from './abstract/formula.field.abstract';
-
-export const formulaFieldOptionsSchema = z.object({
-  expression: z.string().openapi({
-    description:
-      'The formula including fields referenced by their IDs. For example, LEFT(4, {Birthday}) input will be returned as LEFT(4, {fldXXX}) via API.',
-  }),
-  formatting: unionFormattingSchema.optional(),
-  showAs: unionShowAsSchema.optional(),
-});
-
-export type IFormulaFieldOptions = z.infer<typeof formulaFieldOptionsSchema>;
+import { type IFormulaFieldMeta, type IFormulaFieldOptions } from './formula-option.schema';
+import type { LinkFieldCore } from './link.field';
 
 const formulaFieldCellValueSchema = z.any();
 
@@ -26,6 +21,7 @@ export class FormulaFieldCore extends FormulaAbstractCore {
   static defaultOptions(cellValueType: CellValueType): IFormulaFieldOptions {
     return {
       expression: '',
+      timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
       formatting: getDefaultFormatting(cellValueType),
     };
   }
@@ -84,9 +80,102 @@ export class FormulaFieldCore extends FormulaAbstractCore {
 
   declare options: IFormulaFieldOptions;
 
+  declare meta?: IFormulaFieldMeta;
+
+  getExpression(): string {
+    return this.options.expression;
+  }
+
   getReferenceFieldIds() {
+    // Lookup-of-formula is type=formula + isLookup. Edges come from lookupOptions,
+    // never from a foreign/host formula expression (T6332).
+    if (this.isLookup) {
+      return [];
+    }
     const visitor = new FieldReferenceVisitor();
     return Array.from(new Set(visitor.visit(this.tree)));
+  }
+
+  /**
+   * Get referenced fields from a table domain
+   * @param tableDomain - The table domain to search for referenced fields
+   * @returns Array of referenced field instances
+   */
+  getReferenceFields(tableDomain: TableDomain): FieldCore[] {
+    const referenceFieldIds = this.getReferenceFieldIds();
+    const referenceFields: FieldCore[] = [];
+
+    for (const fieldId of referenceFieldIds) {
+      const field = tableDomain.getField(fieldId);
+      if (field) {
+        referenceFields.push(field);
+      }
+    }
+
+    return referenceFields;
+  }
+
+  /**
+   * Check recursively whether all references in this formula are resolvable in the given table
+   * - Missing referenced field returns true (unresolved)
+   * - If a referenced formula exists but itself has unresolved references (or hasError), returns true
+   */
+  hasUnresolvedReferences(tableDomain: TableDomain, visited: Set<string> = new Set()): boolean {
+    // Prevent infinite loops on circular references
+    if (visited.has(this.id)) return false;
+    visited.add(this.id);
+
+    const ids = this.getReferenceFieldIds();
+    for (const id of ids) {
+      const ref = tableDomain.getField(id);
+      if (!ref) return true;
+      if (ref.hasError) return true;
+      // Drill down if the referenced field is a formula
+      if (ref.type === FieldType.Formula && !ref.isLookup) {
+        const refFormula = ref as FormulaFieldCore;
+        if (refFormula.hasUnresolvedReferences(tableDomain, visited)) return true;
+      }
+    }
+
+    return false;
+  }
+
+  override getLinkFields(tableDomain: TableDomain): LinkFieldCore[] {
+    return this.getReferenceFields(tableDomain).flatMap((field) => {
+      if (isLinkField(field)) {
+        return field;
+      }
+      return field.getLinkFields(tableDomain);
+    });
+  }
+
+  /**
+   * Get the generated column name for database-generated formula fields
+   * This should match the naming convention used in database-column-visitor
+   */
+  getGeneratedColumnName(): string {
+    return this.dbFieldName;
+  }
+
+  getIsPersistedAsGeneratedColumn() {
+    return this.meta?.persistedAsGeneratedColumn || false;
+  }
+
+  /**
+   * Recalculates and updates the cellValueType, isMultipleCellValue, and dbFieldType for this formula field
+   * based on its expression and the current field context
+   * @param fieldMap Map of field ID to field instance for context
+   */
+  recalculateFieldTypes(fieldMap: Record<string, FieldCore>): void {
+    const { cellValueType, isMultipleCellValue } = FormulaFieldCore.getParsedValueType(
+      this.options.expression,
+      fieldMap
+    );
+
+    this.cellValueType = cellValueType;
+    this.isMultipleCellValue = isMultipleCellValue;
+    // Update dbFieldType using the base class method
+    this.updateDbFieldType();
   }
 
   validateOptions() {
@@ -97,5 +186,9 @@ export class FormulaFieldCore extends FormulaAbstractCore {
         showAs: getShowAsSchema(this.cellValueType, this.isMultipleCellValue),
       })
       .safeParse(this.options);
+  }
+
+  accept<T>(visitor: IFieldVisitor<T>): T {
+    return visitor.visitFormulaField(this);
   }
 }

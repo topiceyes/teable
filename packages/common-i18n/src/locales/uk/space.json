@@ -1,0 +1,453 @@
+{
+  "crossSpace": {
+    "duplicateBaseTitle": "Сповіщення",
+    "duplicateBaseDescription": "Перехресні посилання між просторами не підтримуються. Копія буде перетворена на однорядкове текстове поле.",
+    "affectedTableSuffix": "({{count}} поле(ів))",
+    "convertAndDuplicate": "Перетворити та дублювати"
+  },
+  "trash": {
+    "forceRemove": "Примусово видалити простір",
+    "forceRemoveTitle": "Примусово видалити «{{name}}»?",
+    "forceRemoveLabel": "Я розумію ризики та обираю примусове видалення.",
+    "forceRemoveWarning": "Під час примусового видалення метадані простору та ресурси, якими керує {{brandName}}, буде остаточно видалено без підключення до зовнішньої бази даних. Фізичні дані можуть залишитися в зовнішній базі даних, і вам доведеться видалити їх самостійно. Цю дію неможливо скасувати.",
+    "forceRemoveSuccess": "Простір примусово видалено"
+  },
+  "initialSpaceName": "Простір {{name}}",
+  "action": {
+    "createBase": "Створіть проєкт",
+    "createSpace": "Створіть простір",
+    "invite": "Запросити",
+    "startFromScratch": "Почати з нуля"
+  },
+  "allSpaces": "Всі простори",
+  "emptySpaceTitle": "У цьому просторі немає проєктів",
+  "spaceIsEmpty": "Створіть свій перший проєкт, щоб розпочати",
+  "baseModal": {
+    "copy": "Копіювати",
+    "duplicate": "Дублювати \"{{baseName}}\"",
+    "createBaseFromTemplate": "Створити проєкт з шаблону",
+    "duplicateRecords": "Дублювати записи",
+    "duplicateRecordsTip": "Ваша історія ревізій і співавтори не дублюватимуться.",
+    "toSpace": "До простору",
+    "copyToSpace": "Скопіювати в простір",
+    "duplicateBase": "Дублювати проєкт",
+    "missTargetTip": "Будь ласка, виберіть місце для створення копії проєкту.",
+    "copying": "Копіювання проєкту, це може зайняти деякий час...",
+    "howToCreate": "Як ти хочеш почати?",
+    "fromScratch": "З нуля",
+    "fromTemplate": "З шаблону",
+    "moveBaseToAnotherSpace": "Перемістити {{baseName}} в інший простір",
+    "chooseSpace": "Виберіть простір",
+    "duplicateBaseSucceedAndJump": "Готово, натисніть, щоб перейти"
+  },
+  "spaceSetting": {
+    "title": "Налаштування простору",
+    "general": "Загальний",
+    "collaborators": "Співавтори",
+    "generalDescription": "Змініть налаштування поточного місця тут",
+    "spaceName": "Назва простору",
+    "spaceId": "ID простору",
+    "importBase": "Імпорт"
+  },
+  "collaborators": "Співавтори",
+  "more": "Більше",
+  "pin": {
+    "add": "Додати до обраного",
+    "remove": "Видалити з обраного",
+    "pin": "Обране",
+    "empty": "Тут з'являться ваші обрані проєкти та простори"
+  },
+  "tooltip": {
+    "noPermissionToCreateBase": "У вас немає дозволу створювати проєкт"
+  },
+  "tip": {
+    "delete": "Ви впевнені, що хочете видалити <0/>?",
+    "exportTips2": "Ви можете імпортувати файл .tea в простір -> більше -> імпорт",
+    "exportTips3": "Поля зв'язку між проєктами будуть перетворені на однорядковий текст.",
+    "exportIncludeDataLabel": "Включити записи",
+    "exportIncludeDataDescription": "При вимкненні експортується лише структура та конфігурація",
+    "exportTitle": "Експорт",
+    "exportDescription": "Експортувати поточний проєкт у файл .tea, це може зайняти деякий час.",
+    "exportStartButton": "Почати експорт",
+    "exportSlowTip": "Обсяг даних великий. Експорт може зайняти деякий час. Ви можете тимчасово залишити сторінку.",
+    "exportReadyDescription": "Будь ласка, завантажте файл .tea, {{importHint}}",
+    "moveBaseSuccessTitle": "Переміщення успішне",
+    "moveBaseSuccessDescription": "{{baseName}} успішно переміщено до {{spaceName}}",
+    "moveBaseCrossSpaceTitle": "Сповіщення",
+    "moveBaseCrossSpaceDataLossWarning": "Перехресні посилання між просторами не підтримуються. Пов'язані поля будуть перетворені на текстові поля. Цю дію не можна скасувати.",
+    "moveBaseCrossDataDbTitle": "Перенесення між базами даних",
+    "moveBaseCrossDataDbWarning": "Вихідний і цільовий простори використовують різні бази даних. Під час перенесення дані проєкту буде скопійовано до цільової БД, що може зайняти час. На час перенесення запис до цього проєкту призупиняється.",
+    "moveBaseProgressTitle": "Перенесення проєкту…",
+    "moveBaseProgressPhase": "Етап: {{phase}}",
+    "moveBaseProgressPercent": "{{percent}} %",
+    "moveBaseFailedTitle": "Не вдалося перенести",
+    "moveBaseFailedDescription": "Етап {{phase}}: {{error}}",
+    "moveBaseRetry": "Повторити",
+    "moveBaseCancel": "Скасувати"
+  },
+  "deleteSpaceModal": {
+    "title": "Видалити простір",
+    "blockedTitle": "Неможливо видалити цей простір",
+    "blockedDesc": "Цей простір має активну підписку. Будь ласка, скасуйте підписку перед видаленням простору."
+  },
+  "sharedBase": {
+    "title": "Спільні проєкти",
+    "description": "Всі проєкти, до яких мене запросили приєднатися",
+    "empty": "Ще немає спільних проєктів"
+  },
+  "quickSearch": {
+    "placeholder": "Пошук проєктів або ресурсів"
+  },
+  "aiSetting": {
+    "title": "Налаштування ШІ",
+    "description": "Керування налаштуваннями ШІ вашого простору",
+    "enable": "Ініціалізувати налаштування ШІ"
+  },
+  "import": {
+    "importing": "Імпорт",
+    "baseImportTips": "Натисніть або перетягніть файл .tea у цю область для завантаження",
+    "confirm": "Підтвердити та продовжити",
+    "phase": {
+      "importingV2": "Імпортування",
+      "parsingStructure": "Parsing structure",
+      "creatingBase": "Створення проєкту: {{detail}}",
+      "creatingTable": "Creating table: {{detail}}",
+      "tableStructureStarted": "Підготовка структури таблиці: {{tableName}} ({{tableIndex}}/{{totalTables}})",
+      "tableStructureValidating": "Перевірка зв’язків між таблицями",
+      "tableStructureCommitting": "Збереження структури таблиці",
+      "tableStructureDone": "Структуру таблиці збережено: {{tableName}} ({{tableIndex}}/{{totalTables}})",
+      "tableStructureData": "Структура таблиці",
+      "tableStructureTablesProgress": "Підготовлено таблиць: {{count}}/{{total}}",
+      "tableStructureTablesDone": "Збережено таблиць: {{count}}/{{total}}",
+      "creatingCommonFields": "Creating basic fields for {{table}}: {{fields}}",
+      "creatingButtonFields": "Creating button fields for {{table}}: {{fields}}",
+      "creatingFormulaFields": "Creating formula fields for {{table}}: {{fields}}",
+      "creatingLinkFields": "Creating link fields for {{table}}: {{fields}}",
+      "creatingLookupFields": "Creating lookup fields for {{table}}: {{fields}}",
+      "creatingTableViews": "Creating views for {{table}}: {{fields}}",
+      "creatingPlugins": "Creating plugins",
+      "creatingFolders": "Creating folders",
+      "creatingWorkflows": "Creating workflows",
+      "creatingApps": "Creating apps",
+      "creatingAuthorityMatrix": "Creating authority matrix",
+      "restoringBaseNodes": "Відновлення ієрархії папок",
+      "queuingAttachments": "Queuing attachment uploads",
+      "uploadingAppFiles": "Uploading app files",
+      "queuingDataImport": "Queuing data import",
+      "importingTableData": "Імпорт даних таблиць",
+      "restoringLinkRelations": "Відновлення даних пов’язаних записів",
+      "tableDataStarted": "Імпорт записів: {{tableName}}",
+      "tableDataProgress": "Імпорт записів: {{tableName}}",
+      "tableDataDone": "Імпорт записів завершено: {{tableName}}",
+      "linkFieldsData": "Дані пов’язаних записів",
+      "linkFieldsProgress": "Відновлення даних пов’язаних записів",
+      "linkFieldsDone": "Дані пов’язаних записів відновлено",
+      "tableDataRowsProgress": "Імпортовано рядків: {{count}}",
+      "tableDataRowsDone": "Імпортовано рядків: {{count}}",
+      "tableDataRowsTotalProgress": "Оброблено рядків: {{count}}/{{total}}",
+      "tableDataRowsTotalDone": "Оброблено рядків: {{count}}/{{total}}",
+      "tableDataBatch": "пакет {{batch}}",
+      "tableDataBatchRows": "Рядків у цьому пакеті: {{count}}",
+      "tableDataEmpty": "Немає даних таблиць для імпорту",
+      "done": "Import completed",
+      "clickToView": "Натисніть для перегляду"
+    }
+  },
+  "export": {
+    "phase": {
+      "preparing": "Підготовка експорту",
+      "exportingArchive": "Створення файлу експорту",
+      "exportingStructure": "Експорт структури",
+      "exportingAttachments": "Експорт вкладень",
+      "exportingAttachmentMetadata": "Експорт метаданих вкладень",
+      "exportingTableData": "Експорт записів",
+      "tableDataStarted": "Експорт записів: {{tableName}} ({{tableIndex}}/{{totalTables}})",
+      "tableDataProgress": "Експорт записів: {{tableName}}",
+      "tableDataDone": "Експорт записів завершено: {{tableName}}",
+      "exportingExtraFiles": "Експорт додаткових файлів",
+      "exportingAppFiles": "Експорт файлів застосунку",
+      "uploadingArchive": "Завантаження файлу експорту",
+      "generatingDownloadUrl": "Створення посилання для завантаження",
+      "rowsProgress": "Експортовано рядків: {{count}}",
+      "done": "Експорт завершено"
+    }
+  },
+  "template": {
+    "title": "Шаблон",
+    "description": "Швидко створити новий проєкт з шаблону",
+    "noTemplatesAvailable": "Немає доступних шаблонів",
+    "noTemplatesDescription": "Тут зараз нічого немає"
+  },
+  "recentlyBase": {
+    "title": "Нещодавно відвідані"
+  },
+  "noBases": {
+    "title": "Привіт, {{userName}}!",
+    "description": "Почнімо керувати вашою роботою з вашого першого проєкту."
+  },
+  "noSpaces": {
+    "title": "Привіт, {{userName}}!",
+    "description": "Створіть свій перший простір, щоб почати шлях співпраці з даними."
+  },
+  "baseList": {
+    "allBases": "Усі проєкти",
+    "creator": "Творець",
+    "createdTime": "Створено",
+    "lastOpened": "Останнє відкриття",
+    "enter": "Увійти",
+    "noTables": "Немає таблиць",
+    "empty": "Проєктів поки немає",
+    "recent": "Нещодавні",
+    "manual": "Ручний порядок"
+  },
+  "publishBase": {
+    "title": "Опублікувати в центрі шаблонів",
+    "description": "Публікація проєкту в центрі шаблонів в один клік! Дозвольте більшій кількості людей бачити, використовувати та реміксувати вашу творчість, будуючи разом потужніший бізнес",
+    "infoTitle": "Основна інформація",
+    "form": {
+      "title": "Назва",
+      "description": "Опис",
+      "changelog": "Примітки до випуску",
+      "changelogPlaceholder": "Опишіть зміни для наявних встановлень; показуються в попередньому перегляді оновлення",
+      "publishNode": "Опублікувати вузли",
+      "includeData": "Включити дані",
+      "defaultActiveNode": "Активний вузол за замовчуванням",
+      "descriptionPlaceholder": "Коротко опишіть свою ідею...",
+      "titlePlaceholder": "Назвіть свою роботу...",
+      "cover": "Обкладинка",
+      "coverHint": "16:9, використовується на картці в каталозі та на публічній сторінці",
+      "versionTitle": "Вміст версії",
+      "addChangelog": "Додати примітки до випуску"
+    },
+    "publishToCommunity": "Опублікувати в центрі шаблонів",
+    "publish": "Опублікувати",
+    "publishSuccess": "Успішно опубліковано!",
+    "previewTips": "Покажіть свою роботу світові",
+    "update": "Оновити",
+    "submit": "Надіслати на перевірку",
+    "submitted": "Надіслано на перевірку",
+    "review": {
+      "status": {
+        "review": "На перевірці",
+        "rejected": "Повернуто на доопрацювання",
+        "withdrawn": "Відкликано"
+      },
+      "submittedTime": "Надіслано {{time}}",
+      "note": "Примітка рецензента",
+      "checks": "Автоматичні перевірки",
+      "check": {
+        "connectors": "Підключення",
+        "privacy": "Конфіденційність",
+        "estimate": "Оцінка запусків",
+        "trial": "Пробний запуск"
+      },
+      "checkMessage": {
+        "connectors": "Тут не можна підключити: {{providers}}",
+        "privacy": "Записи включено; перевірте їх на наявність персональних даних",
+        "estimate": "Близько {{runs}} запусків на місяць — більше, ніж {{free}} у безкоштовному плані",
+        "trial": "Автоматизації не потребують облікового запису; переконайтеся, що вони працюють без нього"
+      },
+      "withdraw": "Відкликати",
+      "withdrawn": "Заявку відкликано.",
+      "live": "Опубліковано · v{{version}}",
+      "publicLink": "Публічне посилання"
+    },
+    "unPublish": "Зняти з публікації",
+    "unPublishSuccess": "Проєкт успішно знято з публікації!",
+    "unPublishConfirmTitle": "Підтвердити зняття з публікації",
+    "unPublishConfirmDescription": "Ви впевнені, що хочете зняти цей проєкт з публікації? Він більше не буде видимим у центрі шаблонів.",
+    "uploadCover": "Натисніть, щоб завантажити обкладинку",
+    "changeCover": "Натисніть, щоб змінити обкладинку",
+    "uploading": "Завантаження зображення...",
+    "uploadSuccess": "Зображення успішно завантажено",
+    "uploadFailed": "Помилка завантаження",
+    "invalidImageType": "Будь ласка, виберіть файл зображення",
+    "tips": {
+      "publishValidation": "назва та опис обов'язкові",
+      "atLeastOneNode": "Виберіть принаймні один вузол для публікації"
+    },
+    "urlCopied": "URL скопійовано в буфер обміну!",
+    "urlCopiedForDiscord": "URL скопійовано в буфер обміну! Ви можете вставити його в Discord.",
+    "featuredLabel": "Featured",
+    "featuredTip": "Офіційно обрано як рекомендований. Ваш шаблон отримає більше уваги.",
+    "publishSuccessDescription": "Поділіться своєю роботою зі світом",
+    "shareWith": "Поділитися з",
+    "unpublishedApps": {
+      "title": "Виявлено неопубліковані додатки",
+      "description": "Неопубліковані додатки можуть спричинити помилки попереднього перегляду шаблону. Опублікуйте їх зараз або продовжте.",
+      "publishAll": "Опублікувати всі",
+      "publish": "Опублікувати",
+      "published": "Опубліковано",
+      "publishing": "Публікація...",
+      "notPublished": "Не опубліковано",
+      "publishFailed": "Помилка публікації",
+      "publishFailedTip1": "Перевірте, чи може вихідний додаток бути успішно опублікований",
+      "publishFailedTip2": "Спробуйте повторно опублікувати цей шаблон",
+      "ignoreAndContinue": "Ігнорувати та продовжити",
+      "goToFix": "Перейти до виправлення",
+      "redeploy": "Повторне розгортання",
+      "unnamedApp": "Безіменний додаток"
+    },
+    "submitVersion": "Надіслати v{{version}} на перевірку"
+  },
+  "dataDb": {
+    "create": {
+      "title": "База даних для даних",
+      "description": "Виберіть, де цей простір зберігає схеми проєктів і записи.",
+      "defaultHint": "Рекомендовано для більшості просторів.",
+      "byodbOption": "Використовувати мою базу даних PostgreSQL",
+      "byodbHint": "Ініціалізує цей простір у внутрішній схемі Teable всередині вашої керованої бази даних.",
+      "urlLabel": "URL підключення до PostgreSQL",
+      "sslHint": "Використовуйте ті самі параметри SSL, які вимагає ваш сервер PostgreSQL. Після перевірки пароль більше не відображається.",
+      "testConnection": "Перевірити підключення",
+      "testing": "Перевірка...",
+      "retestRequired": "Після зміни URL перевірте підключення ще раз.",
+      "databaseLabel": "База даних",
+      "databasePlaceholder": "Виберіть базу даних",
+      "databaseHint": "Виберіть базу даних PostgreSQL для цього простору та перевірте підключення ще раз.",
+      "preflightPassed": "Перевірки підключення пройдено",
+      "preflightFailed": "Перевірки підключення не пройдено",
+      "missingCapabilities": "Бракує привілеїв",
+      "testFailed": "Не вдалося перевірити підключення до бази даних.",
+      "errors": {
+        "INVALID_DATABASE_URL": {
+          "message": "URL підключення до PostgreSQL недійсний."
+        },
+        "PRIVATE_NETWORK_BLOCKED": {
+          "message": "Хости баз даних у приватних мережах за замовчуванням заблоковані.",
+          "remediation": "Установлюйте TEABLE_SSRF_PROTECTION_DISABLED=true лише в довірених self-hosted розгортаннях."
+        },
+        "CONNECTION_FAILED": {
+          "message": "Не вдалося підключитися до бази даних.",
+          "remediation": "Перевірте хост, порт, назву бази даних, ім’я користувача, пароль і параметри SSL."
+        },
+        "IPV6_NETWORK_UNREACHABLE": {
+          "message": "Хост бази даних розв’язався в IPv6-адресу, але це розгортання Teable не має доступу до мереж IPv6.",
+          "remediation": "Використайте ендпоінт бази даних або пулер, доступний через IPv4, чи ввімкніть вихідну мережу IPv6 для цього розгортання Teable."
+        },
+        "PRIVILEGE_CHECK_FAILED": {
+          "message": "Перевірки привілеїв бази даних не пройдено."
+        },
+        "DDL_PRIVILEGE_CHECK_FAILED": {
+          "message": "В облікового запису немає DDL-привілеїв, потрібних для ініціалізації бази даних Teable.",
+          "remediation": "Надайте привілеї на створення схем, таблиць, функцій і тригерів."
+        },
+        "NON_EMPTY_UNKNOWN_DATABASE": {
+          "message": "Внутрішня схема Teable вже містить об’єкти, які не керуються Teable.",
+          "remediation": "Використайте базу даних без конфліктної внутрішньої схеми або видаліть невідомі об’єкти з цієї схеми."
+        },
+        "INCOMPATIBLE_TEABLE_DATABASE": {
+          "message": "Ця база даних містить неповні або несумісні об’єкти даних Teable.",
+          "remediation": "Використайте порожню базу даних або сумісний процес міграції/підключення бази даних Teable."
+        }
+      }
+    },
+    "fields": {
+      "host": "Хост",
+      "database": "База даних",
+      "internalSchema": "Внутрішня схема",
+      "version": "Версія",
+      "classification": "Класифікація"
+    },
+    "badge": {
+      "label": "Виділена",
+      "tooltip": "Цей простір розміщено на виділеній базі даних, ізольованій від інших просторів"
+    }
+  },
+  "airtableImport": {
+    "title": "Імпорт з Airtable",
+    "close": "Закрити",
+    "pickBase": "Виберіть базу для імпорту",
+    "noBases": "Для цього токена не знайдено доступних баз.",
+    "optionRecords": "Імпортувати записи",
+    "optionAttachments": "Завантажити та імпортувати вкладення",
+    "import": "Почати імпорт",
+    "done": "Імпорт завершено",
+    "failed": "Не вдалося імпортувати",
+    "openBase": "Відкрити проєкт",
+    "issuesSummary": "Під час імпорту скориговано елементів: {{count}}",
+    "issuesMore": "+{{count}} ще",
+    "issue": {
+      "fieldDegraded": "{{tableName}} / {{fieldName}}: {{fromType}} → {{toType}}",
+      "fieldSkipped": "{{tableName}} / {{fieldName}} ({{fromType}}) пропущено: {{reason}}",
+      "viewSkipped": "{{tableName}} / подання «{{viewName}}» ({{fromType}}) пропущено",
+      "valuesDropped": "{{tableName}} / {{fieldName}}: відкинуто значень: {{count}} ({{reason}})",
+      "viewConfigDegraded": "{{tableName}} / подання «{{viewName}}»: {{reason}}"
+    },
+    "phase": {
+      "fetchingSchema": "Читання структури бази Airtable",
+      "creatingBase": "Створення проєкту: {{detail}}",
+      "creatingTable": "Створення таблиці: {{tableName}} ({{tableIndex}}/{{totalTables}})",
+      "creatingLinks": "Створення полів зв’язку",
+      "fillingLinks": "{{tableName}} (зв’язки)",
+      "applyingViewConfig": "Імпорт конфігурації подань"
+    },
+    "searchBases": "Пошук баз",
+    "noSearchResults": "Немає баз, що відповідають запиту.",
+    "detecting": "Перевірка підключення до Airtable…",
+    "connectWithAirtable": "Підключити обліковий запис Airtable",
+    "waitingOAuth": "Завершіть авторизацію у спливаючому вікні…",
+    "connectedAs": "Підключено: {{account}}",
+    "permission": {
+      "create": "Створювач",
+      "edit": "Редактор",
+      "comment": "Коментатор",
+      "read": "Лише читання"
+    },
+    "integrationRequired": "Інтеграцію з Airtable не налаштовано в цьому екземплярі. Зверніться до адміністратора.",
+    "optionViewConfig": "Імпортувати фільтри, сортування та групування подань",
+    "viewConfig": {
+      "help": "API Airtable не надає налаштування подань, тому потрібне посилання лише для читання.",
+      "helpStep1": "В Airtable відкрийте меню «Share» бази",
+      "helpStep2": "Виберіть «Share to web» та увімкніть повний доступ до бази",
+      "helpStep3": "Скопіюйте посилання лише для читання та вставте його в поле вище",
+      "linkPlaceholder": "Вставте посилання для спільного доступу",
+      "mismatch": "Це посилання вказує на іншу базу, а не на вибрану.",
+      "disableReminder": "Готово — тепер можна вимкнути посилання спільного доступу в Airtable."
+    }
+  },
+  "googleSheetImport": {
+    "title": "Імпорт з Google Sheets",
+    "close": "Закрити",
+    "pickSpreadsheet": "Виберіть таблицю для імпорту",
+    "openPicker": "Вибрати таблицю з Google Drive",
+    "changeSpreadsheet": "Змінити",
+    "analyzing": "Читання таблиці…",
+    "pickTabs": "Виберіть аркуші для імпорту",
+    "gridSize": "{{rows}} рядків × {{columns}} стовпців",
+    "optionRecords": "Імпортувати записи",
+    "import": "Почати імпорт",
+    "done": "Імпорт завершено",
+    "failed": "Не вдалося імпортувати",
+    "openBase": "Відкрити проєкт",
+    "issuesSummary": "Під час імпорту скориговано елементів: {{count}}",
+    "issuesMore": "+{{count}} ще",
+    "recordsImported": "{{tableName}}: імпортовано {{count}} записів",
+    "partialImported": "{{count}} таблиць було повністю імпортовано до збою, їх збережено",
+    "issue": {
+      "valuesDropped": "{{sheetName}} / {{fieldName}}: відкинуто значень: {{count}} ({{reason}})",
+      "sheetSkipped": "Аркуш «{{sheetName}}» пропущено: {{reason}}",
+      "columnsTruncated": "{{sheetName}}: {{count}} стовпців понад ліміт не імпортовано"
+    },
+    "phase": {
+      "fetchingSchema": "Читання структури таблиці",
+      "creatingBase": "Створення проєкту: {{detail}}",
+      "creatingTable": "Створення таблиці: {{tableName}} ({{tableIndex}}/{{totalTables}})"
+    },
+    "detecting": "Перевірка підключення до Google…",
+    "connectWithGoogle": "Підключити обліковий запис Google",
+    "waitingOAuth": "Завершіть авторизацію у спливаючому вікні…",
+    "connectedAs": "Підключено: {{account}}",
+    "integrationRequired": "Інтеграцію з Google Sheets не налаштовано в цьому екземплярі. Зверніться до адміністратора."
+  },
+  "createBaseDialog": {
+    "title": "Як ви хочете почати?"
+  },
+  "importBaseDialog": {
+    "title": "Імпорт проєкту",
+    "fromFile": "Імпорт з файлу",
+    "fromFileDesc": "Завантажте файл проєкту .tea",
+    "fromAirtableDesc": "Підключіть обліковий запис Airtable",
+    "fromGoogleSheetDesc": "Виберіть таблицю на своєму Google Drive"
+  }
+}

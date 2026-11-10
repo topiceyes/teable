@@ -8,11 +8,14 @@ import { cellSchema, rangesRoSchema } from './range';
 export const PASTE_URL = '/table/{tableId}/selection/paste';
 
 export const pasteRoSchema = rangesRoSchema.extend({
-  content: z.string().openapi({
-    description: 'Content to paste',
-    example: 'John\tDoe\tjohn.doe@example.com',
-  }),
-  header: z.array(fieldVoSchema).optional().openapi({
+  content: z
+    .string()
+    .or(z.array(z.array(z.unknown())))
+    .meta({
+      description: 'Content to paste',
+      example: 'John\tDoe\tjohn.doe@example.com',
+    }),
+  header: z.array(fieldVoSchema).optional().meta({
     description: 'Table header for paste operation',
     example: [],
   }),
@@ -29,7 +32,8 @@ export type IPasteVo = z.infer<typeof pasteVoSchema>;
 export const PasteRoute: RouteConfig = registerRoute({
   method: 'patch',
   path: PASTE_URL,
-  description: 'Copy operations in tables',
+  summary: 'Paste content into selected range',
+  description: 'Apply paste operation to insert content into the selected table range',
   request: {
     params: z.object({
       tableId: z.string(),
@@ -56,7 +60,7 @@ export const PasteRoute: RouteConfig = registerRoute({
 });
 
 export const paste = async (tableId: string, pasteRo: IPasteRo) => {
-  return axios.patch<null>(
+  return axios.patch<IPasteVo>(
     urlBuilder(PASTE_URL, {
       tableId,
     }),

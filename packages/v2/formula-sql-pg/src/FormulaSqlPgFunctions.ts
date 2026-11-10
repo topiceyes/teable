@@ -1,0 +1,2821 @@
+/* eslint-disable sonarjs/no-duplicate-string */
+/* eslint-disable sonarjs/cognitive-complexity */
+import { FunctionName } from '@teable/v2-core';
+
+import type { FormulaSqlPgBindings } from './FormulaSqlPgBindings';
+import {
+  DATE_ADD_UNIT_ALIASES,
+  DATE_ADD_UNIT_SQL,
+  DATETIME_DIFF_UNIT_ALIASES,
+  DATETIME_DIFF_UNIT_SQL,
+  FormulaSqlPgExpressionBuilder,
+  IS_SAME_UNIT_ALIASES,
+  IS_SAME_UNIT_SQL,
+} from './FormulaSqlPgExpressionBuilder';
+import type { FormulaSqlPgTranslator } from './FormulaSqlPgTranslator';
+import {
+  buildErrorLiteral,
+  escapeSqlLiteral,
+  extractJsonScalarText,
+  sqlStringLiteral,
+} from './PgSqlHelpers';
+import {
+  buildErrorMessageSql,
+  combineErrorConditions,
+  guardValueSql,
+  makeExpr,
+  type SqlExpr,
+} from './SqlExpression';
+import {
+  buildDatetimeFormatSql,
+  buildDatetimeParseGuardRegex,
+  hasDatetimeTimezoneToken,
+  normalizeDatetimeFormatExpression,
+} from './utils/datetime-format.util';
+
+const NULL_DOUBLE_PRECISION = 'NULL::double precision';
+const NULL_BOOLEAN = 'NULL::boolean';
+const NULL_TIMESTAMPTZ = 'NULL::timestamptz';
+
+export class FormulaSqlPgFunctions extends FormulaSqlPgExpressionBuilder {
+  private readonly functionHandlers: Partial<Record<FunctionName, (params: SqlExpr[]) => SqlExpr>>;
+
+  constructor(translator: FormulaSqlPgTranslator, bindings?: FormulaSqlPgBindings) {
+    super(translator, bindings);
+    this.functionHandlers = {
+      [FunctionName.Sum]: (params) => this.sum(params),
+      [FunctionName.Average]: (params) => this.average(params),
+      [FunctionName.Max]: (params) => this.max(params),
+      [FunctionName.Min]: (params) => this.min(params),
+      [FunctionName.Round]: (params) => this.round(params),
+      [FunctionName.RoundUp]: (params) => this.roundUp(params),
+      [FunctionName.RoundDown]: (params) => this.roundDown(params),
+      [FunctionName.Ceiling]: (params) => this.ceiling(params),
+      [FunctionName.Floor]: (params) => this.floor(params),
+      [FunctionName.Even]: (params) => this.even(params),
+      [FunctionName.Odd]: (params) => this.odd(params),
+      [FunctionName.Int]: (params) => this.int(params),
+      [FunctionName.Abs]: (params) => this.abs(params),
+      [FunctionName.Sqrt]: (params) => this.sqrt(params),
+      [FunctionName.Power]: (params) => this.power(params),
+      [FunctionName.Exp]: (params) => this.exp(params),
+      [FunctionName.Log]: (params) => this.log(params),
+      [FunctionName.Mod]: (params) => this.mod(params),
+      [FunctionName.Value]: (params) => this.value(params),
+
+      [FunctionName.Concatenate]: (params) => this.concatenate(params),
+      [FunctionName.Find]: (params) => this.find(params),
+      [FunctionName.Search]: (params) => this.search(params),
+      [FunctionName.Mid]: (params) => this.mid(params),
+      [FunctionName.Left]: (params) => this.left(params),
+      [FunctionName.Right]: (params) => this.right(params),
+      [FunctionName.Replace]: (params) => this.replace(params),
+      [FunctionName.RegExpReplace]: (params) => this.regexpReplace(params),
+      [FunctionName.Substitute]: (params) => this.substitute(params),
+      [FunctionName.TextBefore]: (params) => this.textBefore(params),
+      [FunctionName.TextSplit]: (params) => this.textSplit(params),
+      [FunctionName.Lower]: (params) => this.lower(params),
+      [FunctionName.Upper]: (params) => this.upper(params),
+      [FunctionName.Rept]: (params) => this.rept(params),
+      [FunctionName.Trim]: (params) => this.trim(params),
+      [FunctionName.Len]: (params) => this.len(params),
+      [FunctionName.T]: (params) => this.t(params),
+      [FunctionName.EncodeUrlComponent]: (params) => this.encodeUrlComponent(params),
+
+      [FunctionName.If]: (params) => this.ifFunc(params),
+      [FunctionName.Switch]: (params) => this.switchFunc(params),
+      [FunctionName.And]: (params) => this.and(params),
+      [FunctionName.Or]: (params) => this.or(params),
+      [FunctionName.Not]: (params) => this.not(params),
+      [FunctionName.Xor]: (params) => this.xor(params),
+      [FunctionName.Blank]: () => makeExpr('NULL', 'string', false),
+      [FunctionName.Error]: (params) => this.errorFunc(params),
+      [FunctionName.IsError]: (params) => this.isError(params),
+
+      [FunctionName.Today]: () =>
+        // Store local midnight as an instant so downstream timezone conversion preserves 00:00.
+        makeExpr(
+          this.budget
+            .sql`(((CURRENT_TIMESTAMP AT TIME ZONE ${this.formulaTimeZoneSql()})::date::timestamp) AT TIME ZONE ${this.formulaTimeZoneSql()})`,
+          'datetime',
+          false
+        ),
+      [FunctionName.Now]: () => makeExpr('NOW()', 'datetime', false),
+      [FunctionName.Year]: (params) => this.extractDatePart('YEAR', params),
+      [FunctionName.Month]: (params) => this.extractDatePart('MONTH', params),
+      [FunctionName.WeekNum]: (params) => this.extractDatePart('WEEK', params),
+      [FunctionName.Weekday]: (params) => this.extractDatePart('DOW', params),
+      [FunctionName.Day]: (params) => this.extractDatePart('DAY', params),
+      [FunctionName.Hour]: (params) => this.extractDatePart('HOUR', params),
+      [FunctionName.Minute]: (params) => this.extractDatePart('MINUTE', params),
+      [FunctionName.Second]: (params) => this.extractDatePart('SECOND', params),
+      [FunctionName.FromNow]: (params) => this.fromNow(params),
+      [FunctionName.ToNow]: (params) => this.toNow(params),
+      [FunctionName.DatetimeDiff]: (params) => this.datetimeDiff(params),
+      [FunctionName.Workday]: (params) => this.workday(params),
+      [FunctionName.WorkdayDiff]: (params) => this.workdayDiff(params),
+      [FunctionName.IsSame]: (params) => this.isSame(params),
+      [FunctionName.IsAfter]: (params) => this.isAfter(params),
+      [FunctionName.IsBefore]: (params) => this.isBefore(params),
+      [FunctionName.DateAdd]: (params) => this.dateAdd(params),
+      [FunctionName.Datestr]: (params) => this.datestr(params),
+      [FunctionName.Timestr]: (params) => this.timestr(params),
+      [FunctionName.DatetimeFormat]: (params) => this.datetimeFormat(params),
+      [FunctionName.DatetimeParse]: (params) => this.datetimeParse(params),
+      [FunctionName.SetLocale]: (params) => this.setLocale(params),
+      [FunctionName.SetTimezone]: (params) => this.setTimezone(params),
+      [FunctionName.CreatedTime]: (params) => this.createdTime(params),
+      [FunctionName.LastModifiedTime]: (params) => this.lastModifiedTime(params),
+      [FunctionName.RecordId]: () =>
+        makeExpr(this.budget.sql`"${this.translator.tableAlias}".__id`, 'string', false),
+      [FunctionName.AutoNumber]: () =>
+        makeExpr(this.budget.sql`"${this.translator.tableAlias}".__auto_number`, 'number', false),
+
+      [FunctionName.ArrayJoin]: (params) => this.arrayJoin(params),
+      [FunctionName.ArrayCompact]: (params) => this.arrayCompact(params),
+      [FunctionName.ArrayUnique]: (params) => this.arrayUnique(params),
+      [FunctionName.ArrayFlatten]: (params) => this.arrayFlatten(params),
+      [FunctionName.TextAll]: (params) => this.textAll(params),
+      [FunctionName.Count]: (params) => this.count(params),
+      [FunctionName.CountA]: (params) => this.countA(params),
+      [FunctionName.CountAll]: (params) => this.countAll(params),
+    };
+  }
+
+  getHandlers(): Partial<Record<FunctionName, (params: SqlExpr[]) => SqlExpr>> {
+    return this.functionHandlers;
+  }
+  private sum(params: SqlExpr[]): SqlExpr {
+    if (params.length === 0) {
+      return makeExpr('0', 'number', false);
+    }
+    const arrays = params.filter((p) => p.isArray);
+    if (arrays.length === 1) {
+      const arrayExpr = arrays[0];
+      const scalars = params
+        .filter((p) => p !== arrayExpr)
+        .map((p) => this.coerceToNumber(p, 'sum'));
+      const scalarTerms = scalars.map((p) => p.valueSql);
+      const scalarErrorCondition = combineErrorConditions([arrayExpr, ...scalars], this.budget);
+      const scalarErrorMessage = buildErrorMessageSql(
+        [arrayExpr, ...scalars],
+        buildErrorLiteral('TYPE', 'cannot_cast_to_number', this.budget),
+        this.budget
+      );
+      const normalizedArray = this.normalizeArrayExpr(arrayExpr);
+      const elemExpr = makeExpr(
+        extractJsonScalarText('elem', this.budget),
+        'unknown',
+        false,
+        arrayExpr.errorConditionSql,
+        arrayExpr.errorMessageSql
+      );
+      const elementNumber = this.coerceToNumber(elemExpr, 'sum');
+      const arraySumSql = this.budget.sql`(SELECT SUM(${elementNumber.valueSql})
+        FROM jsonb_array_elements(${normalizedArray}) AS t(elem)
+      )`;
+      const scalarSumSql = scalarTerms.length
+        ? this.budget.sql`(${this.budget.join(scalarTerms, ' + ')})`
+        : '';
+      const sumSql = scalarSumSql
+        ? this.budget.sql`(${arraySumSql}) + ${scalarSumSql}`
+        : arraySumSql;
+      const valueSql = guardValueSql(sumSql, scalarErrorCondition, this.budget);
+      return makeExpr(valueSql, 'number', false, scalarErrorCondition, scalarErrorMessage);
+    }
+
+    const numericParams = params.map((param) => this.coerceToNumber(param, 'sum'));
+    const errorCondition = combineErrorConditions(numericParams, this.budget);
+    const errorMessage = buildErrorMessageSql(
+      numericParams,
+      buildErrorLiteral('TYPE', 'cannot_cast_to_number', this.budget),
+      this.budget
+    );
+    const sumSql = this.budget.join(
+      numericParams.map((param) => param.valueSql),
+      ' + '
+    );
+    const valueSql = guardValueSql(
+      sumSql.length ? this.budget.sql`(${sumSql})` : '0',
+      errorCondition,
+      this.budget
+    );
+    return makeExpr(valueSql, 'number', false, errorCondition, errorMessage);
+  }
+
+  private average(params: SqlExpr[]): SqlExpr {
+    if (params.length === 0) return makeExpr('NULL', 'number', false);
+    const arrays = params.filter((p) => p.isArray);
+    if (arrays.length === 1) {
+      const arrayExpr = arrays[0];
+      const scalars = params
+        .filter((p) => p !== arrayExpr)
+        .map((p) => this.coerceToNumber(p, 'average'));
+      const scalarTerms = scalars.map((p) => p.valueSql);
+      const scalarErrorCondition = combineErrorConditions([arrayExpr, ...scalars], this.budget);
+      const scalarErrorMessage = buildErrorMessageSql(
+        [arrayExpr, ...scalars],
+        buildErrorLiteral('TYPE', 'cannot_cast_to_number', this.budget),
+        this.budget
+      );
+      const normalizedArray = this.normalizeArrayExpr(arrayExpr);
+      const elemExpr = makeExpr(
+        extractJsonScalarText('elem', this.budget),
+        'unknown',
+        false,
+        arrayExpr.errorConditionSql,
+        arrayExpr.errorMessageSql
+      );
+      const elementNumber = this.coerceToNumber(elemExpr, 'average');
+      const arraySumSql = this.budget.sql`(SELECT SUM(${elementNumber.valueSql})
+        FROM jsonb_array_elements(${normalizedArray}) AS t(elem)
+      )`;
+      const arrayCountSql = this.budget.sql`jsonb_array_length(${normalizedArray})`;
+      const scalarSumSql = scalarTerms.length
+        ? this.budget.sql`(${this.budget.join(scalarTerms, ' + ')})`
+        : '';
+      const totalSumSql = scalarSumSql
+        ? this.budget.sql`(${arraySumSql}) + ${scalarSumSql}`
+        : arraySumSql;
+      const totalCountSql = scalarTerms.length
+        ? this.budget.sql`(${arrayCountSql}) + ${scalarTerms.length}`
+        : arrayCountSql;
+      const denominatorSql = this.budget.sql`NULLIF(${totalCountSql}, 0)`;
+      const valueSql = guardValueSql(
+        this.budget.sql`(${totalSumSql}) / ${denominatorSql}`,
+        scalarErrorCondition,
+        this.budget
+      );
+      return makeExpr(valueSql, 'number', false, scalarErrorCondition, scalarErrorMessage);
+    }
+    const numericParams = params.map((param) => this.coerceToNumber(param, 'average'));
+    const errorCondition = combineErrorConditions(numericParams, this.budget);
+    const errorMessage = buildErrorMessageSql(
+      numericParams,
+      buildErrorLiteral('TYPE', 'cannot_cast_to_number', this.budget),
+      this.budget
+    );
+    const sumSql = this.budget.join(
+      numericParams.map((param) => param.valueSql),
+      ' + '
+    );
+    const numerator = sumSql.length ? this.budget.sql`(${sumSql})` : '0';
+    const valueSql = guardValueSql(
+      this.budget
+        .sql`(CASE WHEN ${params.length} = 0 THEN NULL ELSE ${numerator} / ${params.length} END)`,
+      errorCondition,
+      this.budget
+    );
+    return makeExpr(valueSql, 'number', false, errorCondition, errorMessage);
+  }
+
+  private max(params: SqlExpr[]): SqlExpr {
+    if (params.length === 0) return makeExpr('NULL', 'number', false);
+    const preferDatetime = params[0]?.valueType === 'datetime';
+    const arrays = params.filter((p) => p.isArray);
+    if (arrays.length === 1) {
+      const arrayExpr = arrays[0];
+      const scalars = params
+        .filter((p) => p !== arrayExpr)
+        .map((p) => (preferDatetime ? this.coerceToDatetime(p) : this.coerceToNumber(p, 'max')));
+      const scalarTerms = scalars.map((p) => p.valueSql);
+      const scalarErrorCondition = combineErrorConditions([arrayExpr, ...scalars], this.budget);
+      const scalarErrorMessage = buildErrorMessageSql(
+        [arrayExpr, ...scalars],
+        buildErrorLiteral('TYPE', 'cannot_cast_to_number', this.budget),
+        this.budget
+      );
+      const normalizedArray = this.normalizeArrayExpr(arrayExpr);
+      const elemExpr = makeExpr(
+        extractJsonScalarText('elem', this.budget),
+        'unknown',
+        false,
+        arrayExpr.errorConditionSql,
+        arrayExpr.errorMessageSql
+      );
+      const elementValue = preferDatetime
+        ? this.coerceToDatetime(elemExpr)
+        : this.coerceToNumber(elemExpr, 'max');
+      const arrayMaxSql = this.budget.sql`(SELECT MAX(${elementValue.valueSql})
+        FROM jsonb_array_elements(${normalizedArray}) AS t(elem)
+      )`;
+      const candidates = [arrayMaxSql, ...scalarTerms];
+      const valueSql = guardValueSql(
+        this.budget.sql`GREATEST(${this.budget.join(candidates, ', ')})`,
+        scalarErrorCondition,
+        this.budget
+      );
+      return makeExpr(
+        valueSql,
+        preferDatetime ? 'datetime' : 'number',
+        false,
+        scalarErrorCondition,
+        scalarErrorMessage
+      );
+    }
+    const typedParams = params.map((param) =>
+      preferDatetime ? this.coerceToDatetime(param) : this.coerceToNumber(param, 'max')
+    );
+    const errorCondition = combineErrorConditions(typedParams, this.budget);
+    const errorMessage = buildErrorMessageSql(
+      typedParams,
+      buildErrorLiteral('TYPE', 'cannot_cast_to_number', this.budget),
+      this.budget
+    );
+    const valueSql = guardValueSql(
+      this.budget.sql`GREATEST(${this.budget.join(
+        typedParams.map((p) => p.valueSql),
+        ', '
+      )})`,
+      errorCondition,
+      this.budget
+    );
+    return makeExpr(
+      valueSql,
+      preferDatetime ? 'datetime' : 'number',
+      false,
+      errorCondition,
+      errorMessage
+    );
+  }
+
+  private min(params: SqlExpr[]): SqlExpr {
+    if (params.length === 0) return makeExpr('NULL', 'number', false);
+    const preferDatetime = params[0]?.valueType === 'datetime';
+    const arrays = params.filter((p) => p.isArray);
+    if (arrays.length === 1) {
+      const arrayExpr = arrays[0];
+      const scalars = params
+        .filter((p) => p !== arrayExpr)
+        .map((p) => (preferDatetime ? this.coerceToDatetime(p) : this.coerceToNumber(p, 'min')));
+      const scalarTerms = scalars.map((p) => p.valueSql);
+      const scalarErrorCondition = combineErrorConditions([arrayExpr, ...scalars], this.budget);
+      const scalarErrorMessage = buildErrorMessageSql(
+        [arrayExpr, ...scalars],
+        buildErrorLiteral('TYPE', 'cannot_cast_to_number', this.budget),
+        this.budget
+      );
+      const normalizedArray = this.normalizeArrayExpr(arrayExpr);
+      const elemExpr = makeExpr(
+        extractJsonScalarText('elem', this.budget),
+        'unknown',
+        false,
+        arrayExpr.errorConditionSql,
+        arrayExpr.errorMessageSql
+      );
+      const elementValue = preferDatetime
+        ? this.coerceToDatetime(elemExpr)
+        : this.coerceToNumber(elemExpr, 'min');
+      const arrayMinSql = this.budget.sql`(SELECT MIN(${elementValue.valueSql})
+        FROM jsonb_array_elements(${normalizedArray}) AS t(elem)
+      )`;
+      const candidates = [arrayMinSql, ...scalarTerms];
+      const valueSql = guardValueSql(
+        this.budget.sql`LEAST(${this.budget.join(candidates, ', ')})`,
+        scalarErrorCondition,
+        this.budget
+      );
+      return makeExpr(
+        valueSql,
+        preferDatetime ? 'datetime' : 'number',
+        false,
+        scalarErrorCondition,
+        scalarErrorMessage
+      );
+    }
+    const typedParams = params.map((param) =>
+      preferDatetime ? this.coerceToDatetime(param) : this.coerceToNumber(param, 'min')
+    );
+    const errorCondition = combineErrorConditions(typedParams, this.budget);
+    const errorMessage = buildErrorMessageSql(
+      typedParams,
+      buildErrorLiteral('TYPE', 'cannot_cast_to_number', this.budget),
+      this.budget
+    );
+    const valueSql = guardValueSql(
+      this.budget.sql`LEAST(${this.budget.join(
+        typedParams.map((p) => p.valueSql),
+        ', '
+      )})`,
+      errorCondition,
+      this.budget
+    );
+    return makeExpr(
+      valueSql,
+      preferDatetime ? 'datetime' : 'number',
+      false,
+      errorCondition,
+      errorMessage
+    );
+  }
+
+  private vectorizeUnaryNumericArray(
+    arrayExpr: SqlExpr,
+    op: (valueSql: string) => string,
+    reason: string
+  ): SqlExpr {
+    const normalizedArray = this.normalizeArrayExpr(arrayExpr);
+    const elementNumber = this.coerceArrayElementToNumber(arrayExpr, 'elem', reason);
+    const elementValueSql = guardValueSql(
+      op(elementNumber.valueSql),
+      elementNumber.errorConditionSql,
+      this.budget
+    );
+    const valueSql = this.budget.sql`(SELECT jsonb_agg(to_jsonb(${elementValueSql}) ORDER BY ord)
+      FROM jsonb_array_elements(${normalizedArray}) WITH ORDINALITY AS _jae(elem, ord)
+    )`;
+    return makeExpr(
+      valueSql,
+      'number',
+      true,
+      arrayExpr.errorConditionSql,
+      arrayExpr.errorMessageSql,
+      undefined,
+      'json'
+    );
+  }
+
+  private round(params: SqlExpr[]): SqlExpr {
+    const value = params[0];
+    const precision = params[1];
+    if (!value) return makeExpr('NULL', 'number', false);
+    if (value.isArray) {
+      if (precision) {
+        return this.vectorizeArrayScalar(
+          value,
+          precision,
+          (leftSql, rightSql) => this.budget.sql`ROUND(${leftSql}::numeric, ${rightSql}::integer)`,
+          'round'
+        );
+      }
+      return this.vectorizeUnaryNumericArray(
+        value,
+        (valueSql: string) => this.budget.sql`ROUND(${valueSql}::numeric)`,
+        'round'
+      );
+    }
+    const numericValue = this.coerceToNumber(value, 'round');
+    const numericPrecision = precision ? this.coerceToNumber(precision, 'round') : undefined;
+    const errorCondition = combineErrorConditions(
+      numericPrecision ? [numericValue, numericPrecision] : [numericValue],
+      this.budget
+    );
+    const errorMessage = buildErrorMessageSql(
+      numericPrecision ? [numericValue, numericPrecision] : [numericValue],
+      buildErrorLiteral('TYPE', 'cannot_cast_to_number', this.budget),
+      this.budget
+    );
+    const valueSql = precision
+      ? this.budget
+          .sql`ROUND(${numericValue.valueSql}::numeric, ${numericPrecision?.valueSql}::integer)`
+      : this.budget.sql`ROUND(${numericValue.valueSql}::numeric)`;
+    return makeExpr(
+      guardValueSql(valueSql, errorCondition, this.budget),
+      'number',
+      false,
+      errorCondition,
+      errorMessage
+    );
+  }
+
+  private roundUp(params: SqlExpr[]): SqlExpr {
+    const value = params[0];
+    const precision = params[1];
+    if (!value) return makeExpr('NULL', 'number', false);
+    if (value.isArray) {
+      if (precision) {
+        return this.vectorizeArrayScalar(
+          value,
+          precision,
+          (leftSql, rightSql) => {
+            const factor = this.budget.sql`POWER(10, ${rightSql}::integer)`;
+            return this.budget.sql`CEIL(${leftSql} * ${factor}) / ${factor}`;
+          },
+          'roundup'
+        );
+      }
+      return this.vectorizeUnaryNumericArray(
+        value,
+        (valueSql: string) => this.budget.sql`CEIL(${valueSql})`,
+        'roundup'
+      );
+    }
+    const numericValue = this.coerceToNumber(value, 'roundup');
+    const numericPrecision = precision ? this.coerceToNumber(precision, 'roundup') : undefined;
+    const errorCondition = combineErrorConditions(
+      numericPrecision ? [numericValue, numericPrecision] : [numericValue],
+      this.budget
+    );
+    const errorMessage = buildErrorMessageSql(
+      numericPrecision ? [numericValue, numericPrecision] : [numericValue],
+      buildErrorLiteral('TYPE', 'cannot_cast_to_number', this.budget),
+      this.budget
+    );
+    if (!precision) {
+      return makeExpr(
+        guardValueSql(this.budget.sql`CEIL(${numericValue.valueSql})`, errorCondition, this.budget),
+        'number',
+        false,
+        errorCondition,
+        errorMessage
+      );
+    }
+    const factor = this.budget.sql`POWER(10, ${numericPrecision?.valueSql}::integer)`;
+    const valueSql = this.budget.sql`CEIL(${numericValue.valueSql} * ${factor}) / ${factor}`;
+    return makeExpr(
+      guardValueSql(valueSql, errorCondition, this.budget),
+      'number',
+      false,
+      errorCondition,
+      errorMessage
+    );
+  }
+
+  private roundDown(params: SqlExpr[]): SqlExpr {
+    const value = params[0];
+    const precision = params[1];
+    if (!value) return makeExpr('NULL', 'number', false);
+    if (value.isArray) {
+      if (precision) {
+        return this.vectorizeArrayScalar(
+          value,
+          precision,
+          (leftSql, rightSql) => {
+            const factor = this.budget.sql`POWER(10, ${rightSql}::integer)`;
+            return this.budget.sql`FLOOR(${leftSql} * ${factor}) / ${factor}`;
+          },
+          'rounddown'
+        );
+      }
+      return this.vectorizeUnaryNumericArray(
+        value,
+        (valueSql: string) => this.budget.sql`FLOOR(${valueSql})`,
+        'rounddown'
+      );
+    }
+    const numericValue = this.coerceToNumber(value, 'rounddown');
+    const numericPrecision = precision ? this.coerceToNumber(precision, 'rounddown') : undefined;
+    const errorCondition = combineErrorConditions(
+      numericPrecision ? [numericValue, numericPrecision] : [numericValue],
+      this.budget
+    );
+    const errorMessage = buildErrorMessageSql(
+      numericPrecision ? [numericValue, numericPrecision] : [numericValue],
+      buildErrorLiteral('TYPE', 'cannot_cast_to_number', this.budget),
+      this.budget
+    );
+    if (!precision) {
+      return makeExpr(
+        guardValueSql(
+          this.budget.sql`FLOOR(${numericValue.valueSql})`,
+          errorCondition,
+          this.budget
+        ),
+        'number',
+        false,
+        errorCondition,
+        errorMessage
+      );
+    }
+    const factor = this.budget.sql`POWER(10, ${numericPrecision?.valueSql}::integer)`;
+    const valueSql = this.budget.sql`FLOOR(${numericValue.valueSql} * ${factor}) / ${factor}`;
+    return makeExpr(
+      guardValueSql(valueSql, errorCondition, this.budget),
+      'number',
+      false,
+      errorCondition,
+      errorMessage
+    );
+  }
+
+  private ceiling(params: SqlExpr[]): SqlExpr {
+    const value = params[0];
+    if (!value) return makeExpr('NULL', 'number', false);
+    if (value.isArray) {
+      return this.vectorizeUnaryNumericArray(
+        value,
+        (valueSql: string) => this.budget.sql`CEIL(${valueSql})`,
+        'ceiling'
+      );
+    }
+    const numeric = this.coerceToNumber(value, 'ceiling');
+    const errorCondition = numeric.errorConditionSql;
+    return makeExpr(
+      guardValueSql(this.budget.sql`CEIL(${numeric.valueSql})`, errorCondition, this.budget),
+      'number',
+      false,
+      errorCondition,
+      numeric.errorMessageSql
+    );
+  }
+
+  private floor(params: SqlExpr[]): SqlExpr {
+    const value = params[0];
+    if (!value) return makeExpr('NULL', 'number', false);
+    if (value.isArray) {
+      return this.vectorizeUnaryNumericArray(
+        value,
+        (valueSql: string) => this.budget.sql`FLOOR(${valueSql})`,
+        'floor'
+      );
+    }
+    const numeric = this.coerceToNumber(value, 'floor');
+    const errorCondition = numeric.errorConditionSql;
+    return makeExpr(
+      guardValueSql(this.budget.sql`FLOOR(${numeric.valueSql})`, errorCondition, this.budget),
+      'number',
+      false,
+      errorCondition,
+      numeric.errorMessageSql
+    );
+  }
+
+  private even(params: SqlExpr[]): SqlExpr {
+    const value = params[0];
+    if (!value) return makeExpr('NULL', 'number', false);
+    const numeric = this.coerceToNumber(value, 'even');
+    const valueSql = this.withValueAlias(numeric.valueSql, (ref) => {
+      const rounded = this.budget.sql`FLOOR(${ref})`;
+      const roundedNumeric = this.budget.sql`(${rounded})::numeric`;
+      return this.budget.sql`(CASE
+        WHEN MOD(${roundedNumeric}, 2::numeric) = 0 THEN ${rounded}
+        ELSE (${rounded} + 1)
+      END)`;
+    });
+    return makeExpr(
+      guardValueSql(valueSql, numeric.errorConditionSql, this.budget),
+      'number',
+      false,
+      numeric.errorConditionSql,
+      numeric.errorMessageSql
+    );
+  }
+
+  private odd(params: SqlExpr[]): SqlExpr {
+    const value = params[0];
+    if (!value) return makeExpr('NULL', 'number', false);
+    const numeric = this.coerceToNumber(value, 'odd');
+    const valueSql = this.withValueAlias(numeric.valueSql, (ref) => {
+      const rounded = this.budget.sql`FLOOR(${ref})`;
+      const roundedNumeric = this.budget.sql`(${rounded})::numeric`;
+      return this.budget.sql`(CASE
+        WHEN MOD(${roundedNumeric}, 2::numeric) <> 0 THEN ${rounded}
+        ELSE (${rounded} + 1)
+      END)`;
+    });
+    return makeExpr(
+      guardValueSql(valueSql, numeric.errorConditionSql, this.budget),
+      'number',
+      false,
+      numeric.errorConditionSql,
+      numeric.errorMessageSql
+    );
+  }
+
+  private int(params: SqlExpr[]): SqlExpr {
+    const value = params[0];
+    if (!value) return makeExpr('NULL', 'number', false);
+    if (value.isArray) {
+      return this.vectorizeUnaryNumericArray(
+        value,
+        (valueSql: string) => this.budget.sql`FLOOR(${valueSql})`,
+        'int'
+      );
+    }
+    const numeric = this.coerceToNumber(value, 'int');
+    return makeExpr(
+      guardValueSql(
+        this.budget.sql`FLOOR(${numeric.valueSql})`,
+        numeric.errorConditionSql,
+        this.budget
+      ),
+      'number',
+      false,
+      numeric.errorConditionSql,
+      numeric.errorMessageSql
+    );
+  }
+
+  private abs(params: SqlExpr[]): SqlExpr {
+    const value = params[0];
+    if (!value) return makeExpr('NULL', 'number', false);
+    const numeric = this.coerceToNumber(value, 'abs');
+    return makeExpr(
+      guardValueSql(
+        this.budget.sql`ABS(${numeric.valueSql})`,
+        numeric.errorConditionSql,
+        this.budget
+      ),
+      'number',
+      false,
+      numeric.errorConditionSql,
+      numeric.errorMessageSql
+    );
+  }
+
+  private sqrt(params: SqlExpr[]): SqlExpr {
+    const value = params[0];
+    if (!value) return makeExpr('NULL', 'number', false);
+    const numeric = this.coerceToNumber(value, 'sqrt');
+    return makeExpr(
+      guardValueSql(
+        this.budget.sql`SQRT(${numeric.valueSql})`,
+        numeric.errorConditionSql,
+        this.budget
+      ),
+      'number',
+      false,
+      numeric.errorConditionSql,
+      numeric.errorMessageSql
+    );
+  }
+
+  private power(params: SqlExpr[]): SqlExpr {
+    const base = params[0];
+    const exp = params[1];
+    if (!base || !exp) return makeExpr('NULL', 'number', false);
+    const baseNumeric = this.coerceToNumber(base, 'power');
+    const expNumeric = this.coerceToNumber(exp, 'power');
+    const errorCondition = combineErrorConditions([baseNumeric, expNumeric], this.budget);
+    const errorMessage = buildErrorMessageSql(
+      [baseNumeric, expNumeric],
+      buildErrorLiteral('TYPE', 'cannot_cast_to_number', this.budget),
+      this.budget
+    );
+    const valueSql = guardValueSql(
+      this.budget.sql`POWER(${baseNumeric.valueSql}, ${expNumeric.valueSql})`,
+      errorCondition,
+      this.budget
+    );
+    return makeExpr(valueSql, 'number', false, errorCondition, errorMessage);
+  }
+
+  private exp(params: SqlExpr[]): SqlExpr {
+    const value = params[0];
+    if (!value) return makeExpr('NULL', 'number', false);
+    const numeric = this.coerceToNumber(value, 'exp');
+    return makeExpr(
+      guardValueSql(
+        this.budget.sql`EXP(${numeric.valueSql})`,
+        numeric.errorConditionSql,
+        this.budget
+      ),
+      'number',
+      false,
+      numeric.errorConditionSql,
+      numeric.errorMessageSql
+    );
+  }
+
+  private log(params: SqlExpr[]): SqlExpr {
+    const value = params[0];
+    const base = params[1];
+    if (!value) return makeExpr('NULL', 'number', false);
+    const numericValue = this.coerceToNumber(value, 'log');
+    if (!base) {
+      return makeExpr(
+        guardValueSql(
+          this.budget.sql`LN(${numericValue.valueSql})`,
+          numericValue.errorConditionSql,
+          this.budget
+        ),
+        'number',
+        false,
+        numericValue.errorConditionSql,
+        numericValue.errorMessageSql
+      );
+    }
+    const numericBase = this.coerceToNumber(base, 'log');
+    const errorCondition = combineErrorConditions([numericValue, numericBase], this.budget);
+    const errorMessage = buildErrorMessageSql(
+      [numericValue, numericBase],
+      buildErrorLiteral('TYPE', 'cannot_cast_to_number', this.budget),
+      this.budget
+    );
+    const baseLog = this.budget.sql`LN(${numericBase.valueSql})`;
+    const valueSql = guardValueSql(
+      this.budget.sql`(LN(${numericValue.valueSql}) / NULLIF(${baseLog}, 0))`,
+      errorCondition,
+      this.budget
+    );
+    return makeExpr(valueSql, 'number', false, errorCondition, errorMessage);
+  }
+
+  private mod(params: SqlExpr[]): SqlExpr {
+    const dividend = params[0];
+    const divisor = params[1];
+    if (!dividend || !divisor) return makeExpr('NULL', 'number', false);
+    const left = this.coerceToNumber(dividend, 'mod');
+    const right = this.coerceToNumber(divisor, 'mod');
+    const divZeroCondition = this.budget.sql`(${right.valueSql}) = 0`;
+    const errorCondition = combineErrorConditions(
+      [
+        left,
+        right,
+        makeExpr(
+          'NULL',
+          'number',
+          false,
+          divZeroCondition,
+          buildErrorLiteral('DIV0', 'division_by_zero', this.budget)
+        ),
+      ],
+      this.budget
+    );
+    const errorMessage = buildErrorMessageSql(
+      [
+        left,
+        right,
+        makeExpr(
+          'NULL',
+          'number',
+          false,
+          divZeroCondition,
+          buildErrorLiteral('DIV0', 'division_by_zero', this.budget)
+        ),
+      ],
+      buildErrorLiteral('DIV0', 'division_by_zero', this.budget),
+      this.budget
+    );
+    const valueSql = guardValueSql(
+      this.budget.sql`MOD(${left.valueSql}::numeric, ${right.valueSql}::numeric)::double precision`,
+      errorCondition,
+      this.budget
+    );
+    return makeExpr(valueSql, 'number', false, errorCondition, errorMessage);
+  }
+
+  private value(params: SqlExpr[]): SqlExpr {
+    const textExpr = params[0];
+    if (!textExpr) return makeExpr('NULL', 'number', false);
+    if (textExpr.isArray) {
+      return this.vectorizeUnaryNumericArray(textExpr, (valueSql: string) => valueSql, 'value');
+    }
+    const numeric = this.coerceToNumber(textExpr, 'value');
+    // v1 parity: VALUE(null|''|non-numeric) is null, never 0 (T6520)
+    return makeExpr(
+      numeric.valueSql,
+      'number',
+      false,
+      numeric.errorConditionSql,
+      numeric.errorMessageSql,
+      numeric.field
+    );
+  }
+
+  private concatenate(params: SqlExpr[]): SqlExpr {
+    // Do not apply formatting when converting to string to match v1 behavior
+    // where String(value) is used instead of formatted strings
+    const parts = params.map((param) => this.coerceToString(param, false));
+    const errorCondition = combineErrorConditions(parts, this.budget);
+    const errorMessage = buildErrorMessageSql(
+      parts,
+      buildErrorLiteral('TYPE', 'cannot_cast_to_text', this.budget),
+      this.budget
+    );
+    const valueSql = this.budget.sql`CONCAT(${this.budget.join(
+      parts.map((p) => p.valueSql),
+      ', '
+    )})`;
+    return makeExpr(
+      guardValueSql(valueSql, errorCondition, this.budget),
+      'string',
+      false,
+      errorCondition,
+      errorMessage
+    );
+  }
+
+  /**
+   * POSITION() requires text arguments. coerceToString usually produces text, but
+   * some field snapshots still surface jsonb columns with valueType=string (e.g.
+   * multi-select / link cells). Always cast to text so generated SQL never becomes
+   * `position(jsonb, unknown)` which hard-fails the whole computed task.
+   */
+  private asTextSql(valueSql: string): string {
+    return this.budget.sql`((${valueSql})::text)`;
+  }
+
+  private find(params: SqlExpr[]): SqlExpr {
+    const searchText = params[0];
+    const withinText = params[1];
+    const startNum = params[2];
+    if (!searchText || !withinText) return makeExpr('NULL', 'number', false);
+    const search = this.coerceToString(searchText);
+    const within = this.coerceToString(withinText);
+    const start = startNum ? this.coerceToNumber(startNum, 'find') : undefined;
+    const errorCondition = combineErrorConditions(
+      start ? [search, within, start] : [search, within],
+      this.budget
+    );
+    const errorMessage = buildErrorMessageSql(
+      start ? [search, within, start] : [search, within],
+      buildErrorLiteral('TYPE', 'cannot_cast_to_text', this.budget),
+      this.budget
+    );
+    const searchSql = this.asTextSql(search.valueSql);
+    const withinSql = this.asTextSql(within.valueSql);
+    const valueSql = start
+      ? this.budget
+          .sql`POSITION(${searchSql} IN SUBSTRING(${withinSql} FROM ${start.valueSql}::integer)) + ${start.valueSql}::integer - 1`
+      : this.budget.sql`POSITION(${searchSql} IN ${withinSql})`;
+    return makeExpr(
+      guardValueSql(valueSql, errorCondition, this.budget),
+      'number',
+      false,
+      errorCondition,
+      errorMessage
+    );
+  }
+
+  private search(params: SqlExpr[]): SqlExpr {
+    const searchText = params[0];
+    const withinText = params[1];
+    const startNum = params[2];
+    if (!searchText || !withinText) return makeExpr('NULL', 'number', false);
+    const search = this.coerceToString(searchText);
+    const within = this.coerceToString(withinText);
+    const start = startNum ? this.coerceToNumber(startNum, 'search') : undefined;
+    const errorCondition = combineErrorConditions(
+      start ? [search, within, start] : [search, within],
+      this.budget
+    );
+    const errorMessage = buildErrorMessageSql(
+      start ? [search, within, start] : [search, within],
+      buildErrorLiteral('TYPE', 'cannot_cast_to_text', this.budget),
+      this.budget
+    );
+    const searchSql = this.asTextSql(search.valueSql);
+    const withinSql = this.asTextSql(within.valueSql);
+    const valueSql = start
+      ? this.budget
+          .sql`POSITION(UPPER(${searchSql}) IN UPPER(SUBSTRING(${withinSql} FROM ${start.valueSql}::integer))) + ${start.valueSql}::integer - 1`
+      : this.budget.sql`POSITION(UPPER(${searchSql}) IN UPPER(${withinSql}))`;
+    return makeExpr(
+      guardValueSql(valueSql, errorCondition, this.budget),
+      'number',
+      false,
+      errorCondition,
+      errorMessage
+    );
+  }
+
+  private mid(params: SqlExpr[]): SqlExpr {
+    const textExpr = params[0];
+    const startNum = params[1];
+    const numChars = params[2];
+    if (!textExpr || !startNum || !numChars) return makeExpr('NULL', 'string', false);
+    const text = this.coerceToString(textExpr);
+    const start = this.coerceToNumber(startNum, 'mid');
+    const length = this.coerceToNumber(numChars, 'mid');
+    const errorCondition = combineErrorConditions([text, start, length], this.budget);
+    const errorMessage = buildErrorMessageSql(
+      [text, start, length],
+      buildErrorLiteral('TYPE', 'cannot_cast_to_text', this.budget),
+      this.budget
+    );
+    const valueSql = this.budget
+      .sql`SUBSTRING(${text.valueSql} FROM ${start.valueSql}::integer FOR ${length.valueSql}::integer)`;
+    return makeExpr(
+      guardValueSql(valueSql, errorCondition, this.budget),
+      'string',
+      false,
+      errorCondition,
+      errorMessage
+    );
+  }
+
+  private left(params: SqlExpr[]): SqlExpr {
+    const textExpr = params[0];
+    const numChars = params[1];
+    if (!textExpr || !numChars) return makeExpr('NULL', 'string', false);
+    const text = this.coerceToString(textExpr);
+    const length = this.coerceToNumber(numChars, 'left');
+    const errorCondition = combineErrorConditions([text, length], this.budget);
+    const errorMessage = buildErrorMessageSql(
+      [text, length],
+      buildErrorLiteral('TYPE', 'cannot_cast_to_text', this.budget),
+      this.budget
+    );
+    const valueSql = this.budget.sql`LEFT(${text.valueSql}, ${length.valueSql}::integer)`;
+    return makeExpr(
+      guardValueSql(valueSql, errorCondition, this.budget),
+      'string',
+      false,
+      errorCondition,
+      errorMessage
+    );
+  }
+
+  private right(params: SqlExpr[]): SqlExpr {
+    const textExpr = params[0];
+    const numChars = params[1];
+    if (!textExpr || !numChars) return makeExpr('NULL', 'string', false);
+    const text = this.coerceToString(textExpr);
+    const length = this.coerceToNumber(numChars, 'right');
+    const errorCondition = combineErrorConditions([text, length], this.budget);
+    const errorMessage = buildErrorMessageSql(
+      [text, length],
+      buildErrorLiteral('TYPE', 'cannot_cast_to_text', this.budget),
+      this.budget
+    );
+    const valueSql = this.budget.sql`RIGHT(${text.valueSql}, ${length.valueSql}::integer)`;
+    return makeExpr(
+      guardValueSql(valueSql, errorCondition, this.budget),
+      'string',
+      false,
+      errorCondition,
+      errorMessage
+    );
+  }
+
+  private replace(params: SqlExpr[]): SqlExpr {
+    const textExpr = params[0];
+    const startNum = params[1];
+    const numChars = params[2];
+    const newText = params[3];
+    if (!textExpr || !startNum || !numChars || !newText) return makeExpr('NULL', 'string', false);
+    const text = this.coerceToString(textExpr);
+    const start = this.coerceToNumber(startNum, 'replace');
+    const length = this.coerceToNumber(numChars, 'replace');
+    const replacement = this.coerceToString(newText);
+    const errorCondition = combineErrorConditions([text, start, length, replacement], this.budget);
+    const errorMessage = buildErrorMessageSql(
+      [text, start, length, replacement],
+      buildErrorLiteral('TYPE', 'cannot_cast_to_text', this.budget),
+      this.budget
+    );
+    const valueSql = this.budget
+      .sql`OVERLAY(${text.valueSql} PLACING ${replacement.valueSql} FROM ${start.valueSql}::integer FOR ${length.valueSql}::integer)`;
+    return makeExpr(
+      guardValueSql(valueSql, errorCondition, this.budget),
+      'string',
+      false,
+      errorCondition,
+      errorMessage
+    );
+  }
+
+  private regexpReplace(params: SqlExpr[]): SqlExpr {
+    const textExpr = params[0];
+    const pattern = params[1];
+    const replacement = params[2];
+    if (!textExpr || !pattern || !replacement) return makeExpr('NULL', 'string', false);
+    const text = this.coerceToString(textExpr);
+    const regex = this.coerceToString(pattern);
+    const repl = this.coerceToString(replacement);
+    const errorCondition = combineErrorConditions([text, regex, repl], this.budget);
+    const errorMessage = buildErrorMessageSql(
+      [text, regex, repl],
+      buildErrorLiteral('TYPE', 'cannot_cast_to_text', this.budget),
+      this.budget
+    );
+    const valueSql = this.budget
+      .sql`REGEXP_REPLACE(${text.valueSql}, ${regex.valueSql}, ${repl.valueSql}, 'g')`;
+    return makeExpr(
+      guardValueSql(valueSql, errorCondition, this.budget),
+      'string',
+      false,
+      errorCondition,
+      errorMessage
+    );
+  }
+
+  private substitute(params: SqlExpr[]): SqlExpr {
+    const textExpr = params[0];
+    const oldText = params[1];
+    const newText = params[2];
+    if (!textExpr || !oldText || !newText) return makeExpr('NULL', 'string', false);
+    // Use raw text coercion so numeric values keep runtime precision semantics (e.g. 42.5 vs 42.50).
+    const text = this.coerceToString(textExpr, false);
+    const search = this.coerceToString(oldText);
+    const replacement = this.coerceToString(newText);
+    const errorCondition = combineErrorConditions([text, search, replacement], this.budget);
+    const errorMessage = buildErrorMessageSql(
+      [text, search, replacement],
+      buildErrorLiteral('TYPE', 'cannot_cast_to_text', this.budget),
+      this.budget
+    );
+    const valueSql = this.budget
+      .sql`REPLACE(${text.valueSql}, ${search.valueSql}, ${replacement.valueSql})`;
+    return makeExpr(
+      guardValueSql(valueSql, errorCondition, this.budget),
+      'string',
+      false,
+      errorCondition,
+      errorMessage
+    );
+  }
+
+  private textBefore(params: SqlExpr[]): SqlExpr {
+    const textExpr = params[0];
+    const delimiterExpr = params[1];
+    if (!textExpr || !delimiterExpr) return makeExpr('NULL', 'string', false);
+    const text = this.coerceToString(textExpr, false);
+    const delimiter = this.coerceToString(delimiterExpr);
+    const ifNotFound = params[5] ? this.coerceToString(params[5]) : undefined;
+    const errorCondition = combineErrorConditions(
+      ifNotFound ? [text, delimiter, ifNotFound] : [text, delimiter],
+      this.budget
+    );
+    const errorMessage = buildErrorMessageSql(
+      ifNotFound ? [text, delimiter, ifNotFound] : [text, delimiter],
+      buildErrorLiteral('TYPE', 'cannot_cast_to_text', this.budget),
+      this.budget
+    );
+    const textSql = this.asTextSql(text.valueSql);
+    const delimiterSql = this.asTextSql(delimiter.valueSql);
+    const positionSql = this.budget.sql`POSITION(${delimiterSql} IN ${textSql})`;
+    const fallbackSql = ifNotFound?.valueSql ?? 'NULL';
+    const valueSql = this.budget
+      .sql`(CASE WHEN ${positionSql} = 0 THEN ${fallbackSql} ELSE LEFT(${textSql}, ${positionSql} - 1) END)`;
+    return makeExpr(
+      guardValueSql(valueSql, errorCondition, this.budget),
+      'string',
+      false,
+      errorCondition,
+      errorMessage
+    );
+  }
+
+  private textSplit(params: SqlExpr[]): SqlExpr {
+    const textExpr = params[0];
+    const delimiterExpr = params[1];
+    if (!textExpr || !delimiterExpr)
+      return makeExpr('NULL::jsonb', 'string', true, undefined, undefined, undefined, 'json');
+    const text = this.coerceToString(textExpr, false);
+    const delimiter = this.coerceToString(delimiterExpr);
+    const errorCondition = combineErrorConditions([text, delimiter], this.budget);
+    const errorMessage = buildErrorMessageSql(
+      [text, delimiter],
+      buildErrorLiteral('TYPE', 'cannot_cast_to_text', this.budget),
+      this.budget
+    );
+    const valueSql = this.budget
+      .sql`to_jsonb(string_to_array(${text.valueSql}, ${delimiter.valueSql}))`;
+    return makeExpr(
+      guardValueSql(valueSql, errorCondition, this.budget),
+      'string',
+      true,
+      errorCondition,
+      errorMessage,
+      undefined,
+      'json'
+    );
+  }
+
+  private lower(params: SqlExpr[]): SqlExpr {
+    const textExpr = params[0];
+    if (!textExpr) return makeExpr('NULL', 'string', false);
+    const text = this.coerceToString(textExpr);
+    return makeExpr(
+      guardValueSql(this.budget.sql`LOWER(${text.valueSql})`, text.errorConditionSql, this.budget),
+      'string',
+      false,
+      text.errorConditionSql,
+      text.errorMessageSql
+    );
+  }
+
+  private upper(params: SqlExpr[]): SqlExpr {
+    const textExpr = params[0];
+    if (!textExpr) return makeExpr('NULL', 'string', false);
+    const text = this.coerceToString(textExpr);
+    return makeExpr(
+      guardValueSql(this.budget.sql`UPPER(${text.valueSql})`, text.errorConditionSql, this.budget),
+      'string',
+      false,
+      text.errorConditionSql,
+      text.errorMessageSql
+    );
+  }
+
+  private rept(params: SqlExpr[]): SqlExpr {
+    const textExpr = params[0];
+    const numTimes = params[1];
+    if (!textExpr || !numTimes) return makeExpr('NULL', 'string', false);
+    const text = this.coerceToString(textExpr);
+    const count = this.coerceToNumber(numTimes, 'rept');
+    const errorCondition = combineErrorConditions([text, count], this.budget);
+    const errorMessage = buildErrorMessageSql(
+      [text, count],
+      buildErrorLiteral('TYPE', 'cannot_cast_to_text', this.budget),
+      this.budget
+    );
+    const valueSql = this.budget.sql`REPEAT(${text.valueSql}, ${count.valueSql}::integer)`;
+    return makeExpr(
+      guardValueSql(valueSql, errorCondition, this.budget),
+      'string',
+      false,
+      errorCondition,
+      errorMessage
+    );
+  }
+
+  private trim(params: SqlExpr[]): SqlExpr {
+    const textExpr = params[0];
+    if (!textExpr) return makeExpr('NULL', 'string', false);
+    const text = this.coerceToString(textExpr);
+    return makeExpr(
+      guardValueSql(
+        this.budget.sql`TRIM((${text.valueSql})::text)`,
+        text.errorConditionSql,
+        this.budget
+      ),
+      'string',
+      false,
+      text.errorConditionSql,
+      text.errorMessageSql
+    );
+  }
+
+  private len(params: SqlExpr[]): SqlExpr {
+    const textExpr = params[0];
+    if (!textExpr) return makeExpr('NULL', 'number', false);
+    const text = this.coerceToString(textExpr);
+    return makeExpr(
+      guardValueSql(this.budget.sql`LENGTH(${text.valueSql})`, text.errorConditionSql, this.budget),
+      'number',
+      false,
+      text.errorConditionSql,
+      text.errorMessageSql
+    );
+  }
+
+  private t(params: SqlExpr[]): SqlExpr {
+    const value = params[0];
+    if (!value) return makeExpr('NULL', 'string', false);
+    // Keep legacy runtime behavior: T coerces supported scalar/array values to text.
+    const text = this.coerceToString(value, false);
+    return makeExpr(
+      guardValueSql(text.valueSql, text.errorConditionSql, this.budget),
+      'string',
+      false,
+      text.errorConditionSql,
+      text.errorMessageSql
+    );
+  }
+
+  private encodeUrlComponent(params: SqlExpr[]): SqlExpr {
+    const value = params[0];
+    if (!value) return makeExpr('NULL', 'string', false);
+    // Do not apply formatting when converting to string to match v1 behavior
+    const text = this.coerceToString(value, false);
+    const textExpr = this.budget.sql`(${text.valueSql})::text`;
+    const encodedSql = this.budget.sql`(SELECT string_agg(
+      CASE
+        WHEN byte_val BETWEEN 48 AND 57
+          OR byte_val BETWEEN 65 AND 90
+          OR byte_val BETWEEN 97 AND 122
+          OR byte_val IN (45, 95, 46, 33, 126, 42, 39, 40, 41)
+        THEN chr(byte_val)
+        ELSE '%' || UPPER(LPAD(to_hex(byte_val), 2, '0'))
+      END,
+      ''
+      ORDER BY ord
+    )
+    FROM (
+      SELECT ord, get_byte(src.bytes, ord) AS byte_val
+      FROM (SELECT convert_to(${textExpr}, 'UTF8') AS bytes) AS src
+      CROSS JOIN generate_series(0, octet_length(src.bytes) - 1) AS ord
+    ) AS utf8_bytes)`;
+    const valueSql = this.budget
+      .sql`(CASE WHEN ${text.valueSql} IS NULL THEN NULL ELSE COALESCE(${encodedSql}, '') END)`;
+    return makeExpr(
+      guardValueSql(valueSql, text.errorConditionSql, this.budget),
+      'string',
+      false,
+      text.errorConditionSql,
+      text.errorMessageSql
+    );
+  }
+
+  private ifFunc(params: SqlExpr[]): SqlExpr {
+    const condition = params[0];
+    const trueExpr = params[1];
+    const falseExpr = params[2];
+    if (!condition || !trueExpr || !falseExpr) {
+      return makeExpr(
+        'NULL',
+        'string',
+        false,
+        'TRUE',
+        buildErrorLiteral('ARG', 'if_needs_3_params', this.budget)
+      );
+    }
+    const condBool = this.coerceToBoolean(condition);
+    const merged = this.coerceBranches(trueExpr, falseExpr);
+    const trueErr = merged.left.errorConditionSql;
+    const falseErr = merged.right.errorConditionSql;
+    // Error metadata follows the same lazy branch selection as the value.
+    // A flat OR loses selected ERROR() values or observes errors in dead arms.
+    const branchError =
+      trueErr || falseErr
+        ? this.budget
+            .sql`(CASE WHEN ${condBool.valueSql} THEN COALESCE(${trueErr ?? 'FALSE'}, FALSE) ELSE COALESCE(${falseErr ?? 'FALSE'}, FALSE) END)`
+        : undefined;
+    const errorCondition = condBool.errorConditionSql
+      ? this.budget
+          .sql`(CASE WHEN ${condBool.errorConditionSql} THEN TRUE ELSE ${branchError ?? 'FALSE'} END)`
+      : branchError;
+    const fallbackMessage = buildErrorLiteral('TYPE', 'if_branch_mismatch', this.budget);
+    const branchMessage = this.budget
+      .sql`(CASE WHEN ${condBool.valueSql} THEN ${merged.left.errorMessageSql ?? fallbackMessage} ELSE ${merged.right.errorMessageSql ?? fallbackMessage} END)`;
+    const errorMessage = errorCondition
+      ? condBool.errorConditionSql
+        ? this.budget
+            .sql`(CASE WHEN ${condBool.errorConditionSql} THEN ${condBool.errorMessageSql ?? fallbackMessage} ELSE ${branchMessage} END)`
+        : branchMessage
+      : undefined;
+    const valueSql = guardValueSql(
+      this.budget
+        .sql`(CASE WHEN ${condBool.valueSql} THEN ${merged.left.valueSql} ELSE ${merged.right.valueSql} END)`,
+      condBool.errorConditionSql,
+      this.budget
+    );
+    return makeExpr(
+      valueSql,
+      merged.type,
+      merged.isArray,
+      errorCondition,
+      errorMessage,
+      undefined,
+      merged.storageKind
+    );
+  }
+
+  private switchFunc(params: SqlExpr[]): SqlExpr {
+    if (params.length < 2) {
+      return makeExpr(
+        'NULL',
+        'string',
+        false,
+        'TRUE',
+        buildErrorLiteral('ARG', 'switch_needs_2_params', this.budget)
+      );
+    }
+    const expression = params[0];
+    const cases = params.slice(1);
+    const casePairs: Array<{ match: SqlExpr; result: SqlExpr }> = [];
+    for (let i = 0; i < cases.length - 1; i += 2) {
+      casePairs.push({ match: cases[i], result: cases[i + 1] });
+    }
+    const defaultResult = cases.length % 2 === 1 ? cases[cases.length - 1] : undefined;
+
+    const mergedResults = this.coerceSwitchResults(
+      casePairs.map((pair) => pair.result),
+      defaultResult
+    );
+    const errorExprs = [
+      expression,
+      ...casePairs.map((pair) => pair.match),
+      ...mergedResults.results,
+    ];
+    const errorCondition = combineErrorConditions(errorExprs, this.budget);
+    const errorMessage = buildErrorMessageSql(
+      errorExprs,
+      buildErrorLiteral('TYPE', 'switch_branch_mismatch', this.budget),
+      this.budget
+    );
+
+    const normalizedExpression = this.coerceToString(expression);
+    const casesSql = this.budget.join(
+      casePairs.map((pair, index) => {
+        const matchText = this.coerceToString(pair.match);
+        const resultSql = mergedResults.results[index]?.valueSql ?? pair.result.valueSql;
+        return this.budget
+          .sql`WHEN ${normalizedExpression.valueSql} = ${matchText.valueSql} THEN ${resultSql}`;
+      }),
+      ' '
+    );
+    const defaultSql = defaultResult
+      ? (mergedResults.defaultValueSql ?? defaultResult.valueSql)
+      : 'NULL';
+    const valueSql = guardValueSql(
+      this.budget.sql`(CASE ${casesSql} ELSE ${defaultSql} END)`,
+      errorCondition,
+      this.budget
+    );
+    return makeExpr(
+      valueSql,
+      mergedResults.type,
+      mergedResults.isArray,
+      errorCondition,
+      errorMessage,
+      undefined,
+      mergedResults.storageKind
+    );
+  }
+
+  private and(params: SqlExpr[]): SqlExpr {
+    if (params.length === 0) return makeExpr('FALSE', 'boolean', false);
+    const boolParams = params.map((param) => this.coerceToBoolean(param));
+    const errorCondition = combineErrorConditions(boolParams, this.budget);
+    const errorMessage = buildErrorMessageSql(
+      boolParams,
+      buildErrorLiteral('TYPE', 'cannot_cast_to_boolean', this.budget),
+      this.budget
+    );
+    const valueSql = guardValueSql(
+      this.budget.sql`(${this.budget.join(
+        boolParams.map((p) => p.valueSql),
+        ' AND '
+      )})`,
+      errorCondition,
+      this.budget
+    );
+    return makeExpr(valueSql, 'boolean', false, errorCondition, errorMessage);
+  }
+
+  private or(params: SqlExpr[]): SqlExpr {
+    if (params.length === 0) return makeExpr('FALSE', 'boolean', false);
+    const boolParams = params.map((param) => this.coerceToBoolean(param));
+    const errorCondition = combineErrorConditions(boolParams, this.budget);
+    const errorMessage = buildErrorMessageSql(
+      boolParams,
+      buildErrorLiteral('TYPE', 'cannot_cast_to_boolean', this.budget),
+      this.budget
+    );
+    const valueSql = guardValueSql(
+      this.budget.sql`(${this.budget.join(
+        boolParams.map((p) => p.valueSql),
+        ' OR '
+      )})`,
+      errorCondition,
+      this.budget
+    );
+    return makeExpr(valueSql, 'boolean', false, errorCondition, errorMessage);
+  }
+
+  private not(params: SqlExpr[]): SqlExpr {
+    const value = params[0];
+    if (!value) return makeExpr('NULL', 'boolean', false);
+    const boolExpr = this.coerceToBoolean(value);
+    const valueSql = guardValueSql(
+      this.budget.sql`(NOT ${boolExpr.valueSql})`,
+      boolExpr.errorConditionSql,
+      this.budget
+    );
+    return makeExpr(
+      valueSql,
+      'boolean',
+      false,
+      boolExpr.errorConditionSql,
+      boolExpr.errorMessageSql
+    );
+  }
+
+  private xor(params: SqlExpr[]): SqlExpr {
+    if (params.length === 0) return makeExpr('FALSE', 'boolean', false);
+    const boolParams = params.map((param) => this.coerceToBoolean(param));
+    const errorCondition = combineErrorConditions(boolParams, this.budget);
+    const errorMessage = buildErrorMessageSql(
+      boolParams,
+      buildErrorLiteral('TYPE', 'cannot_cast_to_boolean', this.budget),
+      this.budget
+    );
+    if (params.length === 1) {
+      return makeExpr(boolParams[0].valueSql, 'boolean', false, errorCondition, errorMessage);
+    }
+    const numericParams = boolParams.map(
+      (p) => this.budget.sql`(CASE WHEN ${p.valueSql} THEN 1 ELSE 0 END)`
+    );
+    const valueSql = guardValueSql(
+      this.budget.sql`((${this.budget.join(numericParams, ' + ')}) % 2 = 1)`,
+      errorCondition,
+      this.budget
+    );
+    return makeExpr(valueSql, 'boolean', false, errorCondition, errorMessage);
+  }
+
+  private errorFunc(params: SqlExpr[]): SqlExpr {
+    const messageExpr = params[0]
+      ? this.coerceToString(params[0])
+      : makeExpr(sqlStringLiteral('', this.budget), 'string', false);
+    const prefix = sqlStringLiteral('#ERROR:USER:', this.budget);
+    const emptyLiteral = sqlStringLiteral('', this.budget);
+    const messageSql = this.budget
+      .sql`(${prefix} || COALESCE(${messageExpr.valueSql}, ${emptyLiteral}))`;
+    const errorMessage = messageExpr.errorConditionSql
+      ? this.budget.sql`CASE WHEN ${messageExpr.errorConditionSql} THEN ${
+          messageExpr.errorMessageSql ??
+          buildErrorLiteral('INTERNAL', 'error_message_failed', this.budget)
+        } ELSE ${messageSql} END`
+      : messageSql;
+    return makeExpr('NULL', 'string', false, 'TRUE', errorMessage);
+  }
+
+  private isError(params: SqlExpr[]): SqlExpr {
+    const value = params[0];
+    if (!value) return makeExpr('FALSE', 'boolean', false);
+    const textValue = this.coerceToString(value);
+    const likeCondition = this.budget
+      .sql`(${textValue.valueSql} LIKE ${sqlStringLiteral('#ERROR:%', this.budget)})`;
+    const valueSql = value.errorConditionSql
+      ? this.budget.sql`(${value.errorConditionSql} OR ${likeCondition})`
+      : likeCondition;
+    return makeExpr(this.budget.sql`COALESCE(${valueSql}, FALSE)`, 'boolean', false);
+  }
+
+  private applyWeekdayStartDay(weekdaySql: string, startDayOfWeek?: SqlExpr): string {
+    if (!startDayOfWeek) {
+      return weekdaySql;
+    }
+
+    const mondayWeekdaySql = this.budget.sql`(((${weekdaySql}) + 6) % 7)`;
+    const startDayLiteral = this.getStringLiteralValue(startDayOfWeek)?.trim().toLowerCase();
+    if (startDayLiteral) {
+      return startDayLiteral === 'monday' ? mondayWeekdaySql : weekdaySql;
+    }
+
+    const startDayText = this.coerceToString(startDayOfWeek);
+    const normalizedStartDay = this.budget.sql`LOWER(BTRIM((${startDayText.valueSql})::text))`;
+    return this.budget
+      .sql`(CASE WHEN ${normalizedStartDay} = 'monday' THEN ${mondayWeekdaySql} ELSE ${weekdaySql} END)`;
+  }
+
+  private extractDatePart(part: string, params: SqlExpr[]): SqlExpr {
+    const value = params[0];
+    if (!value) return makeExpr('NULL', 'number', false);
+    const startDayOfWeek = part === 'DOW' ? params[1] : undefined;
+
+    // Early check: JSON array object fields (attachment, user) cannot be converted to datetime
+    if (value.isArray && this.isJsonArrayObjectField(value)) {
+      return makeExpr(
+        'NULL::int',
+        'number',
+        false,
+        'TRUE',
+        buildErrorLiteral('TYPE', 'cannot_cast_to_datetime', this.budget),
+        value.field
+      );
+    }
+
+    if (value.isArray) {
+      const normalizedArray = this.normalizeArrayExpr(value);
+      const elemExpr = makeExpr(
+        extractJsonScalarText('elem', this.budget),
+        'unknown',
+        false,
+        value.errorConditionSql,
+        value.errorMessageSql
+      );
+      const elementDatetime = this.coerceToDatetime(elemExpr);
+      const elementDatePartSql = this.budget
+        .sql`EXTRACT(${part} FROM ${this.applyFormulaTimeZone(elementDatetime.valueSql)})::int`;
+      const elementValueSql = guardValueSql(
+        this.applyWeekdayStartDay(elementDatePartSql, startDayOfWeek),
+        elementDatetime.errorConditionSql,
+        this.budget
+      );
+      const valueSql = this.budget.sql`(SELECT jsonb_agg(to_jsonb(${elementValueSql}) ORDER BY ord)
+        FROM jsonb_array_elements(${normalizedArray}) WITH ORDINALITY AS _jae(elem, ord)
+      )`;
+      return makeExpr(valueSql, 'number', true, value.errorConditionSql, value.errorMessageSql);
+    }
+    const datetime = this.coerceToDatetime(value);
+    const datePartSql = this.budget
+      .sql`EXTRACT(${part} FROM ${this.applyFormulaTimeZone(datetime.valueSql)})::int`;
+    const valueSql = this.applyWeekdayStartDay(datePartSql, startDayOfWeek);
+    return makeExpr(
+      guardValueSql(valueSql, datetime.errorConditionSql, this.budget),
+      'number',
+      false,
+      datetime.errorConditionSql,
+      datetime.errorMessageSql
+    );
+  }
+
+  private buildNowDiffWithUnit(
+    datetime: SqlExpr,
+    unit: SqlExpr | undefined,
+    diffSeconds: string,
+    diffMonths: string,
+    diffYears: string
+  ): SqlExpr {
+    if (!unit) {
+      return makeExpr(
+        guardValueSql(diffSeconds, datetime.errorConditionSql, this.budget),
+        'number',
+        false,
+        datetime.errorConditionSql,
+        datetime.errorMessageSql
+      );
+    }
+
+    const unitLiteral = this.getStringLiteralValue(unit);
+    const normalizedUnit = this.normalizeUnitLiteral(unitLiteral, DATETIME_DIFF_UNIT_ALIASES);
+    if (unitLiteral) {
+      if (!normalizedUnit) {
+        return makeExpr(
+          NULL_DOUBLE_PRECISION,
+          'number',
+          false,
+          'TRUE',
+          buildErrorLiteral('ARG', 'invalid_datetime_diff_unit', this.budget)
+        );
+      }
+      const valueSql = this.buildDatetimeDiffSql(
+        normalizedUnit,
+        diffSeconds,
+        diffMonths,
+        diffYears
+      );
+      return makeExpr(
+        guardValueSql(valueSql, datetime.errorConditionSql, this.budget),
+        'number',
+        false,
+        datetime.errorConditionSql,
+        datetime.errorMessageSql
+      );
+    }
+
+    if (!this.isUnitStringCompatibleField(unit)) {
+      return makeExpr(
+        NULL_DOUBLE_PRECISION,
+        'number',
+        false,
+        'TRUE',
+        buildErrorLiteral('ARG', 'invalid_datetime_diff_unit', this.budget)
+      );
+    }
+
+    const unitText = this.coerceToString(unit);
+    const unitSql = this.budget.sql`LOWER(${unitText.valueSql})`;
+    const invalidUnit = this.budget
+      .sql`(${unitSql} IS NULL OR ${unitSql} NOT IN (${DATETIME_DIFF_UNIT_SQL}))`;
+    const unitErrorExpr = makeExpr(
+      'NULL',
+      'string',
+      false,
+      invalidUnit,
+      buildErrorLiteral('ARG', 'invalid_datetime_diff_unit', this.budget)
+    );
+    const errorCondition = combineErrorConditions([datetime, unitText, unitErrorExpr], this.budget);
+    const errorMessage = buildErrorMessageSql(
+      [datetime, unitText, unitErrorExpr],
+      buildErrorLiteral('ARG', 'invalid_datetime_diff_unit', this.budget),
+      this.budget
+    );
+    const valueSql = this.buildDatetimeDiffCaseSql(unitSql, diffSeconds, diffMonths, diffYears);
+    return makeExpr(
+      guardValueSql(valueSql, errorCondition, this.budget),
+      'number',
+      false,
+      errorCondition,
+      errorMessage
+    );
+  }
+
+  private fromNow(params: SqlExpr[]): SqlExpr {
+    const value = params[0];
+    if (!value) return makeExpr('NULL', 'number', false);
+    const unit = params[1];
+    const datetime = this.coerceToDatetime(value);
+    const diffSeconds = this.budget.sql`EXTRACT(EPOCH FROM (NOW() - ${datetime.valueSql}))`;
+    const diffMonths = this.budget
+      .sql`EXTRACT(MONTH FROM AGE(NOW(), ${datetime.valueSql})) + EXTRACT(YEAR FROM AGE(NOW(), ${datetime.valueSql})) * 12`;
+    const diffYears = this.budget.sql`EXTRACT(YEAR FROM AGE(NOW(), ${datetime.valueSql}))`;
+    return this.buildNowDiffWithUnit(datetime, unit, diffSeconds, diffMonths, diffYears);
+  }
+
+  private toNow(params: SqlExpr[]): SqlExpr {
+    return this.fromNow(params);
+  }
+
+  private datetimeDiff(params: SqlExpr[]): SqlExpr {
+    const start = params[0];
+    const end = params[1];
+    const unit = params[2] ?? makeExpr(sqlStringLiteral('second', this.budget), 'string', false);
+    if (!start || !end) return makeExpr('NULL', 'number', false);
+    const startDt = this.coerceToDatetime(start);
+    const endDt = this.coerceToDatetime(end);
+    const startError = this.shortCircuitOnError(
+      startDt,
+      NULL_DOUBLE_PRECISION,
+      'number',
+      buildErrorLiteral('TYPE', 'invalid_datetime_diff', this.budget)
+    );
+    if (startError) return startError;
+    const endError = this.shortCircuitOnError(
+      endDt,
+      NULL_DOUBLE_PRECISION,
+      'number',
+      buildErrorLiteral('TYPE', 'invalid_datetime_diff', this.budget)
+    );
+    if (endError) return endError;
+    const diffSeconds = this.budget
+      .sql`EXTRACT(EPOCH FROM (${startDt.valueSql} - ${endDt.valueSql}))`;
+    const diffMonths = this.buildMonthDiff(startDt.valueSql, endDt.valueSql);
+    const diffYears = this.budget.sql`CAST((${diffMonths}) / 12.0 AS INTEGER)`;
+    const unitLiteral = this.getStringLiteralValue(unit);
+    const normalizedUnit = this.normalizeUnitLiteral(unitLiteral, DATETIME_DIFF_UNIT_ALIASES);
+    if (unitLiteral) {
+      if (!normalizedUnit) {
+        return makeExpr(
+          NULL_DOUBLE_PRECISION,
+          'number',
+          false,
+          'TRUE',
+          buildErrorLiteral('ARG', 'invalid_datetime_diff_unit', this.budget)
+        );
+      }
+      const errorCondition = combineErrorConditions([startDt, endDt], this.budget);
+      const errorMessage = buildErrorMessageSql(
+        [startDt, endDt],
+        buildErrorLiteral('TYPE', 'invalid_datetime_diff', this.budget),
+        this.budget
+      );
+      const valueSql = this.buildDatetimeDiffSql(
+        normalizedUnit,
+        diffSeconds,
+        diffMonths,
+        diffYears
+      );
+      return makeExpr(
+        guardValueSql(valueSql, errorCondition, this.budget),
+        'number',
+        false,
+        errorCondition,
+        errorMessage
+      );
+    }
+
+    // 编译期检查：如果单位参数是字段引用且类型不兼容，直接返回错误
+    if (!this.isUnitStringCompatibleField(unit)) {
+      return makeExpr(
+        NULL_DOUBLE_PRECISION,
+        'number',
+        false,
+        'TRUE',
+        buildErrorLiteral('ARG', 'invalid_datetime_diff_unit', this.budget)
+      );
+    }
+
+    const unitText = this.coerceToString(unit);
+    const unitSql = this.budget.sql`LOWER(${unitText.valueSql})`;
+    const invalidUnit = this.budget
+      .sql`(${unitSql} IS NULL OR ${unitSql} NOT IN (${DATETIME_DIFF_UNIT_SQL}))`;
+    const unitErrorExpr = makeExpr(
+      'NULL',
+      'string',
+      false,
+      invalidUnit,
+      buildErrorLiteral('ARG', 'invalid_datetime_diff_unit', this.budget)
+    );
+    const errorCondition = combineErrorConditions(
+      [startDt, endDt, unitText, unitErrorExpr],
+      this.budget
+    );
+    const errorMessage = buildErrorMessageSql(
+      [startDt, endDt, unitText, unitErrorExpr],
+      buildErrorLiteral('ARG', 'invalid_datetime_diff_unit', this.budget),
+      this.budget
+    );
+    const valueSql = this.buildDatetimeDiffCaseSql(unitSql, diffSeconds, diffMonths, diffYears);
+    return makeExpr(
+      guardValueSql(valueSql, errorCondition, this.budget),
+      'number',
+      false,
+      errorCondition,
+      errorMessage
+    );
+  }
+
+  private buildMonthDiff(startSql: string, endSql: string): string {
+    const startExpr = this.applyFormulaTimeZone(startSql);
+    const endExpr = this.applyFormulaTimeZone(endSql);
+
+    const startYear = this.budget.sql`EXTRACT(YEAR FROM ${startExpr})`;
+    const endYear = this.budget.sql`EXTRACT(YEAR FROM ${endExpr})`;
+    const startMonth = this.budget.sql`EXTRACT(MONTH FROM ${startExpr})`;
+    const endMonth = this.budget.sql`EXTRACT(MONTH FROM ${endExpr})`;
+    const startDay = this.budget.sql`EXTRACT(DAY FROM ${startExpr})`;
+    const endDay = this.budget.sql`EXTRACT(DAY FROM ${endExpr})`;
+    const startLastDay = this.budget
+      .sql`EXTRACT(DAY FROM (DATE_TRUNC('month', ${startExpr}) + INTERVAL '1 month - 1 day'))`;
+    const endLastDay = this.budget
+      .sql`EXTRACT(DAY FROM (DATE_TRUNC('month', ${endExpr}) + INTERVAL '1 month - 1 day'))`;
+
+    const baseMonths = this.budget
+      .sql`((${startYear} - ${endYear}) * 12 + (${startMonth} - ${endMonth}))`;
+    const adjustDown = this.budget
+      .sql`(CASE WHEN ${baseMonths} > 0 AND ${startDay} < ${endDay} AND ${startDay} < ${startLastDay} THEN 1 ELSE 0 END)`;
+    const adjustUp = this.budget
+      .sql`(CASE WHEN ${baseMonths} < 0 AND ${startDay} > ${endDay} AND ${endDay} < ${endLastDay} THEN 1 ELSE 0 END)`;
+    return this.budget.sql`(${baseMonths} - ${adjustDown} + ${adjustUp})`;
+  }
+
+  private workday(params: SqlExpr[]): SqlExpr {
+    const start = params[0];
+    const days = params[1];
+    if (!start || !days) return makeExpr('NULL', 'datetime', false);
+    const holiday = params[2];
+    const startDt = this.coerceToDatetime(start);
+    const dayCount = this.coerceToNumber(days, 'workday');
+    const holidayText = holiday
+      ? this.coerceToString(holiday, false)
+      : makeExpr(sqlStringLiteral('', this.budget), 'string', false);
+    const errorCondition = combineErrorConditions([startDt, dayCount, holidayText], this.budget);
+    const errorMessage = buildErrorMessageSql(
+      [startDt, dayCount, holidayText],
+      buildErrorLiteral('TYPE', 'invalid_workday', this.budget),
+      this.budget
+    );
+    const startDateSql = this.budget.sql`(${this.applyFormulaTimeZone(startDt.valueSql)})::date`;
+    const dayCountSql = this.budget.sql`COALESCE((${dayCount.valueSql})::integer, 0)`;
+    const valueSql = this.budget.sql`(
+      SELECT CASE
+        WHEN p.day_count = 0 THEN p.start_date::timestamp
+        -- Anchor weekend starts on the preceding Friday (forward) or following
+        -- Monday (backward). Whole work weeks then cost seven calendar days.
+        WHEN BTRIM(p.holiday_text) = '' THEN (
+          SELECT (a.anchor_date + CASE WHEN p.day_count > 0
+            THEN ABS(p.day_count) + 2 * ((a.weekday - 1 + ABS(p.day_count)) / 5)
+            ELSE -(ABS(p.day_count) + 2 * ((5 - a.weekday + ABS(p.day_count)) / 5))
+          END)::timestamp
+          FROM (
+            SELECT
+              p.start_date + CASE WHEN p.day_count > 0 THEN -GREATEST(d.dow - 5, 0)
+                WHEN d.dow > 5 THEN 8 - d.dow ELSE 0 END AS anchor_date,
+              CASE WHEN p.day_count > 0 THEN LEAST(d.dow, 5)
+                WHEN d.dow > 5 THEN 1 ELSE d.dow END AS weekday
+            FROM (SELECT EXTRACT(ISODOW FROM p.start_date)::integer AS dow) d
+          ) a
+        )
+        ELSE (
+          SELECT c.candidate_date::timestamp
+          FROM (
+            SELECT
+              (p.start_date + CASE WHEN p.day_count >= 0 THEN seq.n ELSE -seq.n END)::date AS candidate_date,
+              seq.n
+            FROM generate_series(1, ABS(p.day_count) * 7 + 366) AS seq(n)
+          ) c
+          WHERE EXTRACT(DOW FROM c.candidate_date)::int NOT IN (0, 6)
+            AND NOT EXISTS (
+              SELECT 1
+              FROM (
+                SELECT DISTINCT TO_DATE(LEFT(BTRIM(part), 10), 'YYYY-MM-DD') AS holiday_date
+                FROM regexp_split_to_table(p.holiday_text, ',') AS part
+                WHERE BTRIM(part) <> ''
+                  AND BTRIM(part) ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}'
+                  AND TO_CHAR(TO_DATE(LEFT(BTRIM(part), 10), 'YYYY-MM-DD'), 'YYYY-MM-DD') = LEFT(BTRIM(part), 10)
+              ) holidays
+              WHERE holidays.holiday_date = c.candidate_date
+            )
+          ORDER BY c.n
+          OFFSET ABS(p.day_count) - 1
+          LIMIT 1
+        )
+      END
+      FROM (
+        SELECT ${startDateSql} AS start_date, ${dayCountSql} AS day_count, COALESCE(${holidayText.valueSql}, '') AS holiday_text
+      ) p
+    )`;
+    return makeExpr(
+      guardValueSql(valueSql, errorCondition, this.budget),
+      'datetime',
+      false,
+      errorCondition,
+      errorMessage
+    );
+  }
+
+  private workdayDiff(params: SqlExpr[]): SqlExpr {
+    const start = params[0];
+    const end = params[1];
+    if (!start || !end) return makeExpr('NULL::double precision', 'number', false);
+    const holiday = params[2];
+
+    // Match v1 behavior: if either operand is a numeric type (not datetime),
+    // return NULL instead of attempting to convert numeric values to timestamps.
+    // This prevents treating numeric values like 8 or 12 as Unix timestamps.
+    const startIsNumericType = start.valueType === 'number';
+    const endIsNumericType = end.valueType === 'number';
+
+    if (startIsNumericType || endIsNumericType) {
+      return makeExpr('NULL::double precision', 'number', false);
+    }
+
+    const startDt = this.coerceToDatetime(start);
+    const endDt = this.coerceToDatetime(end);
+    const holidayText = holiday
+      ? this.coerceToString(holiday, false)
+      : makeExpr(sqlStringLiteral('', this.budget), 'string', false);
+    const errorCondition = combineErrorConditions([startDt, endDt, holidayText], this.budget);
+    const errorMessage = buildErrorMessageSql(
+      [startDt, endDt, holidayText],
+      buildErrorLiteral('TYPE', 'invalid_workday_diff', this.budget),
+      this.budget
+    );
+    const startDateSql = this.budget.sql`(${this.applyFormulaTimeZone(startDt.valueSql)})::date`;
+    const endDateSql = this.budget.sql`(${this.applyFormulaTimeZone(endDt.valueSql)})::date`;
+    const valueSql = this.budget.sql`(
+      WITH params AS (
+        SELECT ${startDateSql} AS start_date, ${endDateSql} AS end_date, COALESCE(${holidayText.valueSql}, '') AS holiday_text
+      ),
+      holiday_parts AS (
+        SELECT BTRIM(part) AS holiday_part
+        FROM params p
+        CROSS JOIN LATERAL regexp_split_to_table(p.holiday_text, ',') AS part
+      ),
+      holiday_dates AS (
+        SELECT DISTINCT TO_DATE(LEFT(holiday_part, 10), 'YYYY-MM-DD') AS holiday_date
+        FROM holiday_parts
+        WHERE holiday_part <> ''
+          AND holiday_part ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}'
+          AND TO_CHAR(TO_DATE(LEFT(holiday_part, 10), 'YYYY-MM-DD'), 'YYYY-MM-DD') = LEFT(holiday_part, 10)
+      ),
+      bounds AS (
+        SELECT
+          CASE WHEN p.start_date IS NULL OR p.end_date IS NULL THEN NULL
+            ELSE LEAST(p.start_date, p.end_date) END AS min_date,
+          GREATEST(p.start_date, p.end_date) AS max_date,
+          CASE WHEN p.end_date >= p.start_date THEN 1 ELSE -1 END AS direction
+        FROM params p
+      ),
+      span AS (
+        SELECT b.*, COALESCE(b.max_date - b.min_date + 1, 0) AS days
+        FROM bounds b
+      ),
+      weekday_counts AS (
+        -- Whole weeks contribute five days; at most six remainder dates are scanned.
+        SELECT b.*, (b.days / 7) * 5 + (
+          SELECT COUNT(*) FROM generate_series(0, b.days % 7 - 1) AS r(n)
+          WHERE EXTRACT(ISODOW FROM b.min_date + r.n)::integer <= 5
+        ) AS weekday_count
+        FROM span b
+      )
+      -- With no weekday candidates, the old enumeration never evaluated holiday
+      -- casts. Preserve that laziness, including malformed calendar dates.
+      SELECT CASE WHEN b.weekday_count = 0 THEN 0 ELSE (b.direction * (
+        b.weekday_count - (
+          SELECT COUNT(*) FROM holiday_dates h
+          WHERE h.holiday_date >= b.min_date AND h.holiday_date <= b.max_date
+            AND EXTRACT(ISODOW FROM h.holiday_date)::integer <= 5
+        )
+      ))::integer END
+      FROM weekday_counts b
+    )`;
+    return makeExpr(
+      guardValueSql(valueSql, errorCondition, this.budget),
+      'number',
+      false,
+      errorCondition,
+      errorMessage
+    );
+  }
+
+  private isSame(params: SqlExpr[]): SqlExpr {
+    const left = params[0];
+    const right = params[1];
+    const unit = params[2];
+    if (!left || !right) return makeExpr('FALSE', 'boolean', false);
+    const leftDt = this.coerceToDatetime(left);
+    const rightDt = this.coerceToDatetime(right);
+    const leftError = this.shortCircuitOnError(
+      leftDt,
+      NULL_BOOLEAN,
+      'boolean',
+      buildErrorLiteral('TYPE', 'invalid_is_same', this.budget)
+    );
+    if (leftError) return leftError;
+    const rightError = this.shortCircuitOnError(
+      rightDt,
+      NULL_BOOLEAN,
+      'boolean',
+      buildErrorLiteral('TYPE', 'invalid_is_same', this.budget)
+    );
+    if (rightError) return rightError;
+    if (!unit) {
+      const errorCondition = combineErrorConditions([leftDt, rightDt], this.budget);
+      const errorMessage = buildErrorMessageSql(
+        [leftDt, rightDt],
+        buildErrorLiteral('TYPE', 'invalid_is_same', this.budget),
+        this.budget
+      );
+      const valueSql = this.budget.sql`${leftDt.valueSql} = ${rightDt.valueSql}`;
+      return makeExpr(
+        guardValueSql(valueSql, errorCondition, this.budget),
+        'boolean',
+        false,
+        errorCondition,
+        errorMessage
+      );
+    }
+
+    const unitLiteral = this.getStringLiteralValue(unit);
+    const normalizedUnit = this.normalizeUnitLiteral(unitLiteral, IS_SAME_UNIT_ALIASES);
+    if (unitLiteral) {
+      if (!normalizedUnit) {
+        return makeExpr(
+          NULL_BOOLEAN,
+          'boolean',
+          false,
+          'TRUE',
+          buildErrorLiteral('ARG', 'invalid_is_same_unit', this.budget)
+        );
+      }
+      const errorCondition = combineErrorConditions([leftDt, rightDt], this.budget);
+      const errorMessage = buildErrorMessageSql(
+        [leftDt, rightDt],
+        buildErrorLiteral('TYPE', 'invalid_is_same', this.budget),
+        this.budget
+      );
+      const valueSql = this.buildIsSameSql(normalizedUnit, leftDt.valueSql, rightDt.valueSql);
+      return makeExpr(
+        guardValueSql(valueSql, errorCondition, this.budget),
+        'boolean',
+        false,
+        errorCondition,
+        errorMessage
+      );
+    }
+
+    // 编译期检查：如果单位参数是字段引用且类型不兼容，直接返回错误
+    if (!this.isUnitStringCompatibleField(unit)) {
+      return makeExpr(
+        NULL_BOOLEAN,
+        'boolean',
+        false,
+        'TRUE',
+        buildErrorLiteral('ARG', 'invalid_is_same_unit', this.budget)
+      );
+    }
+
+    const unitText = this.coerceToString(unit);
+    const unitSql = this.budget.sql`LOWER(${unitText.valueSql})`;
+    const invalidUnit = this.budget
+      .sql`(${unitSql} IS NULL OR ${unitSql} NOT IN (${IS_SAME_UNIT_SQL}))`;
+    const unitErrorExpr = makeExpr(
+      'NULL',
+      'string',
+      false,
+      invalidUnit,
+      buildErrorLiteral('ARG', 'invalid_is_same_unit', this.budget)
+    );
+    const errorCondition = combineErrorConditions(
+      [leftDt, rightDt, unitText, unitErrorExpr],
+      this.budget
+    );
+    const errorMessage = buildErrorMessageSql(
+      [leftDt, rightDt, unitText, unitErrorExpr],
+      buildErrorLiteral('ARG', 'invalid_is_same_unit', this.budget),
+      this.budget
+    );
+    const valueSql = this.buildIsSameCaseSql(unitSql, leftDt.valueSql, rightDt.valueSql);
+    return makeExpr(
+      guardValueSql(valueSql, errorCondition, this.budget),
+      'boolean',
+      false,
+      errorCondition,
+      errorMessage
+    );
+  }
+
+  private isAfter(params: SqlExpr[]): SqlExpr {
+    const left = params[0];
+    const right = params[1];
+    if (!left || !right) return makeExpr('FALSE', 'boolean', false);
+    return this.handleComparison('>', left, right);
+  }
+
+  private isBefore(params: SqlExpr[]): SqlExpr {
+    const left = params[0];
+    const right = params[1];
+    if (!left || !right) return makeExpr('FALSE', 'boolean', false);
+    return this.handleComparison('<', left, right);
+  }
+
+  private dateAdd(params: SqlExpr[]): SqlExpr {
+    const dateExpr = params[0];
+    const countExpr = params[1];
+    const unitExpr = params[2];
+    if (!dateExpr || !countExpr || !unitExpr) return makeExpr('NULL', 'datetime', false);
+    const dateValue = this.coerceToDatetime(dateExpr);
+    const countValue = this.coerceToNumber(countExpr, 'date_add');
+    const dateError = this.shortCircuitOnError(
+      dateValue,
+      NULL_TIMESTAMPTZ,
+      'datetime',
+      buildErrorLiteral('TYPE', 'invalid_date_add', this.budget)
+    );
+    if (dateError) return dateError;
+    const countError = this.shortCircuitOnError(
+      countValue,
+      NULL_TIMESTAMPTZ,
+      'datetime',
+      buildErrorLiteral('TYPE', 'invalid_date_add', this.budget)
+    );
+    if (countError) return countError;
+    const unitLiteral = this.getStringLiteralValue(unitExpr);
+    const normalizedUnit = this.normalizeUnitLiteral(unitLiteral, DATE_ADD_UNIT_ALIASES);
+    if (unitLiteral) {
+      if (!normalizedUnit) {
+        return makeExpr(
+          NULL_TIMESTAMPTZ,
+          'datetime',
+          false,
+          'TRUE',
+          buildErrorLiteral('ARG', 'invalid_date_add_unit', this.budget)
+        );
+      }
+      const errorCondition = combineErrorConditions([dateValue, countValue], this.budget);
+      const errorMessage = buildErrorMessageSql(
+        [dateValue, countValue],
+        buildErrorLiteral('TYPE', 'invalid_date_add', this.budget),
+        this.budget
+      );
+      const valueSql = this.buildDateAddSql(
+        normalizedUnit,
+        dateValue.valueSql,
+        countValue.valueSql
+      );
+      return makeExpr(
+        guardValueSql(valueSql, errorCondition, this.budget),
+        'datetime',
+        false,
+        errorCondition,
+        errorMessage
+      );
+    }
+
+    // 编译期检查：如果单位参数是字段引用且类型不兼容，直接返回错误
+    if (!this.isUnitStringCompatibleField(unitExpr)) {
+      return makeExpr(
+        NULL_TIMESTAMPTZ,
+        'datetime',
+        false,
+        'TRUE',
+        buildErrorLiteral('ARG', 'invalid_date_add_unit', this.budget)
+      );
+    }
+
+    const unitValue = this.coerceToString(unitExpr);
+    const unitSql = this.budget.sql`LOWER(${unitValue.valueSql})`;
+    const invalidUnit = this.budget
+      .sql`(${unitSql} IS NULL OR ${unitSql} NOT IN (${DATE_ADD_UNIT_SQL}))`;
+    const unitErrorExpr = makeExpr(
+      'NULL',
+      'string',
+      false,
+      invalidUnit,
+      buildErrorLiteral('ARG', 'invalid_date_add_unit', this.budget)
+    );
+    const errorCondition = combineErrorConditions(
+      [dateValue, countValue, unitValue, unitErrorExpr],
+      this.budget
+    );
+    const errorMessage = buildErrorMessageSql(
+      [dateValue, countValue, unitValue, unitErrorExpr],
+      buildErrorLiteral('ARG', 'invalid_date_add_unit', this.budget),
+      this.budget
+    );
+    const valueSql = this.buildDateAddCaseSql(unitSql, dateValue.valueSql, countValue.valueSql);
+    return makeExpr(
+      guardValueSql(valueSql, errorCondition, this.budget),
+      'datetime',
+      false,
+      errorCondition,
+      errorMessage
+    );
+  }
+
+  private datestr(params: SqlExpr[]): SqlExpr {
+    const value = params[0];
+    if (!value) return makeExpr('NULL', 'string', false);
+    if (value.isArray) {
+      const normalizedArray = this.normalizeArrayExpr(value);
+      const elemExpr = makeExpr(
+        extractJsonScalarText('elem', this.budget),
+        'unknown',
+        false,
+        value.errorConditionSql,
+        value.errorMessageSql
+      );
+      const elementDatetime = this.coerceToDatetime(elemExpr);
+      const elementValueSql = guardValueSql(
+        this.budget.sql`(${this.applyFormulaTimeZone(elementDatetime.valueSql)})::date::text`,
+        elementDatetime.errorConditionSql,
+        this.budget
+      );
+      const valueSql = this.stringifyNormalizedJsonArrayWithElement(
+        normalizedArray,
+        elementValueSql
+      );
+      return makeExpr(
+        guardValueSql(valueSql, value.errorConditionSql, this.budget),
+        'string',
+        false,
+        value.errorConditionSql,
+        value.errorMessageSql
+      );
+    }
+    const datetime = this.coerceToDatetime(value);
+    const valueSql = this.budget.sql`(${this.applyFormulaTimeZone(datetime.valueSql)})::date::text`;
+    return makeExpr(
+      guardValueSql(valueSql, datetime.errorConditionSql, this.budget),
+      'string',
+      false,
+      datetime.errorConditionSql,
+      datetime.errorMessageSql
+    );
+  }
+
+  private timestr(params: SqlExpr[]): SqlExpr {
+    const value = params[0];
+    if (!value) return makeExpr('NULL', 'string', false);
+    if (value.isArray) {
+      const normalizedArray = this.normalizeArrayExpr(value);
+      const elemExpr = makeExpr(
+        extractJsonScalarText('elem', this.budget),
+        'unknown',
+        false,
+        value.errorConditionSql,
+        value.errorMessageSql
+      );
+      const elementDatetime = this.coerceToDatetime(elemExpr);
+      const elementValueSql = guardValueSql(
+        this.budget.sql`(${this.applyFormulaTimeZone(elementDatetime.valueSql)})::time::text`,
+        elementDatetime.errorConditionSql,
+        this.budget
+      );
+      const valueSql = this.stringifyNormalizedJsonArrayWithElement(
+        normalizedArray,
+        elementValueSql
+      );
+      return makeExpr(
+        guardValueSql(valueSql, value.errorConditionSql, this.budget),
+        'string',
+        false,
+        value.errorConditionSql,
+        value.errorMessageSql
+      );
+    }
+    const datetime = this.coerceToDatetime(value);
+    const valueSql = this.budget.sql`(${this.applyFormulaTimeZone(datetime.valueSql)})::time::text`;
+    return makeExpr(
+      guardValueSql(valueSql, datetime.errorConditionSql, this.budget),
+      'string',
+      false,
+      datetime.errorConditionSql,
+      datetime.errorMessageSql
+    );
+  }
+
+  private datetimeFormat(params: SqlExpr[]): SqlExpr {
+    const value = params[0];
+    const format = params[1];
+    if (!value) return makeExpr('NULL', 'string', false);
+
+    if (value.isArray) {
+      let formatText: SqlExpr | undefined;
+      let formatExprSql: string | null = null;
+      if (!format) {
+        formatExprSql = null;
+      } else {
+        formatText = this.coerceToString(format);
+        const formatLiteral = this.getStringLiteralValue(formatText);
+        formatExprSql =
+          formatLiteral !== undefined
+            ? sqlStringLiteral(formatLiteral, this.budget)
+            : formatText.valueSql;
+      }
+
+      const normalizedArray = this.normalizeArrayExpr(value);
+      const elemExpr = makeExpr(
+        extractJsonScalarText('elem', this.budget),
+        'unknown',
+        false,
+        value.errorConditionSql,
+        value.errorMessageSql
+      );
+      const elementDatetime = this.coerceToDatetime(elemExpr);
+      const localTimestampSql = this.applyFormulaTimeZone(elementDatetime.valueSql);
+      const elementValueSql = guardValueSql(
+        buildDatetimeFormatSql(
+          localTimestampSql,
+          formatExprSql,
+          this.buildTimezoneOffsetSql(localTimestampSql),
+          this.budget
+        ),
+        elementDatetime.errorConditionSql,
+        this.budget
+      );
+      const valueSql = this.stringifyNormalizedJsonArrayWithElement(
+        normalizedArray,
+        elementValueSql
+      );
+      const errorCondition = combineErrorConditions(
+        formatText ? [value, formatText] : [value],
+        this.budget
+      );
+      const errorMessage = buildErrorMessageSql(
+        formatText ? [value, formatText] : [value],
+        buildErrorLiteral('TYPE', 'invalid_datetime_format', this.budget),
+        this.budget
+      );
+      return makeExpr(
+        guardValueSql(valueSql, errorCondition, this.budget),
+        'string',
+        false,
+        errorCondition,
+        errorMessage
+      );
+    }
+
+    const datetime = this.coerceToDatetime(value);
+    const localTimestampSql = this.applyFormulaTimeZone(datetime.valueSql);
+    const formatText = format ? this.coerceToString(format) : undefined;
+    const formatLiteral = formatText ? this.getStringLiteralValue(formatText) : undefined;
+    const formatExprSql = formatText
+      ? formatLiteral !== undefined
+        ? sqlStringLiteral(formatLiteral, this.budget)
+        : formatText.valueSql
+      : null;
+
+    const errorCondition = combineErrorConditions(
+      formatText ? [datetime, formatText] : [datetime],
+      this.budget
+    );
+    const errorMessage = buildErrorMessageSql(
+      formatText ? [datetime, formatText] : [datetime],
+      buildErrorLiteral('TYPE', 'invalid_datetime_format', this.budget),
+      this.budget
+    );
+    const valueSql = buildDatetimeFormatSql(
+      localTimestampSql,
+      formatExprSql,
+      this.buildTimezoneOffsetSql(localTimestampSql),
+      this.budget
+    );
+
+    return makeExpr(
+      guardValueSql(valueSql, errorCondition, this.budget),
+      'string',
+      false,
+      errorCondition,
+      errorMessage
+    );
+  }
+
+  private buildTimezoneOffsetSql(localTimestampSql: string): string {
+    const offsetMinutesSql = this.budget
+      .sql`ROUND(EXTRACT(EPOCH FROM (((${localTimestampSql}) AT TIME ZONE 'UTC') - ((${localTimestampSql}) AT TIME ZONE ${this.formulaTimeZoneSql()}))) / 60)::int`;
+
+    return this.budget
+      .sql`(CASE WHEN ${offsetMinutesSql} >= 0 THEN '+' ELSE '-' END || LPAD((ABS(${offsetMinutesSql}) / 60)::int::text, 2, '0') || ':' || LPAD((ABS(${offsetMinutesSql}) % 60)::int::text, 2, '0'))`;
+  }
+
+  private buildDatetimeParseWithFormatSql(
+    textSql: string,
+    formatExprSql: string,
+    nullGuardSql: string = textSql
+  ): string {
+    const normalizedFormatSql = normalizeDatetimeFormatExpression(formatExprSql, this.budget);
+    const toTimestampExpr = this.budget.sql`TO_TIMESTAMP(${textSql}::text, ${normalizedFormatSql})`;
+    const hasTimezoneToken = hasDatetimeTimezoneToken(formatExprSql, this.budget);
+    const parsedExpr =
+      hasTimezoneToken === false
+        ? this.budget.sql`(${toTimestampExpr})::timestamp AT TIME ZONE ${this.formulaTimeZoneSql()}`
+        : toTimestampExpr;
+    const guardPattern = buildDatetimeParseGuardRegex(formatExprSql, this.budget);
+    if (!guardPattern) {
+      return this.budget.sql`(CASE
+        WHEN ${nullGuardSql} IS NULL THEN NULL
+        WHEN ${textSql} = '' THEN NULL
+        ELSE ${parsedExpr}
+      END)`;
+    }
+
+    const escapedPattern = escapeSqlLiteral(guardPattern, this.budget);
+    return this.budget.sql`(CASE
+      WHEN ${nullGuardSql} IS NULL THEN NULL
+      WHEN ${textSql} = '' THEN NULL
+      WHEN ${textSql} ~ '${escapedPattern}' THEN ${parsedExpr}
+      ELSE NULL
+    END)`;
+  }
+
+  private buildDatetimeParseInvalidCondition(
+    textSql: string,
+    formatExprSql: string,
+    nullGuardSql: string = textSql
+  ): string {
+    const guardPattern = buildDatetimeParseGuardRegex(formatExprSql, this.budget);
+    if (!guardPattern) {
+      return 'FALSE';
+    }
+
+    const escapedPattern = escapeSqlLiteral(guardPattern, this.budget);
+    return this.budget
+      .sql`(${nullGuardSql} IS NOT NULL AND ${textSql} <> '' AND NOT (${textSql} ~ '${escapedPattern}'))`;
+  }
+
+  private datetimeParse(params: SqlExpr[]): SqlExpr {
+    const value = params[0];
+    if (!value) return makeExpr('NULL', 'datetime', false);
+    const format = params[1];
+    const formatText = format ? this.coerceToString(format) : undefined;
+    const formatLiteral = formatText ? this.getStringLiteralValue(formatText) : undefined;
+    const formatExprSql = formatText
+      ? formatLiteral !== undefined
+        ? sqlStringLiteral(formatLiteral, this.budget)
+        : formatText.valueSql
+      : null;
+
+    if (!formatText) {
+      if (!value.isArray && value.valueType === 'datetime' && !this.isStructuredJsonField(value)) {
+        return this.coerceToDatetime(value);
+      }
+    } else if (
+      formatExprSql != null &&
+      !value.isArray &&
+      value.valueType === 'datetime' &&
+      !this.isStructuredJsonField(value)
+    ) {
+      const datetime = this.coerceToDatetime(value);
+      const localTimestampSql = this.applyFormulaTimeZone(datetime.valueSql);
+      const formattedTextSql = buildDatetimeFormatSql(
+        localTimestampSql,
+        formatExprSql,
+        this.buildTimezoneOffsetSql(localTimestampSql),
+        this.budget
+      );
+      const valueSql = this.buildDatetimeParseWithFormatSql(formattedTextSql, formatExprSql);
+      const errorCondition = combineErrorConditions([datetime, formatText], this.budget);
+      const errorMessage = buildErrorMessageSql(
+        [datetime, formatText],
+        buildErrorLiteral('TYPE', 'cannot_cast_to_datetime', this.budget),
+        this.budget
+      );
+      return makeExpr(
+        guardValueSql(valueSql, errorCondition, this.budget),
+        'datetime',
+        false,
+        errorCondition,
+        errorMessage
+      );
+    }
+    // 编译期检查：如果字段类型不兼容，直接返回错误
+    if (!this.canFieldBeDatetimeString(value)) {
+      return makeExpr(
+        'NULL::timestamptz',
+        'datetime',
+        false,
+        'TRUE',
+        buildErrorLiteral('TYPE', 'cannot_cast_to_datetime', this.budget),
+        value.field
+      );
+    }
+    const textValue = this.coerceToString(value);
+    const textSql = this.budget.sql`${textValue.valueSql}::text`;
+    const trimmedTextSql = this.budget.sql`BTRIM(${textSql})`;
+    const validTimestamptz = this.typeValidation.isValidForType(
+      textSql,
+      'timestamptz',
+      this.budget
+    );
+    const validTimestamp = this.typeValidation.isValidForType(textSql, 'timestamp', this.budget);
+    const hasClockTime = this.budget.sql`(${trimmedTextSql} ~ '[ T][0-9]{1,2}:[0-9]{2}')`;
+    const hasExplicitTimeZone = this.budget
+      .sql`(${trimmedTextSql} ~* '(Z|[+-][0-9]{2}:[0-9]{2}|[+-][0-9]{4}|[+-][0-9]{2})$')`;
+    const shouldInterpretAsLocal = this.budget
+      .sql`(${hasClockTime} AND NOT ${hasExplicitTimeZone})`;
+    const customFormatValueSql =
+      formatExprSql != null
+        ? this.buildDatetimeParseWithFormatSql(textSql, formatExprSql, textValue.valueSql)
+        : null;
+    const customFormatErrorCondition =
+      formatExprSql != null
+        ? this.buildDatetimeParseInvalidCondition(textSql, formatExprSql, textValue.valueSql)
+        : null;
+    const caseBranches = [this.budget.sql`WHEN ${textValue.valueSql} IS NULL THEN NULL`];
+    if (customFormatValueSql && formatText) {
+      caseBranches.push(
+        this.budget.sql`WHEN ${formatText.valueSql} IS NOT NULL THEN ${customFormatValueSql}`
+      );
+    }
+    caseBranches.push(
+      this.budget
+        .sql`WHEN ${validTimestamp} AND ${shouldInterpretAsLocal} THEN ${this.interpretTimestampInFormulaTimeZone(textSql)}`,
+      this.budget.sql`WHEN ${validTimestamptz} THEN (${textValue.valueSql})::timestamptz`,
+      this.budget
+        .sql`WHEN ${validTimestamp} THEN ${this.interpretTimestampInFormulaTimeZone(textSql)}`,
+      'ELSE NULL'
+    );
+    const valueSql = this.budget.sql`(CASE
+      ${this.budget.join(caseBranches, '\n      ')}
+    END)`;
+    const defaultErrorCondition = this.budget
+      .sql`(${textValue.valueSql} IS NOT NULL AND NOT (${validTimestamptz} OR ${validTimestamp}))`;
+    const errorCondition = customFormatErrorCondition ?? defaultErrorCondition;
+    const combinedErrorCondition = combineErrorConditions(
+      [
+        textValue,
+        ...(formatText ? [formatText] : []),
+        makeExpr(
+          'NULL',
+          'datetime',
+          false,
+          errorCondition,
+          buildErrorLiteral('TYPE', 'cannot_cast_to_datetime', this.budget)
+        ),
+      ],
+      this.budget
+    );
+    const errorMessage = buildErrorMessageSql(
+      [
+        textValue,
+        ...(formatText ? [formatText] : []),
+        makeExpr(
+          'NULL',
+          'datetime',
+          false,
+          errorCondition,
+          buildErrorLiteral('TYPE', 'cannot_cast_to_datetime', this.budget)
+        ),
+      ],
+      buildErrorLiteral('TYPE', 'cannot_cast_to_datetime', this.budget),
+      this.budget
+    );
+    return makeExpr(
+      guardValueSql(valueSql, combinedErrorCondition, this.budget),
+      'datetime',
+      false,
+      combinedErrorCondition,
+      errorMessage
+    );
+  }
+
+  private setLocale(params: SqlExpr[]): SqlExpr {
+    const value = params[0];
+    if (!value) return makeExpr(NULL_TIMESTAMPTZ, 'datetime', false);
+    // Locale is a formatting concern; SQL translation keeps the datetime unchanged.
+    return this.coerceToDatetime(value);
+  }
+
+  private setTimezone(params: SqlExpr[]): SqlExpr {
+    const value = params[0];
+    const timeZone = params[1];
+    if (!value || !timeZone) return makeExpr(NULL_TIMESTAMPTZ, 'datetime', false);
+    const datetime = this.coerceToDatetime(value);
+    const timeZoneText = this.coerceToString(timeZone);
+    const errorCondition = combineErrorConditions([datetime, timeZoneText], this.budget);
+    const errorMessage = buildErrorMessageSql(
+      [datetime, timeZoneText],
+      buildErrorLiteral('TYPE', 'invalid_timezone', this.budget),
+      this.budget
+    );
+    // Convert to the timezone's local time, then re-tag as UTC so downstream operations
+    // (DATETIME_FORMAT, YEAR, etc.) operate in the requested timezone.
+    const localizedSql = this.budget
+      .sql`((${datetime.valueSql} AT TIME ZONE ${timeZoneText.valueSql}) AT TIME ZONE 'UTC')`;
+    const valueSql = guardValueSql(localizedSql, errorCondition, this.budget);
+    return makeExpr(valueSql, 'datetime', false, errorCondition, errorMessage);
+  }
+
+  private quoteIdentifier(value: string): string {
+    let bytes = this.budget.bytes(value);
+    for (let index = 0; index < value.length; index++) if (value.codePointAt(index) === 34) bytes++;
+    this.budget.allocate(bytes);
+    return this.budget.sql`"${value.replaceAll('"', '""')}"`;
+  }
+
+  private recordSystemColumn(column: string): string {
+    const alias = this.quoteIdentifier(this.translator.tableAlias);
+    return this.budget.sql`${alias}.${this.quoteIdentifier(column)}`;
+  }
+
+  private createdTime(_params: SqlExpr[]): SqlExpr {
+    return makeExpr(this.recordSystemColumn('__created_time'), 'datetime', false);
+  }
+
+  private lastModifiedTime(_params: SqlExpr[]): SqlExpr {
+    return makeExpr(this.recordSystemColumn('__last_modified_time'), 'datetime', false);
+  }
+
+  private count(params: SqlExpr[]): SqlExpr {
+    if (params.length === 0) return makeExpr('0', 'number', false);
+    const errorCondition = combineErrorConditions(params, this.budget);
+    const errorMessage = buildErrorMessageSql(
+      params,
+      buildErrorLiteral('TYPE', 'count_invalid', this.budget),
+      this.budget
+    );
+    const terms = params.map((param) => {
+      if (param.isArray) {
+        const normalized = this.normalizeArrayExpr(param);
+        return this.budget.sql`(
+          SELECT COUNT(*)
+          FROM jsonb_array_elements(${normalized}) AS elem
+          WHERE elem IS NOT NULL AND elem <> 'null'::jsonb
+        )`;
+      }
+      return this.budget.sql`CASE WHEN ${param.valueSql} IS NOT NULL THEN 1 ELSE 0 END`;
+    });
+    const valueSql = guardValueSql(
+      this.budget.sql`(${this.budget.join(terms, ' + ')})`,
+      errorCondition,
+      this.budget
+    );
+    return makeExpr(valueSql, 'number', false, errorCondition, errorMessage);
+  }
+
+  private countA(params: SqlExpr[]): SqlExpr {
+    if (params.length === 0) return makeExpr('0', 'number', false);
+    const errorCondition = combineErrorConditions(params, this.budget);
+    const errorMessage = buildErrorMessageSql(
+      params,
+      buildErrorLiteral('TYPE', 'count_invalid', this.budget),
+      this.budget
+    );
+    const terms = params.map((param) => {
+      if (param.isArray) {
+        const normalized = this.normalizeArrayExpr(param);
+        return this.budget.sql`(
+          SELECT COUNT(*)
+          FROM jsonb_array_elements(${normalized}) AS elem
+          WHERE elem IS NOT NULL AND elem <> 'null'::jsonb AND (${extractJsonScalarText('elem', this.budget)}) <> ''
+        )`;
+      }
+      return this.budget
+        .sql`CASE WHEN ${param.valueSql} IS NULL OR (${param.valueSql})::text = '' THEN 0 ELSE 1 END`;
+    });
+    const valueSql = guardValueSql(
+      this.budget.sql`(${this.budget.join(terms, ' + ')})`,
+      errorCondition,
+      this.budget
+    );
+    return makeExpr(valueSql, 'number', false, errorCondition, errorMessage);
+  }
+
+  private countAll(params: SqlExpr[]): SqlExpr {
+    if (params.length === 0) return makeExpr('0', 'number', false);
+    const value = params[0];
+    const errorCondition = value ? combineErrorConditions([value], this.budget) : undefined;
+    const errorMessage = value
+      ? buildErrorMessageSql(
+          [value],
+          buildErrorLiteral('TYPE', 'count_invalid', this.budget),
+          this.budget
+        )
+      : undefined;
+    if (value?.isArray) {
+      const normalized = this.normalizeArrayExpr(value);
+      const valueSql = guardValueSql(
+        this.budget.sql`COALESCE(jsonb_array_length(${normalized}), 0)`,
+        errorCondition,
+        this.budget
+      );
+      return makeExpr(valueSql, 'number', false, errorCondition, errorMessage);
+    }
+    const valueSql = guardValueSql(
+      this.budget.sql`CASE WHEN ${value?.valueSql ?? 'NULL'} IS NULL THEN 0 ELSE 1 END`,
+      errorCondition,
+      this.budget
+    );
+    return makeExpr(valueSql, 'number', false, errorCondition, errorMessage);
+  }
+
+  private arrayJoin(params: SqlExpr[]): SqlExpr {
+    const arrayExpr = params[0];
+    if (!arrayExpr) return makeExpr('NULL', 'string', false);
+    const separator = params[1]
+      ? this.coerceToString(params[1])
+      : makeExpr(sqlStringLiteral(', ', this.budget), 'string', false);
+    const errorCondition = combineErrorConditions([arrayExpr, separator], this.budget);
+    const errorMessage = buildErrorMessageSql(
+      [arrayExpr, separator],
+      buildErrorLiteral('TYPE', 'array_join_invalid', this.budget),
+      this.budget
+    );
+    const normalized = this.normalizeArrayExpr(arrayExpr);
+    const valueSql = this.budget.sql`(
+      SELECT string_agg(${extractJsonScalarText('elem', this.budget)}, ${separator.valueSql})
+      FROM jsonb_array_elements(${normalized}) AS elem
+    )`;
+    return makeExpr(
+      guardValueSql(valueSql, errorCondition, this.budget),
+      'string',
+      false,
+      errorCondition,
+      errorMessage
+    );
+  }
+
+  private arrayUnique(params: SqlExpr[]): SqlExpr {
+    if (params.length === 0)
+      return makeExpr('[]', 'string', true, undefined, undefined, undefined, 'json');
+    const errorCondition = combineErrorConditions(params, this.budget);
+    const errorMessage = buildErrorMessageSql(
+      params,
+      buildErrorLiteral('TYPE', 'array_unique_invalid', this.budget),
+      this.budget
+    );
+    const arrays = params.map((param) => this.normalizeArrayExpr(param));
+    const unionQuery = this.budget.join(
+      arrays.map(
+        (array, index) => this.budget.sql`SELECT elem.value, ${index} AS arg_index, ord
+          FROM jsonb_array_elements_text(${array}) WITH ORDINALITY AS elem(value, ord)`
+      ),
+      ' UNION ALL '
+    );
+    const valueSql = this.budget.sql`(
+      SELECT jsonb_agg(value)
+      FROM (
+        SELECT DISTINCT ON (value) value
+        FROM (${unionQuery}) AS combined(value, arg_index, ord)
+        ORDER BY value, arg_index, ord
+      ) AS uniq
+    )`;
+    return makeExpr(
+      guardValueSql(valueSql, errorCondition, this.budget),
+      'string',
+      true,
+      errorCondition,
+      errorMessage,
+      undefined,
+      'json'
+    );
+  }
+
+  private arrayFlatten(params: SqlExpr[]): SqlExpr {
+    if (params.length === 0)
+      return makeExpr('[]', 'string', true, undefined, undefined, undefined, 'json');
+    const errorCondition = combineErrorConditions(params, this.budget);
+    const errorMessage = buildErrorMessageSql(
+      params,
+      buildErrorLiteral('TYPE', 'array_flatten_invalid', this.budget),
+      this.budget
+    );
+    const arrays = params.map((param) => this.normalizeArrayExpr(param));
+    const unionQuery = this.budget.join(
+      arrays.map(
+        (array, index) => this.budget.sql`SELECT elem.value, ${index} AS arg_index, ord
+          FROM jsonb_array_elements_text(${array}) WITH ORDINALITY AS elem(value, ord)`
+      ),
+      ' UNION ALL '
+    );
+    const valueSql = this.budget.sql`(
+      SELECT jsonb_agg(value)
+      FROM (
+        SELECT value
+        FROM (${unionQuery}) AS combined(value, arg_index, ord)
+        ORDER BY arg_index, ord
+      ) AS flat
+    )`;
+    return makeExpr(
+      guardValueSql(valueSql, errorCondition, this.budget),
+      'string',
+      true,
+      errorCondition,
+      errorMessage,
+      undefined,
+      'json'
+    );
+  }
+
+  private arrayCompact(params: SqlExpr[]): SqlExpr {
+    if (params.length === 0)
+      return makeExpr('[]', 'string', true, undefined, undefined, undefined, 'json');
+    const errorCondition = combineErrorConditions(params, this.budget);
+    const errorMessage = buildErrorMessageSql(
+      params,
+      buildErrorLiteral('TYPE', 'array_compact_invalid', this.budget),
+      this.budget
+    );
+    const arrays = params.map((param) => this.normalizeArrayExpr(param));
+    const unionQuery = this.budget.join(
+      arrays.map(
+        (array, index) => this.budget.sql`SELECT elem.value, ${index} AS arg_index, ord
+          FROM jsonb_array_elements_text(${array}) WITH ORDINALITY AS elem(value, ord)
+          WHERE elem.value IS NOT NULL AND elem.value != ''`
+      ),
+      ' UNION ALL '
+    );
+    const valueSql = this.budget.sql`(
+      SELECT jsonb_agg(value)
+      FROM (
+        SELECT value
+        FROM (${unionQuery}) AS combined(value, arg_index, ord)
+        ORDER BY arg_index, ord
+      ) AS compacted
+    )`;
+    return makeExpr(
+      guardValueSql(valueSql, errorCondition, this.budget),
+      'string',
+      true,
+      errorCondition,
+      errorMessage,
+      undefined,
+      'json'
+    );
+  }
+
+  private textAll(params: SqlExpr[]): SqlExpr {
+    const value = params[0];
+    if (!value) return makeExpr('NULL', 'string', false);
+    return this.coerceToString(value);
+  }
+}

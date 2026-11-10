@@ -1,0 +1,664 @@
+/* eslint-disable @typescript-eslint/naming-convention */
+import {
+  createFieldErrorResponseSchema,
+  getTableByIdOkResponseSchema,
+} from '@teable/v2-contract-http';
+import { beforeAll, describe, expect, test } from 'vitest';
+import { getSharedTestContext, type SharedTestContext } from '../../shared/globalTestContext';
+
+describe('create-field: conditionalRollup v1 parity', () => {
+  let ctx: SharedTestContext;
+  let nameCounter = 0;
+
+  const nextName = (prefix: string) => `${prefix}-${nameCounter++}`;
+
+  beforeAll(async () => {
+    ctx = await getSharedTestContext();
+  });
+
+  test('sums all matches and removes stale ordering on create', async () => {
+    let foreignTableId: string | undefined;
+    let hostTableId: string | undefined;
+    try {
+      const source = await ctx.createTable({
+        baseId: ctx.baseId,
+        name: nextName('sum-source'),
+        fields: [
+          { type: 'singleLineText', name: 'Label', isPrimary: true },
+          { type: 'number', name: 'Amount' },
+        ],
+      });
+      foreignTableId = source.id;
+      const amountId = source.fields.find((field) => field.name === 'Amount')?.id;
+      if (!amountId) throw new Error('Missing amount field');
+      for (const amount of [10, 20, 30]) {
+        await ctx.createRecord(source.id, { Label: `Item ${amount}`, Amount: amount });
+      }
+      const host = await ctx.createTable({
+        baseId: ctx.baseId,
+        name: nextName('sum-host'),
+        fields: [{ type: 'singleLineText', name: 'Label', isPrimary: true }],
+      });
+      hostTableId = host.id;
+      for (const label of ['One', 'Two', 'Three']) {
+        await ctx.createRecord(host.id, { Label: label });
+      }
+      const created = await ctx.createField({
+        baseId: ctx.baseId,
+        tableId: host.id,
+        field: {
+          type: 'conditionalRollup',
+          name: 'Matching Total',
+          options: { expression: 'sum({values})' },
+          config: {
+            foreignTableId: source.id,
+            lookupFieldId: amountId,
+            condition: {
+              filter: {
+                conjunction: 'and',
+                filterSet: [{ fieldId: amountId, operator: 'isGreater', value: 0 }],
+              },
+              sort: { fieldId: amountId, order: 'desc' },
+              limit: 1,
+            },
+          },
+        },
+      });
+      const field = created.fields.find((candidate) => candidate.type === 'conditionalRollup');
+      if (!field || field.type !== 'conditionalRollup') throw new Error('Missing rollup');
+      await ctx.drainOutbox();
+      const response = await fetch(
+        `${ctx.baseUrl}/tables/get?baseId=${ctx.baseId}&tableId=${host.id}`
+      );
+      const stored = getTableByIdOkResponseSchema.parse(await response.json());
+      if (!stored.ok) throw new Error('Failed to retrieve persisted table');
+      const persisted = stored.data.table.fields.find((candidate) => candidate.id === field.id);
+      if (!persisted || persisted.type !== 'conditionalRollup') throw new Error('Missing rollup');
+      expect.soft(persisted.config.condition.sort).toBeUndefined();
+      expect.soft(persisted.config.condition.limit).toBeUndefined();
+      const records = await ctx.listRecords(host.id);
+      expect(records.map((record) => record.fields[field.id])).toEqual([60, 60, 60]);
+    } finally {
+      if (hostTableId) await ctx.deleteTable(hostTableId).catch(() => undefined);
+      if (foreignTableId) await ctx.deleteTable(foreignTableId).catch(() => undefined);
+    }
+  });
+
+  test('evaluates equality filter comparing link titles to host text', async () => {
+    let tagsTableId: string | undefined;
+    let foreignTableId: string | undefined;
+    let hostTableId: string | undefined;
+
+    try {
+      const tagsTable = await ctx.createTable({
+        baseId: ctx.baseId,
+        name: nextName('v2-create-reg-tags'),
+        fields: [{ type: 'singleLineText', name: 'Name', isPrimary: true }],
+      });
+      tagsTableId = tagsTable.id;
+      const tagPrimaryId = tagsTable.fields.find((f) => f.isPrimary)?.id;
+      if (!tagPrimaryId) throw new Error('Missing tags primary field');
+
+      const tagAId = (await ctx.createRecord(tagsTable.id, { [tagPrimaryId]: 'TagA' })).id;
+      const tagBId = (await ctx.createRecord(tagsTable.id, { [tagPrimaryId]: 'TagB' })).id;
+
+      const foreignTable = await ctx.createTable({
+        baseId: ctx.baseId,
+        name: nextName('v2-create-reg-foreign'),
+        fields: [
+          { type: 'singleLineText', name: 'Title', isPrimary: true },
+          {
+            type: 'link',
+            name: 'Tags',
+            options: {
+              relationship: 'manyMany',
+              foreignTableId: tagsTable.id,
+              lookupFieldId: tagPrimaryId,
+              isOneWay: true,
+            },
+          },
+          { type: 'number', name: 'Amount' },
+        ],
+      });
+      foreignTableId = foreignTable.id;
+      const foreignTagsId = foreignTable.fields.find((f) => f.name === 'Tags')?.id;
+      const foreignAmountId = foreignTable.fields.find((f) => f.name === 'Amount')?.id;
+      if (!foreignTagsId || !foreignAmountId) throw new Error('Missing foreign fields');
+
+      const foreignRecord1 = await ctx.createRecord(foreignTable.id, { Title: 'r1', Amount: 10 });
+      const foreignRecord2 = await ctx.createRecord(foreignTable.id, { Title: 'r2', Amount: 20 });
+      const foreignRecord3 = await ctx.createRecord(foreignTable.id, { Title: 'r3', Amount: 5 });
+
+      await ctx.updateRecord(foreignTable.id, foreignRecord1.id, {
+        [foreignTagsId]: [{ id: tagAId }],
+      });
+      await ctx.updateRecord(foreignTable.id, foreignRecord2.id, {
+        [foreignTagsId]: [{ id: tagBId }],
+      });
+      await ctx.updateRecord(foreignTable.id, foreignRecord3.id, {
+        [foreignTagsId]: [{ id: tagAId }, { id: tagBId }],
+      });
+
+      const hostTable = await ctx.createTable({
+        baseId: ctx.baseId,
+        name: nextName('v2-create-reg-host'),
+        fields: [{ type: 'singleLineText', name: 'TagName', isPrimary: true }],
+      });
+      hostTableId = hostTable.id;
+      const hostTagNameId = hostTable.fields.find((f) => f.name === 'TagName')?.id;
+      if (!hostTagNameId) throw new Error('Missing host text field');
+
+      await ctx.createRecord(hostTable.id, { [hostTagNameId]: 'TagA' });
+      await ctx.createRecord(hostTable.id, { [hostTagNameId]: 'TagB' });
+      await ctx.createRecord(hostTable.id, { [hostTagNameId]: 'TagC' });
+
+      const tableWithRollup = await ctx.createField({
+        baseId: ctx.baseId,
+        tableId: hostTable.id,
+        field: {
+          type: 'conditionalRollup',
+          name: 'Sum By Tag Title',
+          options: { expression: 'sum({values})' },
+          config: {
+            foreignTableId: foreignTable.id,
+            lookupFieldId: foreignAmountId,
+            condition: {
+              filter: {
+                conjunction: 'and',
+                filterSet: [
+                  {
+                    fieldId: foreignTagsId,
+                    operator: 'is',
+                    value: hostTagNameId,
+                    isSymbol: true,
+                  },
+                ],
+              },
+            },
+          },
+        },
+      });
+      const rollupFieldId = tableWithRollup.fields.find((f) => f.name === 'Sum By Tag Title')?.id;
+      if (!rollupFieldId) throw new Error('Missing conditional rollup field');
+
+      await ctx.drainOutbox();
+
+      const hostRecords = await ctx.listRecords(hostTable.id, { limit: 10, offset: 0 });
+      const hostPrimaryId = hostTable.fields.find((f) => f.isPrimary)?.id;
+      if (!hostPrimaryId) throw new Error('Missing host primary field');
+
+      const byTagName = new Map(
+        hostRecords.map((record) => [
+          String(record.fields[hostPrimaryId] ?? ''),
+          record.fields[rollupFieldId],
+        ])
+      );
+      expect(byTagName.get('TagA')).toBe(15);
+      expect(byTagName.get('TagB')).toBe(25);
+      expect(byTagName.get('TagC')).toBe(0);
+    } finally {
+      if (hostTableId) await ctx.deleteTable(hostTableId).catch(() => undefined);
+      if (foreignTableId) await ctx.deleteTable(foreignTableId).catch(() => undefined);
+      if (tagsTableId) await ctx.deleteTable(tagsTableId).catch(() => undefined);
+    }
+  });
+
+  test('evaluates equality filter comparing lookup link titles to host text', async () => {
+    let unitsTableId: string | undefined;
+    let accountsTableId: string | undefined;
+    let refundsTableId: string | undefined;
+    let hostTableId: string | undefined;
+
+    try {
+      const unitsTable = await ctx.createTable({
+        baseId: ctx.baseId,
+        name: nextName('v2-create-reg-units'),
+        fields: [{ type: 'singleLineText', name: 'Name', isPrimary: true }],
+      });
+      unitsTableId = unitsTable.id;
+      const unitNameId = unitsTable.fields.find((f) => f.isPrimary)?.id;
+      if (!unitNameId) throw new Error('Missing unit primary field');
+
+      const unitAId = (await ctx.createRecord(unitsTable.id, { [unitNameId]: 'UnitA' })).id;
+      const unitBId = (await ctx.createRecord(unitsTable.id, { [unitNameId]: 'UnitB' })).id;
+
+      const accountsTable = await ctx.createTable({
+        baseId: ctx.baseId,
+        name: nextName('v2-create-reg-accounts'),
+        fields: [{ type: 'singleLineText', name: 'Account', isPrimary: true }],
+      });
+      accountsTableId = accountsTable.id;
+      const accountNameId = accountsTable.fields.find((f) => f.isPrimary)?.id;
+      if (!accountNameId) throw new Error('Missing account primary field');
+
+      const accountsWithUnitLink = await ctx.createField({
+        baseId: ctx.baseId,
+        tableId: accountsTable.id,
+        field: {
+          type: 'link',
+          name: 'Unit',
+          options: {
+            relationship: 'manyOne',
+            foreignTableId: unitsTable.id,
+            lookupFieldId: unitNameId,
+            isOneWay: true,
+          },
+        },
+      });
+      const accountUnitLinkId = accountsWithUnitLink.fields.find((f) => f.name === 'Unit')?.id;
+      if (!accountUnitLinkId) throw new Error('Missing account unit link field');
+
+      const accountAId = (
+        await ctx.createRecord(accountsTable.id, {
+          [accountNameId]: 'AccountA',
+          [accountUnitLinkId]: { id: unitAId },
+        })
+      ).id;
+      const accountBId = (
+        await ctx.createRecord(accountsTable.id, {
+          [accountNameId]: 'AccountB',
+          [accountUnitLinkId]: { id: unitBId },
+        })
+      ).id;
+
+      const refundsTable = await ctx.createTable({
+        baseId: ctx.baseId,
+        name: nextName('v2-create-reg-refunds'),
+        fields: [
+          { type: 'singleLineText', name: 'Title', isPrimary: true },
+          { type: 'number', name: 'Amount' },
+        ],
+      });
+      refundsTableId = refundsTable.id;
+      const refundAmountId = refundsTable.fields.find((f) => f.name === 'Amount')?.id;
+      if (!refundAmountId) throw new Error('Missing refund amount field');
+
+      const refundsWithAccountLink = await ctx.createField({
+        baseId: ctx.baseId,
+        tableId: refundsTable.id,
+        field: {
+          type: 'link',
+          name: 'Account',
+          options: {
+            relationship: 'manyOne',
+            foreignTableId: accountsTable.id,
+            lookupFieldId: accountNameId,
+            isOneWay: true,
+          },
+        },
+      });
+      const refundAccountLinkId = refundsWithAccountLink.fields.find(
+        (f) => f.name === 'Account'
+      )?.id;
+      if (!refundAccountLinkId) throw new Error('Missing refund account link field');
+
+      const refundsWithUnitLookup = await ctx.createField({
+        baseId: ctx.baseId,
+        tableId: refundsTable.id,
+        field: {
+          type: 'lookup',
+          name: 'Unit Lookup',
+          options: {
+            linkFieldId: refundAccountLinkId,
+            foreignTableId: accountsTable.id,
+            lookupFieldId: accountUnitLinkId,
+          },
+        },
+      });
+      const refundUnitLookupId = refundsWithUnitLookup.fields.find(
+        (f) => f.name === 'Unit Lookup'
+      )?.id;
+      if (!refundUnitLookupId) throw new Error('Missing refund unit lookup field');
+
+      await ctx.createRecord(refundsTable.id, {
+        Title: 'r1',
+        Amount: 10,
+        [refundAccountLinkId]: { id: accountAId },
+      });
+      await ctx.createRecord(refundsTable.id, {
+        Title: 'r2',
+        Amount: 20,
+        [refundAccountLinkId]: { id: accountBId },
+      });
+      await ctx.createRecord(refundsTable.id, {
+        Title: 'r3',
+        Amount: 5,
+        [refundAccountLinkId]: { id: accountAId },
+      });
+
+      const hostTable = await ctx.createTable({
+        baseId: ctx.baseId,
+        name: nextName('v2-create-reg-unit-host'),
+        fields: [{ type: 'singleLineText', name: 'UnitName', isPrimary: true }],
+      });
+      hostTableId = hostTable.id;
+      const hostUnitNameId = hostTable.fields.find((f) => f.name === 'UnitName')?.id;
+      if (!hostUnitNameId) throw new Error('Missing host unit text field');
+
+      await ctx.createRecord(hostTable.id, { [hostUnitNameId]: 'UnitA' });
+      await ctx.createRecord(hostTable.id, { [hostUnitNameId]: 'UnitB' });
+      await ctx.createRecord(hostTable.id, { [hostUnitNameId]: 'UnitC' });
+
+      const tableWithRollup = await ctx.createField({
+        baseId: ctx.baseId,
+        tableId: hostTable.id,
+        field: {
+          type: 'conditionalRollup',
+          name: 'Sum By Lookup Unit',
+          options: { expression: 'sum({values})' },
+          config: {
+            foreignTableId: refundsTable.id,
+            lookupFieldId: refundAmountId,
+            condition: {
+              filter: {
+                conjunction: 'and',
+                filterSet: [
+                  {
+                    fieldId: refundUnitLookupId,
+                    operator: 'is',
+                    value: hostUnitNameId,
+                    isSymbol: true,
+                  },
+                ],
+              },
+            },
+          },
+        },
+      });
+      const rollupFieldId = tableWithRollup.fields.find((f) => f.name === 'Sum By Lookup Unit')?.id;
+      if (!rollupFieldId) throw new Error('Missing conditional rollup field');
+
+      await ctx.drainOutbox();
+
+      const hostRecords = await ctx.listRecords(hostTable.id, { limit: 10, offset: 0 });
+      const byUnitName = new Map(
+        hostRecords.map((record) => [
+          String(record.fields[hostUnitNameId] ?? ''),
+          record.fields[rollupFieldId],
+        ])
+      );
+      expect(byUnitName.get('UnitA')).toBe(15);
+      expect(byUnitName.get('UnitB')).toBe(20);
+      expect(byUnitName.get('UnitC')).toBe(0);
+    } finally {
+      if (hostTableId) await ctx.deleteTable(hostTableId).catch(() => undefined);
+      if (refundsTableId) await ctx.deleteTable(refundsTableId).catch(() => undefined);
+      if (accountsTableId) await ctx.deleteTable(accountsTableId).catch(() => undefined);
+      if (unitsTableId) await ctx.deleteTable(unitsTableId).catch(() => undefined);
+    }
+  });
+
+  test.each([
+    {
+      name: 'button + counta',
+      lookup: { type: 'button' as const, name: 'Action' },
+      expression: 'counta({values})',
+    },
+    {
+      name: 'number + and',
+      lookup: { type: 'number' as const, name: 'Amount' },
+      expression: 'and({values})',
+    },
+    {
+      name: 'checkbox + sum',
+      lookup: { type: 'checkbox' as const, name: 'Flag' },
+      expression: 'sum({values})',
+    },
+  ])('rejects incompatible create $name T7087', async ({ lookup, expression }) => {
+    let foreignTableId: string | undefined;
+    let hostTableId: string | undefined;
+
+    try {
+      const foreignTable = await ctx.createTable({
+        baseId: ctx.baseId,
+        name: nextName(`v2-create-reject-foreign-${lookup.name}`),
+        fields: [{ type: 'singleLineText', name: 'MatchKey', isPrimary: true }, lookup],
+      });
+      foreignTableId = foreignTable.id;
+      const foreignMatchKeyId = foreignTable.fields.find((field) => field.name === 'MatchKey')?.id;
+      const lookupFieldId = foreignTable.fields.find((field) => field.name === lookup.name)?.id;
+      if (!foreignMatchKeyId || !lookupFieldId) throw new Error('Missing foreign fields');
+
+      const hostTable = await ctx.createTable({
+        baseId: ctx.baseId,
+        name: nextName(`v2-create-reject-host-${lookup.name}`),
+        fields: [{ type: 'singleLineText', name: 'MatchKey', isPrimary: true }],
+      });
+      hostTableId = hostTable.id;
+      const hostMatchKeyId = hostTable.fields.find((field) => field.name === 'MatchKey')?.id;
+      if (!hostMatchKeyId) throw new Error('Missing host match key');
+
+      const response = await fetch(`${ctx.baseUrl}/tables/createField`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          baseId: ctx.baseId,
+          tableId: hostTable.id,
+          field: {
+            type: 'conditionalRollup',
+            name: 'Illegal Conditional Rollup',
+            options: { expression },
+            config: {
+              foreignTableId: foreignTable.id,
+              lookupFieldId,
+              condition: {
+                filter: {
+                  conjunction: 'and',
+                  filterSet: [
+                    {
+                      fieldId: foreignMatchKeyId,
+                      operator: 'is',
+                      value: hostMatchKeyId,
+                      isSymbol: true,
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        }),
+      });
+      const rawBody = await response.json();
+      expect(response.status).toBe(400);
+      expect(createFieldErrorResponseSchema.safeParse(rawBody).success).toBe(true);
+
+      const tableResponse = await fetch(
+        `${ctx.baseUrl}/tables/get?baseId=${ctx.baseId}&tableId=${hostTable.id}`,
+        { method: 'GET' }
+      );
+      expect(tableResponse.status).toBe(200);
+      const tableRaw = await tableResponse.json();
+      const parsedTable = getTableByIdOkResponseSchema.safeParse(tableRaw);
+      expect(parsedTable.success).toBe(true);
+      if (!parsedTable.success || !parsedTable.data.ok) return;
+      expect(
+        parsedTable.data.data.table.fields.find(
+          (field) => field.name === 'Illegal Conditional Rollup'
+        )
+      ).toBeUndefined();
+    } finally {
+      if (hostTableId) await ctx.deleteTable(hostTableId).catch(() => undefined);
+      if (foreignTableId) await ctx.deleteTable(foreignTableId).catch(() => undefined);
+    }
+  });
+
+  test('rejects a filter operator that is invalid for a multi-value lookup field T8009', async () => {
+    let sourceTableId: string | undefined;
+    let bridgeTableId: string | undefined;
+    let hostTableId: string | undefined;
+    try {
+      const source = await ctx.createTable({
+        baseId: ctx.baseId,
+        name: nextName('t8009-source'),
+        fields: [
+          { type: 'singleLineText', name: 'Label', isPrimary: true },
+          {
+            type: 'singleSelect',
+            name: 'Kind',
+            options: {
+              choices: [
+                { name: 'A', color: 'blue' },
+                { name: 'B', color: 'green' },
+              ],
+            },
+          },
+        ],
+        views: [{ type: 'grid' }],
+      });
+      sourceTableId = source.id;
+      const sourceLabelId = source.fields.find((field) => field.name === 'Label')?.id;
+      const sourceKindId = source.fields.find((field) => field.name === 'Kind')?.id;
+      if (!sourceLabelId || !sourceKindId) throw new Error('Missing source fields');
+
+      const bridge = await ctx.createTable({
+        baseId: ctx.baseId,
+        name: nextName('t8009-bridge'),
+        fields: [{ type: 'singleLineText', name: 'Label', isPrimary: true }],
+        views: [{ type: 'grid' }],
+      });
+      bridgeTableId = bridge.id;
+      const bridgeLabelId = bridge.fields.find((field) => field.name === 'Label')?.id;
+      if (!bridgeLabelId) throw new Error('Missing bridge label');
+
+      // A conditional lookup of a single-select source is a multi-value cell; the
+      // valid operator set is the multiple-select one, so a persisted `is` filter
+      // cannot be converted to a condition spec.
+      const bridgeWithLookup = await ctx.createField({
+        baseId: ctx.baseId,
+        tableId: bridge.id,
+        field: {
+          type: 'conditionalLookup',
+          name: 'KindLookup',
+          options: {
+            foreignTableId: source.id,
+            lookupFieldId: sourceKindId,
+            condition: {
+              filter: {
+                conjunction: 'and',
+                filterSet: [
+                  {
+                    fieldId: sourceLabelId,
+                    operator: 'is',
+                    value: { type: 'field', fieldId: bridgeLabelId },
+                  },
+                ],
+              },
+            },
+          },
+        },
+      });
+      const kindLookupId = bridgeWithLookup.fields.find((field) => field.name === 'KindLookup')?.id;
+      if (!kindLookupId) throw new Error('Missing conditional lookup');
+
+      const host = await ctx.createTable({
+        baseId: ctx.baseId,
+        name: nextName('t8009-host'),
+        fields: [{ type: 'singleLineText', name: 'Label', isPrimary: true }],
+        views: [{ type: 'grid' }],
+      });
+      hostTableId = host.id;
+      const hostLabelId = host.fields.find((field) => field.name === 'Label')?.id;
+      if (!hostLabelId) throw new Error('Missing host label');
+
+      // Seed the source rows first so the original failure (create-time backfill
+      // SQL generation) exercised real foreign data, not an empty table.
+      await ctx.createRecord(source.id, { [sourceLabelId]: 'A', [sourceKindId]: 'A' });
+      await ctx.createRecord(source.id, { [sourceLabelId]: 'B', [sourceKindId]: 'B' });
+      await ctx.createRecord(bridge.id, { [bridgeLabelId]: 'A' });
+      await ctx.createRecord(bridge.id, { [bridgeLabelId]: 'B' });
+      await ctx.createRecord(host.id, { [hostLabelId]: 'A' });
+      await ctx.createRecord(host.id, { [hostLabelId]: 'B' });
+
+      const invalidResponse = await fetch(`${ctx.baseUrl}/tables/createField`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          baseId: ctx.baseId,
+          tableId: host.id,
+          field: {
+            type: 'conditionalRollup',
+            name: 'Invalid Kind Count',
+            options: { expression: 'countall({values})' },
+            config: {
+              foreignTableId: bridge.id,
+              lookupFieldId: bridgeLabelId,
+              condition: {
+                filter: {
+                  conjunction: 'and',
+                  filterSet: [
+                    {
+                      fieldId: bridgeLabelId,
+                      operator: 'is',
+                      value: { type: 'field', fieldId: hostLabelId },
+                    },
+                    { fieldId: kindLookupId, operator: 'is', value: 'A' },
+                  ],
+                },
+              },
+            },
+          },
+        }),
+      });
+      const invalidBody = await invalidResponse.json();
+      expect(invalidResponse.status).toBe(400);
+      expect(createFieldErrorResponseSchema.safeParse(invalidBody).success).toBe(true);
+      expect(JSON.stringify(invalidBody)).toContain('Invalid record condition operator');
+
+      const tableResponse = await fetch(
+        `${ctx.baseUrl}/tables/get?baseId=${ctx.baseId}&tableId=${host.id}`
+      );
+      const tableBody = getTableByIdOkResponseSchema.parse(await tableResponse.json());
+      if (!tableBody.ok) throw new Error('Failed to retrieve host table');
+      expect(
+        tableBody.data.table.fields.find((field) => field.name === 'Invalid Kind Count')
+      ).toBeUndefined();
+
+      const created = await ctx.createField({
+        baseId: ctx.baseId,
+        tableId: host.id,
+        field: {
+          type: 'conditionalRollup',
+          name: 'Kind Count',
+          options: { expression: 'countall({values})' },
+          config: {
+            foreignTableId: bridge.id,
+            lookupFieldId: bridgeLabelId,
+            condition: {
+              filter: {
+                conjunction: 'and',
+                filterSet: [
+                  {
+                    fieldId: bridgeLabelId,
+                    operator: 'is',
+                    value: { type: 'field', fieldId: hostLabelId },
+                  },
+                  { fieldId: kindLookupId, operator: 'hasAnyOf', value: ['A'] },
+                ],
+              },
+            },
+          },
+        },
+      });
+      const rollupId = created.fields.find((field) => field.name === 'Kind Count')?.id;
+      if (!rollupId) throw new Error('Missing conditional rollup');
+
+      await ctx.drainOutbox();
+
+      const deadLetters = await ctx.testContainer.db
+        .selectFrom('computed_update_dead_letter')
+        .select(['id', 'affected_field_ids'])
+        .where('base_id', '=', ctx.baseId)
+        .execute();
+      expect(deadLetters.filter((task) => task.affected_field_ids.includes(rollupId))).toEqual([]);
+
+      const records = await ctx.listRecords(host.id);
+      const byLabel = new Map(records.map((record) => [record.fields[hostLabelId], record]));
+      expect(byLabel.get('A')?.fields[rollupId]).toBe(1);
+      expect(byLabel.get('B')?.fields[rollupId]).toBe(0);
+    } finally {
+      if (hostTableId) await ctx.deleteTable(hostTableId).catch(() => undefined);
+      if (bridgeTableId) await ctx.deleteTable(bridgeTableId).catch(() => undefined);
+      if (sourceTableId) await ctx.deleteTable(sourceTableId).catch(() => undefined);
+    }
+  });
+});

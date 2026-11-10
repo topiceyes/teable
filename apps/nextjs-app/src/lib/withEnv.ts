@@ -1,0 +1,96 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
+import type { ParsedUrlQuery } from 'node:querystring';
+import { parseDsn } from '@teable/core';
+import { isUndefined, omitBy, toNumber } from 'lodash';
+import ms from 'ms';
+import type {
+  GetServerSidePropsContext,
+  GetServerSidePropsResult,
+  PreviewData,
+  GetServerSideProps as NextGetServerSideProps,
+} from 'next';
+import { getAppDatabaseUrl } from './database-url';
+import { isEmbedModeRequest } from './embed-mode';
+
+type GetServerSideProps<
+  P extends { [key: string]: any } = { [key: string]: any },
+  Q extends ParsedUrlQuery = ParsedUrlQuery,
+  D extends PreviewData = PreviewData,
+> = (context: GetServerSidePropsContext<Q, D>) => Promise<GetServerSidePropsResult<P>>;
+
+export default function withEnv<P extends { [key: string]: any }>(
+  handler: GetServerSideProps<P, ParsedUrlQuery, PreviewData>
+): NextGetServerSideProps<P> {
+  return async (context: GetServerSidePropsContext) => {
+    const { driver } = parseDsn(getAppDatabaseUrl());
+    const envMaxSearchFieldCount = toNumber(process.env.MAX_SEARCH_FIELD_COUNT);
+    const task = {
+      maxTaskRows: toNumber(process.env.MAX_TASK_ROWS),
+    };
+    const storage = {
+      provider: process.env.BACKEND_STORAGE_PROVIDER ?? 'local',
+      prefix: process.env.STORAGE_PREFIX ?? process.env.PUBLIC_ORIGIN,
+      publicBucket: process.env.BACKEND_STORAGE_PUBLIC_BUCKET ?? 'public',
+      publicUrl: process.env.BACKEND_STORAGE_PUBLIC_URL,
+    };
+    const trashRetention = process.env.TRASH_RETENTION ?? '30d';
+    const trash = {
+      retentionDays: ms(trashRetention) / ms('1d'),
+    };
+    const env = omitBy(
+      {
+        buildVersion: process.env.BUILD_VERSION,
+        gitCommitSha: process.env.GIT_COMMIT_SHA,
+        previewTag: process.env.PREVIEW_TAG,
+        driver,
+        templateSiteLink: process.env.TEMPLATE_SITE_LINK,
+        umamiUrl: process.env.UMAMI_URL,
+        umamiWebSiteId: process.env.UMAMI_WEBSITE_ID,
+        gaId: process.env.GA_ID,
+        marketingGaId: process.env.MARKETING_GA_ID,
+        posthogKey: process.env.POSTHOG_KEY,
+        posthogHost: process.env.POSTHOG_HOST,
+        posthogWebHost: process.env.POSTHOG_WEB_HOST,
+        posthogUiHost: process.env.POSTHOG_UI_HOST,
+        metaPixelId: process.env.META_PIXEL_ID,
+        sentryDsn: process.env.SENTRY_DSN,
+        socialAuthProviders: process.env.SOCIAL_AUTH_PROVIDERS?.split(','),
+        storage: omitBy(storage, isUndefined),
+        passwordLoginDisabled: process.env.PASSWORD_LOGIN_DISABLED === 'true' ? true : undefined,
+        // default to Infinity, return undefined causing the value will be transformed to null when json-stringify
+        maxSearchFieldCount:
+          Number.isNaN(envMaxSearchFieldCount) || envMaxSearchFieldCount === Infinity
+            ? undefined
+            : envMaxSearchFieldCount,
+        publicOrigin: process.env.PUBLIC_ORIGIN,
+        enableCanaryFeature: process.env.ENABLE_CANARY_FEATURE === 'true' ? true : undefined,
+        rtlUiDisabled: process.env.ENABLE_RTL_UI === 'false' ? true : undefined,
+        forceV2All: process.env.FORCE_V2_ALL === 'true' ? true : undefined,
+        allowCrossSpaceReference:
+          process.env.ALLOW_CROSS_SPACE_REFERENCE === 'true' ? true : undefined,
+        // Request from the native mobile shell (`?embed=mobile` / TeableMobile
+        // user agent). Seeded here so SSR and hydration agree; see useEmbedMode().
+        embedMode: isEmbedModeRequest(context) ? true : undefined,
+        task,
+        trash,
+      },
+      isUndefined
+    );
+    const res = await handler(context);
+    if ('props' in res) {
+      return {
+        ...res,
+        props: {
+          ...(await res.props),
+          env,
+        },
+      };
+    }
+    return {
+      ...res,
+      props: {
+        env,
+      },
+    };
+  };
+}

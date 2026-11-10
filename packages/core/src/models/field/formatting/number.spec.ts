@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import type { INumberFormatting } from './number';
-import { NumberFormattingType, formatNumberToString } from './number';
+import { NumberFormattingType, formatNumberToString, numberFormattingSchema } from './number';
 
 describe('formatNumberToString', () => {
   describe('Formatting Decimal', () => {
@@ -19,10 +19,28 @@ describe('formatNumberToString', () => {
       expect(formatNumberToString(num as any, decimalFormatting)).toBe('');
     });
 
+    it('should fall back to default decimal formatting when formatting is missing', () => {
+      const num = 1.234;
+      expect(formatNumberToString(num)).toBe('1.23');
+      expect(formatNumberToString(num, undefined)).toBe('1.23');
+    });
+
     it('should correctly format integer', () => {
       const num = 1234;
       const formatting: INumberFormatting = { type: NumberFormattingType.Decimal, precision: 0 };
       expect(formatNumberToString(num, formatting)).toBe('1234');
+    });
+
+    it('should print numbers beyond safe integers with the digits the API returns', () => {
+      const num = 22800101040067320000;
+      const integer: INumberFormatting = { type: NumberFormattingType.Decimal, precision: 0 };
+      expect(formatNumberToString(num, decimalFormatting)).toBe('22800101040067320000.00');
+      expect(formatNumberToString(num, integer)).toBe(String(num));
+      expect(formatNumberToString(-num, integer)).toBe(String(-num));
+      expect(Number(formatNumberToString(num, integer))).toBe(num);
+      expect(formatNumberToString(1e21, decimalFormatting)).toBe('1e+21');
+      expect(formatNumberToString(Number.MAX_SAFE_INTEGER, integer)).toBe('9007199254740991');
+      expect(formatNumberToString(num, { ...integer, precision: 0.5 })).toBe(String(num));
     });
   });
 
@@ -40,6 +58,12 @@ describe('formatNumberToString', () => {
     it('should return an empty string when given a null input', () => {
       const num = null;
       expect(formatNumberToString(num as any, percentFormatting)).toBe('');
+    });
+
+    it('should print percentages beyond safe integers with the digits the API returns', () => {
+      expect(formatNumberToString(228001010400673200, percentFormatting)).toBe(
+        '22800101040067320000.00%'
+      );
     });
   });
 
@@ -63,6 +87,122 @@ describe('formatNumberToString', () => {
     it('should return an empty string when given a null input', () => {
       const num = null;
       expect(formatNumberToString(num as any, currencyFormatting)).toBe('');
+    });
+  });
+});
+
+describe('numberFormattingSchema validation', () => {
+  describe('Valid formatting', () => {
+    it('should pass with correct decimal formatting', () => {
+      const validDecimal = { type: 'decimal', precision: 2 };
+      const result = numberFormattingSchema.safeParse(validDecimal);
+      expect(result.success).toBe(true);
+    });
+
+    it('should pass with correct percent formatting', () => {
+      const validPercent = { type: 'percent', precision: 1 };
+      const result = numberFormattingSchema.safeParse(validPercent);
+      expect(result.success).toBe(true);
+    });
+
+    it('should pass with correct currency formatting', () => {
+      const validCurrency = { type: 'currency', symbol: '¥', precision: 2 };
+      const result = numberFormattingSchema.safeParse(validCurrency);
+      expect(result.success).toBe(true);
+    });
+  });
+
+  describe('Type-specific error messages', () => {
+    it('should detect missing precision and unrecognized symbol for decimal', () => {
+      const invalidDecimal = { type: 'decimal', symbol: '$' }; // Missing precision, wrong field
+
+      const result = numberFormattingSchema.safeParse(invalidDecimal);
+      expect(result.success).toBe(false);
+
+      if (!result.success) {
+        // Should have exactly 2 errors: missing precision + unrecognized key (symbol)
+        expect(result.error.issues).toHaveLength(2);
+
+        const errorCodes = result.error.issues.map((i) => i.code);
+        expect(errorCodes).toContain('invalid_type'); // missing precision
+        expect(errorCodes).toContain('unrecognized_keys'); // extra symbol
+      }
+    });
+
+    it('should detect missing precision and unrecognized symbol for percent', () => {
+      const invalidPercent = { type: 'percent', symbol: '%' }; // Missing precision, wrong field
+
+      const result = numberFormattingSchema.safeParse(invalidPercent);
+      expect(result.success).toBe(false);
+
+      if (!result.success) {
+        // Should have exactly 2 errors: missing precision + unrecognized key (symbol)
+        expect(result.error.issues).toHaveLength(2);
+
+        const errorCodes = result.error.issues.map((i) => i.code);
+        expect(errorCodes).toContain('invalid_type'); // missing precision
+        expect(errorCodes).toContain('unrecognized_keys'); // extra symbol
+      }
+    });
+
+    it('should detect missing symbol for currency', () => {
+      const invalidCurrency = { type: 'currency', precision: 2 }; // Missing symbol
+
+      const result = numberFormattingSchema.safeParse(invalidCurrency);
+      expect(result.success).toBe(false);
+
+      if (!result.success) {
+        // Should have exactly 1 error: missing symbol
+        expect(result.error.issues).toHaveLength(1);
+        expect(result.error.issues[0].code).toBe('invalid_type');
+        expect(result.error.issues[0].path).toEqual(['symbol']);
+      }
+    });
+
+    it('should detect missing symbol and unrecognized currencyCode', () => {
+      const wrongCurrency = {
+        type: 'currency',
+        currencyCode: 'CNY', // Wrong field
+        precision: 2, // Missing symbol
+      };
+
+      const result = numberFormattingSchema.safeParse(wrongCurrency);
+      expect(result.success).toBe(false);
+
+      if (!result.success) {
+        // Should have exactly 2 errors: missing symbol + unrecognized key (currencyCode)
+        expect(result.error.issues).toHaveLength(2);
+
+        const errorCodes = result.error.issues.map((i) => i.code);
+        expect(errorCodes).toContain('invalid_type'); // missing symbol
+        expect(errorCodes).toContain('unrecognized_keys'); // extra currencyCode
+      }
+    });
+
+    it('should reject invalid type (discriminatedUnion behavior)', () => {
+      const invalidType = { type: 'money', precision: 2 }; // Invalid type
+
+      const result = numberFormattingSchema.safeParse(invalidType);
+      expect(result.success).toBe(false);
+
+      if (!result.success) {
+        // discriminatedUnion returns "Invalid input" for unmatched discriminator
+        expect(result.error.issues[0].code).toBe('invalid_union');
+        expect(result.error.issues[0].path).toEqual(['type']);
+      }
+    });
+
+    it('should reject missing type (discriminatedUnion behavior)', () => {
+      const missingType = { precision: 2 }; // Missing type
+
+      const result = numberFormattingSchema.safeParse(missingType);
+      expect(result.success).toBe(false);
+
+      if (!result.success) {
+        // discriminatedUnion returns "Invalid input" for missing discriminator
+        expect(result.error.issues[0].code).toBe('invalid_union');
+        expect(result.error.issues[0].path).toEqual(['type']);
+      }
     });
   });
 });

@@ -1,0 +1,34 @@
+{
+  "apiQueryBuilder": "Constructor de queries API",
+  "subTitle": "Puedes construir rápidamente tus queries a través de una interfaz interactiva y copiar el código que se puede ejecutar directamente",
+  "apiList": "Lista completa de APIs",
+  "cellFormat": "Formato del resultado de celda",
+  "fieldKeyType": "Tipo de key del campo",
+  "chooseSource": "Elige una fuente de datos",
+  "action": {
+    "selectBase": "Seleccionar un proyecto...",
+    "selectTable": "Seleccionar una tabla..."
+  },
+  "pickParams": "Selecciona y configura los parámetros",
+  "buildResult": "Construir resultado",
+  "buildResultEmpty": "Aún no hay resultados",
+  "previewReturnValue": "Vista previa del valor retornado",
+  "replaceToken": "Reemplazar token",
+  "createNewToken": "Crear nuevo token",
+  "showPagination": "Los parámetros de paginación se muestran en modo JSON",
+  "addSort": "Agregar un ordenamiento",
+  "tabs": {
+    "apiBuilder": "Constructor de API",
+    "aiContext": "Contexto de IA"
+  },
+  "aiContext": {
+    "title": "Contexto de tabla apto para IA",
+    "description": "Copia este contexto en tu asistente de IA (ChatGPT, Claude, etc.) para que entienda cómo interactuar con los datos de tu tabla.",
+    "selectTableFirst": "Selecciona una tabla para generar el contexto de IA",
+    "fullContext": "Contexto completo",
+    "compactContext": "Compacto",
+    "copyToClipboard": "Copiar al portapapeles",
+    "copied": "¡Copiado!",
+    "compactDescription": "Una versión más corta, adecuada para compartir contexto rápidamente teniendo en cuenta los límites de tokens."
+  }
+}

@@ -1,0 +1,99 @@
+{
+  "add": "Neue OAuth Apps",
+  "title": {
+    "add": "Neue OAuth Apps",
+    "edit": "Bearbeite OAuth Apps",
+    "description": "Teable-Apps können in eigenem Namen handeln und Vorgänge direkt über die API ausführen, ohne sich als Benutzer auszugeben. Weitere Informationen finden Sie in unserer <a>Hilfedokumentation</a>."
+  },
+  "form": {
+    "name": {
+      "label": "OAuth App Name",
+      "description": "Der Name Ihrer OAuth App."
+    },
+    "description": {
+      "label": "Beschreibung"
+    },
+    "homePageUrl": {
+      "label": "Homepage URL",
+      "description": "Die vollständige URL zur Webseite Ihrer OAuth App."
+    },
+    "logo": {
+      "label": "Logo",
+      "description": "Ein quadratisches Bild wird empfohlen.",
+      "placeholder": "Ziehen Sie Ihr Logo hierher oder klicken Sie zum Hochladen",
+      "button": "Ein Logo hochladen",
+      "clear": "Leeren",
+      "lengthError": "Es ist nur eine Datei zulässig.",
+      "typeError": "Nur Bilddateien sind erlaubt."
+    },
+    "callbackUrl": {
+      "label": "Callback URL",
+      "description": "Die vollständige URL, zu der umgeleitet werden soll, nachdem ein Benutzer Ihre Integration autorisiert hat.",
+      "add": "Callback URL hinzufügen"
+    },
+    "deviceFlow": {
+      "label": "Device Flow aktivieren",
+      "description": "Erlaubt dieser App, Benutzer mit einem Einmalcode anzumelden, der in einem Browser eingegeben wird (für CLIs und Geräte ohne Browser). Jeder, der die Client-ID kennt, kann diesen Ablauf im Namen Ihrer App starten – aktivieren Sie ihn daher nur, wenn Ihre App ihn benötigt."
+    },
+    "secret": {
+      "label": "Client Secrets",
+      "add": "Neues Client Secret erzeugen",
+      "newDescription": "Stellen Sie sicher, dass Sie Ihr neues Client Secret jetzt kopieren. Sie werden es nicht mehr sehen können.",
+      "empty": "Sie benötigen ein Client Secret, um sich als Anwendung bei der API zu authentifizieren.",
+      "lastUsed": "Zuletzt verdendet am {{date}}",
+      "tag": "Client Secret",
+      "neverUsed": "Noch nie verwendet"
+    },
+    "clientId": {
+      "label": "Client ID: "
+    }
+  },
+  "formType": {
+    "basic": "Grundlegende Informationen",
+    "scopes": "Geltungsbereiche",
+    "identify": "Identifizierung und Autorisierung von Benutzern",
+    "clientInfo": "Client Informationen"
+  },
+  "decision": {
+    "title": "{{name}} fordert den Zugang zu Ihrem Konto an",
+    "scopes": "Diese Anwendung wird die folgenden Bereiche abrufen können:",
+    "redirectDescription": "Die Autorisierung wird weitergeleitet zu",
+    "authorize": "Autorisiere"
+  },
+  "mcpDecision": {
+    "title": "Teable MCP verbinden",
+    "subtitle": "<b>{{name}}</b> Zugriff auf Teable gewähren",
+    "capabilities": "Über Teable MCP kann <b>{{name}}</b>:",
+    "ability1": "Tabellen, Felder, Ansichten, Datensätze, Automatisierungen und Apps gemäß Ihren Berechtigungen in jedem Projekt anzeigen und bearbeiten",
+    "ability2": "In Ihrem Namen handeln; Aktionen werden unter dieser Anwendung protokolliert",
+    "ability3": "Alle Projekte nutzen, auf die Sie Zugriff haben",
+    "redirectTitle": "Sie werden weitergeleitet zu:",
+    "trustRedirect": "Ich kenne diese URL und vertraue ihr",
+    "continue": "Fortfahren"
+  },
+  "device": {
+    "title": "Gerät verbinden",
+    "description": "Geben Sie den 8-stelligen Code aus Ihrem Terminal ein, um dieses Gerät bei Ihrem Konto anzumelden.",
+    "submit": "Weiter",
+    "invalidCode": "Dieser Code ist ungültig oder abgelaufen. Prüfen Sie Ihr Terminal und versuchen Sie es erneut.",
+    "codeUsed": "Dieser Code wurde bereits verwendet. Führen Sie den Anmeldebefehl erneut aus, um einen neuen Code zu erhalten.",
+    "deviceFlowDisabled": "Diese App erlaubt keine Anmeldung mit einem Gerätecode.",
+    "codeLabel": "Autorisierungscode",
+    "confirmCode": "Stellen Sie sicher, dass er mit dem Code in Ihrem Terminal übereinstimmt.",
+    "securityTitle": "Sicherheitswarnung",
+    "phishingHint": "Gerätecodes sind ein häufiges Ziel von Phishing und können zur Anmeldung bei Ihrem Konto verwendet werden. Geben Sie Ihren Code niemals weiter und fahren Sie nur fort, wenn Sie diese Anmeldung selbst gestartet haben.",
+    "phishingHintStrong": "Wenn Sie diese Seite nicht öffnen wollten oder der Link von jemand anderem stammt, schließen Sie diesen Tab.",
+    "approvedTitle": "Gerät verbunden",
+    "approvedDescription": "Sie können diese Seite schließen und zu Ihrem Terminal zurückkehren.",
+    "deniedTitle": "Anfrage abgelehnt",
+    "deniedDescription": "Diesem Gerät wurde kein Zugriff gewährt. Sie können diese Seite schließen."
+  },
+  "help": {
+    "link": "https://help.teable.ai/en/api-doc/oauth",
+    "title": "Mehr erfahren"
+  },
+  "deleteConfirm": {
+    "title": "OAuth-App löschen",
+    "description": "Möchten Sie die OAuth-App {{name}} wirklich löschen? Diese Aktion kann nicht rückgängig gemacht werden."
+  }
+}

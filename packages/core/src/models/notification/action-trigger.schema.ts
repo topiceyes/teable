@@ -1,16 +1,35 @@
 import { z } from 'zod';
 
-export const actionTriggerBufferValue = z.object({
-  addRecord: z.string().array().optional(),
-  setRecord: z.string().array().optional(),
-  deleteRecord: z.string().array().optional(),
+/**
+ * Presence signal emitted when a table's derived compute activity changes.
+ * The payload is a refetch hint; authoritative values come from
+ * `GET /v2/tables/getComputeActivity`.
+ */
+export const COMPUTE_ACTIVITY_CHANGED = 'computeActivityChanged';
 
-  applyViewFilter: z.string().array().optional(),
-  applyViewGroup: z.string().array().optional(),
-  applyViewStatisticFunc: z.string().array().optional(),
-  showViewField: z.string().array().optional(),
-});
+export const tableActionKeys = z.enum([
+  'addRecord',
+  'setRecord',
+  'deleteRecord',
+  'addField',
+  'setField',
+  'deleteField',
+  'taskProcessing',
+  'taskCompleted',
+  'taskCancelled',
+  'taskFailed',
+  COMPUTE_ACTIVITY_CHANGED,
+]);
 
-export const actionTriggerBufferSchema = actionTriggerBufferValue;
+export const viewActionKeys = z.enum([
+  'applyViewFilter',
+  'applyViewGroup',
+  'applyViewStatisticFunc',
+  'showViewField',
+]);
 
-export type IActionTriggerBuffer = z.infer<typeof actionTriggerBufferSchema>;
+export const actionTriggerBufferSchema = tableActionKeys;
+
+export type ITableActionKey = z.infer<typeof actionTriggerBufferSchema>;
+
+export type IViewActionKey = z.infer<typeof viewActionKeys>;

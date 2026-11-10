@@ -1,16 +1,26 @@
 import { ColorUtils, getCellCollaboratorsChannel } from '@teable/core';
+import type { ICellItem, ICell } from '@teable/sdk';
 import { useSession } from '@teable/sdk';
 import { SelectionRegionType } from '@teable/sdk/components/grid';
 import type { ICollaborator, CombinedSelection } from '@teable/sdk/components/grid';
-import { useConnection, useTableId, useViewId } from '@teable/sdk/hooks';
+import {
+  useIsReadOnlyPreview,
+  usePresenceConnection,
+  useTableId,
+  useViewId,
+} from '@teable/sdk/hooks';
 import { useEffect, useState, useMemo } from 'react';
 import type { Presence } from 'sharedb/lib/sharedb';
 
-export const useCollaborate = (selection?: CombinedSelection) => {
+export const useCollaborate = (
+  selection: CombinedSelection | undefined,
+  getCellContent: (cell: ICellItem) => ICell
+) => {
   const tableId = useTableId();
   const { user } = useSession();
   const viewId = useViewId();
-  const { connection } = useConnection();
+  const connection = usePresenceConnection();
+  const isReadOnlyPreview = useIsReadOnlyPreview();
   const [presence, setPresence] = useState<Presence>();
   const [collaborators, setCollaborators] = useState<ICollaborator>([]);
   const activeCell = useMemo(() => {
@@ -21,23 +31,27 @@ export const useCollaborate = (selection?: CombinedSelection) => {
   }, [selection]);
 
   const localPresence = useMemo(() => {
-    if (presence && connection?.id) {
-      return presence.create(`${tableId}_${user.id}_${connection.id}`);
+    if (isReadOnlyPreview || !presence || !connection?.id) {
+      return null;
     }
-    return null;
-  }, [connection.id, presence, tableId, user.id]);
+    return presence.create(`${tableId}_${user.id}_${connection.id}`);
+  }, [isReadOnlyPreview, connection?.id, presence, tableId, user.id]);
 
   useEffect(() => {
-    if (!tableId || !connection || !viewId) {
+    if (isReadOnlyPreview || !tableId || !connection || !viewId) {
       return;
     }
     // reset collaborators when table or view have been changed
     setCollaborators([]);
-    const channel = getCellCollaboratorsChannel(tableId, viewId);
+    const channel = getCellCollaboratorsChannel(tableId);
     setPresence(connection.getPresence(channel));
-  }, [connection, tableId, viewId]);
+  }, [isReadOnlyPreview, connection, tableId, viewId]);
 
   useEffect(() => {
+    if (isReadOnlyPreview) {
+      return;
+    }
+
     const receiveHandler = () => {
       if (presence?.remotePresences) {
         setCollaborators(Object.values(presence.remotePresences));
@@ -53,10 +67,10 @@ export const useCollaborate = (selection?: CombinedSelection) => {
       presence?.unsubscribe();
       presence?.removeListener('receive', receiveHandler);
     };
-  }, [presence]);
+  }, [isReadOnlyPreview, presence]);
 
   useEffect(() => {
-    if (!localPresence) {
+    if (isReadOnlyPreview || !localPresence) {
       return;
     }
     if (!activeCell) {
@@ -68,25 +82,28 @@ export const useCollaborate = (selection?: CombinedSelection) => {
         error && console.error('submit error:', error);
       });
     } else {
-      const [col, row] = activeCell;
-      localPresence.submit(
-        {
-          user: {
-            id: user.id,
-            name: user.name,
-            avatar: user.avatar,
-            email: user.email,
+      const activeCellId = getCellContent(activeCell)?.id;
+      activeCellId?.length &&
+        localPresence.submit(
+          {
+            user: {
+              id: user.id,
+              name: user.name,
+              avatar: user.avatar,
+              email: user.email,
+            },
+            activeCellId: activeCellId,
+            borderColor: ColorUtils.getRandomHexFromStr(`${tableId}_${user.id}`),
+            timeStamp: Date.now(),
           },
-          activeCell: [col, row],
-          borderColor: ColorUtils.getRandomHexFromStr(`${tableId}_${user.id}`),
-          timeStamp: Date.now(),
-        },
-        (error) => {
-          error && console.error('submit error:', error);
-        }
-      );
+          (error) => {
+            error && console.error('submit error:', error);
+          }
+        );
     }
-  }, [activeCell, localPresence, tableId, user]);
+    // not include getCellContent, because it will be changed frequently
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isReadOnlyPreview, activeCell, localPresence, tableId, user]);
 
   return collaborators;
 };

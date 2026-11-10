@@ -3,12 +3,19 @@ import type { DynamicModule } from '@nestjs/common';
 import { ConfigurableModuleBuilder, Module } from '@nestjs/common';
 import { EventEmitterModule as BaseEventEmitterModule } from '@nestjs/event-emitter';
 import { AttachmentsTableModule } from '../features/attachments/attachments-table.module';
+import { MailSenderModule } from '../features/mail-sender/mail-sender.module';
 import { NotificationModule } from '../features/notification/notification.module';
+import { RecordModule } from '../features/record/record.module';
 import { ShareDbModule } from '../share-db/share-db.module';
 import { EventEmitterService } from './event-emitter.service';
 import { ActionTriggerListener } from './listeners/action-trigger.listener';
 import { AttachmentListener } from './listeners/attachment.listener';
+import { BasePermissionUpdateListener } from './listeners/base-permission-update.listener';
+import { CollaboratorInviteListener } from './listeners/collaborator-invite.listener';
 import { CollaboratorNotificationListener } from './listeners/collaborator-notification.listener';
+import { PinListener } from './listeners/pin.listener';
+import { RecordHistoryListener } from './listeners/record-history.listener';
+import { TrashListener } from './listeners/trash.listener';
 
 export interface EventEmitterModuleOptions {
   global?: boolean;
@@ -28,14 +35,26 @@ export class EventEmitterModule extends EventEmitterModuleClass {
     });
 
     return {
-      imports: [module, ShareDbModule, NotificationModule, AttachmentsTableModule],
+      imports: [
+        module,
+        ShareDbModule,
+        NotificationModule,
+        AttachmentsTableModule,
+        RecordModule,
+        MailSenderModule.register(),
+      ],
       module: EventEmitterModule,
       global,
       providers: [
         EventEmitterService,
         ActionTriggerListener,
+        CollaboratorInviteListener,
         CollaboratorNotificationListener,
         AttachmentListener,
+        BasePermissionUpdateListener,
+        PinListener,
+        RecordHistoryListener,
+        TrashListener,
       ],
       exports: [EventEmitterService],
     };

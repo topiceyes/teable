@@ -1,34 +1,43 @@
-import type { IGetRecordsRo, ILinkCellValue, ILinkFieldOptions } from '@teable/core';
-import { isMultiValueLink } from '@teable/core';
-import { Plus } from '@teable/icons';
-import { Button, Input, Tabs, TabsList, TabsTrigger } from '@teable/ui-lib';
-import {
-  forwardRef,
-  useCallback,
-  useEffect,
-  useImperativeHandle,
-  useMemo,
-  useRef,
-  useState,
-} from 'react';
+import { useQueryClient } from '@tanstack/react-query';
+import type { ILinkCellValue, ILinkFieldOptions } from '@teable/core';
+import { isMultiValueLink, RelationshipRevert } from '@teable/core';
+import { ArrowUpRight, Plus } from '@teable/icons';
+import type { IGetRecordsRo } from '@teable/openapi';
+import { getRecordIndex } from '@teable/openapi';
+import { Button, Tabs, TabsList, TabsTrigger } from '@teable/ui-lib';
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef } from 'react';
 import type { ForwardRefRenderFunction } from 'react';
-import { AnchorProvider } from '../../../context';
+import { RowCountProvider, LinkViewProvider, TablePermissionProvider } from '../../../context';
 import { useTranslation } from '../../../context/app/i18n';
-import { useBase, useTable } from '../../../hooks';
-import { Table } from '../../../model';
+import { LinkFilterProvider } from '../../../context/query/LinkFilterProvider';
+import {
+  useBaseId,
+  useLinkFilter,
+  useRowCount,
+  useSearch,
+  useTableId,
+  useTables,
+  useViewId,
+} from '../../../hooks';
+import { useContentDir } from '../../../hooks/use-content-dir';
+import { CreateRecordModal } from '../../create-record';
+import { SearchInput } from '../../search';
 import { LinkListType } from './interface';
 import type { ILinkListRef } from './LinkList';
 import { LinkList } from './LinkList';
+import { buildLinkRecordQueryBase } from './LinkRecordQuery';
 
 export interface ILinkEditorMainProps {
   fieldId: string;
   recordId?: string;
   options: ILinkFieldOptions;
+  container?: HTMLElement;
   cellValue?: ILinkCellValue | ILinkCellValue[];
   isEditing?: boolean;
   setEditing?: (isEditing: boolean) => void;
-  onChange?: (value?: ILinkCellValue | ILinkCellValue[]) => void;
-  onExpandRecord?: (recordId: string) => void;
+  onChange?: (value: ILinkCellValue | ILinkCellValue[] | null) => void;
+  onExpand?: (recordId: string) => void;
+  currentRecordTitle?: string;
 }
 
 export interface ILinkEditorMainRef {
@@ -39,106 +48,220 @@ const LinkEditorInnerBase: ForwardRefRenderFunction<ILinkEditorMainRef, ILinkEdi
   props,
   forwardRef
 ) => {
-  const { recordId, fieldId, options, cellValue, isEditing, setEditing, onChange, onExpandRecord } =
-    props;
+  const {
+    recordId,
+    fieldId,
+    options,
+    cellValue,
+    isEditing,
+    setEditing,
+    onChange,
+    onExpand,
+    currentRecordTitle,
+  } = props;
+
+  const { searchQuery } = useSearch();
+  const rowCount = useRowCount() || 0;
+  const baseId = useBaseId();
+  const tableId = useTableId();
+  const viewId = useViewId();
+  const queryClient = useQueryClient();
 
   useImperativeHandle(forwardRef, () => ({
     onReset,
   }));
 
-  const base = useBase();
-  const table = useTable();
   const { t } = useTranslation();
+  const contentDir = useContentDir();
 
   const listRef = useRef<ILinkListRef>(null);
-  const [rowCount, setRowCount] = useState<number>(0);
-  const [values, setValues] = useState<ILinkCellValue[]>();
-  const [listType, setListType] = useState<LinkListType>(LinkListType.Unselected);
 
-  const baseId = base.id;
-  const tableId = table?.id;
   const isMultiple = isMultiValueLink(options.relationship);
+  const { foreignTableId, filterByViewId } = options;
+
+  const tables = useTables();
+  const foreignTableName = useMemo(() => {
+    return tables.find((t) => t.id === foreignTableId)?.name;
+  }, [tables, foreignTableId]);
+
+  const {
+    listType,
+    selectedRecordIds,
+    filterLinkCellSelected,
+    filterLinkCellCandidate,
+    setListType,
+    setLinkCellSelected,
+    setLinkCellCandidate,
+  } = useLinkFilter();
 
   const recordQuery = useMemo((): IGetRecordsRo => {
-    if (listType === LinkListType.Selected) {
-      return {
-        filterLinkCellSelected: recordId ? [fieldId, recordId] : fieldId,
-      };
-    }
+    const isSelectedList = listType === LinkListType.Selected;
     return {
-      filterLinkCellCandidate: recordId ? [fieldId, recordId] : fieldId,
+      ...buildLinkRecordQueryBase(options),
+      search: searchQuery,
+      // for new record, only limit in selected list
+      selectedRecordIds: !recordId && isSelectedList ? selectedRecordIds : undefined,
+      filterLinkCellSelected: isSelectedList ? filterLinkCellSelected : undefined,
+      filterLinkCellCandidate: listType === LinkListType.All ? filterLinkCellCandidate : undefined,
     };
-  }, [fieldId, recordId, listType]);
+  }, [
+    searchQuery,
+    filterLinkCellSelected,
+    filterLinkCellCandidate,
+    selectedRecordIds,
+    recordId,
+    listType,
+    options,
+  ]);
 
   useEffect(() => {
     if (!isEditing) return;
+    // Share-view caches are keyed by link field id, not foreign table id.
+    queryClient.removeQueries({ queryKey: ['link-editor-records', fieldId] });
+    queryClient.invalidateQueries({ queryKey: ['share-view-row-count', fieldId] });
+    listRef.current?.onReset();
     listRef.current?.onForceUpdate();
-    if (cellValue == null) return setValues(cellValue);
-    setValues(Array.isArray(cellValue) ? cellValue : [cellValue]);
-  }, [cellValue, isEditing]);
-
-  useEffect(() => {
-    if (baseId == null || tableId == null) return;
-
-    Table.getRowCount(tableId, recordQuery).then((res) => {
-      setRowCount(res.data.rowCount);
-    });
-  }, [tableId, baseId, recordQuery]);
+  }, [isEditing, queryClient, fieldId]);
 
   const onViewShown = (type: LinkListType) => {
     if (type === listType) return;
+    queryClient.removeQueries({ queryKey: ['link-editor-records', fieldId] });
+    queryClient.invalidateQueries({ queryKey: ['share-view-row-count', fieldId] });
     listRef.current?.onReset();
     setListType(type);
-  };
-
-  const onAppendRecord = async () => {
-    if (baseId == null || table == null || tableId == null) return;
-
-    const res = await table.createRecord({});
-    const record = res.data.records[0];
-
-    if (record != null) {
-      onExpandRecord?.(record.id);
+    if (type === LinkListType.Selected) {
+      setLinkCellSelected([fieldId, recordId].filter(Boolean));
+    } else {
+      // Restore the candidate filter: switching to the selected list clears it,
+      // and without it the "All" list shows records that cannot be linked (T6679).
+      setLinkCellCandidate([fieldId, recordId].filter(Boolean));
     }
-
-    Table.getRowCount(tableId, recordQuery).then((res) => {
-      const rowCount = res.data.rowCount;
-      setRowCount(() => rowCount);
-      listRef.current?.scrollToItem([0, rowCount - 1]);
-    });
   };
 
   const onReset = () => {
-    setValues(undefined);
     setEditing?.(false);
-    setListType(LinkListType.Unselected);
+    setListType(LinkListType.All);
     listRef.current?.onReset();
   };
 
-  const onListChange = useCallback((value?: ILinkCellValue[]) => {
-    setValues(value);
-  }, []);
+  const onListChange = useCallback(
+    (value?: ILinkCellValue[]) => {
+      if (!value || value.length === 0) {
+        onChange?.(null);
+        return;
+      }
+      onChange?.(isMultiple ? value : value[0]);
+    },
+    [isMultiple, onChange]
+  );
 
-  const onConfirm = () => {
-    onReset();
-    if (values == null) return onChange?.(undefined);
-    onChange?.(isMultiple ? values : values[0]);
+  const onRecordCreated = useCallback(
+    (newRecordId: string) => {
+      // 1. Immediately select the new record
+      const newLink: ILinkCellValue = { id: newRecordId };
+      if (isMultiple) {
+        const existing = Array.isArray(cellValue) ? cellValue : cellValue ? [cellValue] : [];
+        onChange?.([...existing, newLink]);
+      } else {
+        onChange?.(newLink);
+      }
+
+      // 2. Refetch share-view list caches so the new row has cell values
+      queryClient.invalidateQueries({ queryKey: ['share-view-row-count', fieldId] });
+      queryClient.invalidateQueries({ queryKey: ['link-editor-records', fieldId] });
+
+      // 3. Get the record's position and scroll to it
+      if (tableId) {
+        getRecordIndex(tableId, {
+          recordId: newRecordId,
+          viewId,
+          ...recordQuery,
+        })
+          .then(({ data }) => {
+            if (data != null) {
+              listRef.current?.scrollToItem([0, data.index]);
+            }
+          })
+          .catch(() => {
+            // Fallback: scroll to end if index lookup fails
+            listRef.current?.scrollToItem([0, rowCount]);
+          });
+      }
+    },
+    [isMultiple, cellValue, onChange, queryClient, fieldId, tableId, viewId, recordQuery, rowCount]
+  );
+
+  const initialFields = useMemo(() => {
+    if (!recordId || !options.symmetricFieldId) {
+      return undefined;
+    }
+    const normalizedTitle = currentRecordTitle?.trim() || undefined;
+    const linkValue: ILinkCellValue = {
+      id: recordId,
+      title: normalizedTitle,
+    };
+    const foreignRelationship = RelationshipRevert[options.relationship];
+    const isForeignMultiple = isMultiValueLink(foreignRelationship);
+    return {
+      [options.symmetricFieldId]: isForeignMultiple ? [linkValue] : linkValue,
+    };
+  }, [currentRecordTitle, options.relationship, options.symmetricFieldId, recordId]);
+
+  const createRecordModal = (
+    <CreateRecordModal callback={onRecordCreated} initialFields={initialFields}>
+      <Button variant="outline">
+        <Plus className="size-4" />
+        {t('editor.link.create')}
+      </Button>
+    </CreateRecordModal>
+  );
+
+  const onNavigate = () => {
+    if (!baseId) return;
+
+    let path = `/base/${baseId}/${foreignTableId}`;
+
+    if (filterByViewId) {
+      path += `/${filterByViewId}`;
+    }
+
+    const url = new URL(path, window.location.origin);
+
+    window.open(url.toString(), '_blank');
   };
 
   return (
     <>
-      <div className="text-lg">{t('editor.link.placeholder')}</div>
-      <div className="flex justify-between">
-        <Input className="flex-1" placeholder={t('editor.link.searchPlaceholder')} disabled />
-        <div className="ml-4">
-          <Tabs defaultValue="unselected" orientation="horizontal" className="flex gap-4">
+      <div className="flex items-center space-x-4 rtl:space-x-reverse">
+        <span className="text-base">{t('editor.link.placeholder')}</span>
+        <div className="flex items-center space-x-1 rtl:space-x-reverse">
+          <span className="text-xs">{t('editor.link.linkedTo')}</span>
+          <Button
+            size="xs"
+            variant="secondary"
+            className="h-auto gap-0.5 px-1 py-0.5 text-xs font-normal text-muted-foreground"
+            onClick={onNavigate}
+          >
+            <span dir={contentDir}>{foreignTableName}</span>
+            <ArrowUpRight className="size-3.5" />
+          </Button>
+        </div>
+      </div>
+      <div className="flex items-center justify-between">
+        <SearchInput container={props.container} />
+        <div className="ms-4">
+          <Tabs
+            value={listType === LinkListType.Selected ? 'selected' : 'all'}
+            orientation="horizontal"
+            className="flex gap-4"
+          >
             <TabsList className="">
               <TabsTrigger
                 className="px-4"
-                value="unselected"
-                onClick={() => onViewShown(LinkListType.Unselected)}
+                value="all"
+                onClick={() => onViewShown(LinkListType.All)}
               >
-                {t('editor.link.unselected')}
+                {t('editor.link.all')}
               </TabsTrigger>
               <TabsTrigger
                 className="px-4"
@@ -160,21 +283,15 @@ const LinkEditorInnerBase: ForwardRefRenderFunction<ILinkEditorMainRef, ILinkEdi
           isMultiple={isMultiple}
           recordQuery={recordQuery}
           onChange={onListChange}
+          onExpand={onExpand}
         />
       </div>
       <div className="flex justify-between">
-        <Button variant="ghost" onClick={onAppendRecord}>
-          <Plus className="size-4" />
-          {t('editor.link.create')}
-        </Button>
-        <div>
-          <Button variant="outline" onClick={onReset}>
-            {t('common.cancel')}
-          </Button>
-          <Button className="ml-4" onClick={onConfirm}>
-            {t('common.confirm')}
-          </Button>
-        </div>
+        {baseId ? (
+          <TablePermissionProvider baseId={baseId}>{createRecordModal}</TablePermissionProvider>
+        ) : (
+          createRecordModal
+        )}
       </div>
     </>
   );
@@ -186,13 +303,29 @@ const LinkEditorMainBase: ForwardRefRenderFunction<ILinkEditorMainRef, ILinkEdit
   props,
   forwardRef
 ) => {
-  const { options } = props;
-  const tableId = options.foreignTableId;
+  const { options, cellValue } = props;
+  const { baseId: foreignBaseId } = options;
+  const baseId = useBaseId();
+
+  const selectedRecordIds = useMemo(() => {
+    return Array.isArray(cellValue)
+      ? cellValue.map((v) => v.id)
+      : cellValue?.id
+        ? [cellValue.id]
+        : [];
+  }, [cellValue]);
 
   return (
-    <AnchorProvider tableId={tableId}>
-      <LinkEditorInner ref={forwardRef} {...props} />
-    </AnchorProvider>
+    <LinkViewProvider linkBaseId={foreignBaseId ?? baseId} linkFieldId={props.fieldId}>
+      <LinkFilterProvider
+        filterLinkCellCandidate={props.recordId ? [props.fieldId, props.recordId] : props.fieldId}
+        selectedRecordIds={props.recordId ? undefined : selectedRecordIds}
+      >
+        <RowCountProvider>
+          <LinkEditorInner ref={forwardRef} {...props} />
+        </RowCountProvider>
+      </LinkFilterProvider>
+    </LinkViewProvider>
   );
 };
 

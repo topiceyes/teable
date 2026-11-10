@@ -7,29 +7,52 @@ export enum UploadType {
   Table = 1,
   Avatar = 2,
   Form = 3,
+  OAuth = 4,
+  Import = 5,
+  Plugin = 6,
+  Comment = 7,
+  Logo = 8,
+  ExportBase = 9,
+  Template = 10,
+  ChatDataVisualizationCode = 11,
+  App = 12,
+  ChatFile = 13,
+  Automation = 14,
+  RecordHistory = 15,
+  SpaceAvatar = 16,
+  RecordRemoval = 17,
+  WorkflowRunCold = 18,
+  AuditLogCold = 19,
+  Artifact = 20,
+  // One archive of everything a user owns, mailed to them before an account or space goes.
+  UserDataExport = 21,
+  // An artifact's cover, written by the backend and shown in galleries through read urls.
+  ArtifactThumbnail = 22,
 }
 
 export const signatureRoSchema = z.object({
-  contentType: z.string().openapi({ example: 'image/png', description: 'Mime type' }),
-  contentLength: z.number().openapi({ example: 123, description: 'File size' }),
+  contentType: z.string().meta({ example: 'image/png', description: 'Mime type' }),
+  contentLength: z.number().meta({ example: 123, description: 'File size' }),
   expiresIn: z
     .number()
     .optional()
-    .openapi({ example: 60 * 60 * 1, description: 'Token expire time, seconds' }),
-  hash: z.string().optional().openapi({ example: 'xxxxxxxx', description: 'File hash' }),
-  type: z.nativeEnum(UploadType).openapi({ example: UploadType.Table, description: 'Type' }),
+    .meta({ example: 60 * 60 * 1, description: 'Token expire time, seconds' }),
+  type: z.enum(UploadType).meta({ example: UploadType.Table, description: 'Type' }),
+  baseId: z.string().optional(),
 });
 
 export type SignatureRo = z.infer<typeof signatureRoSchema>;
 
 export const signatureVoSchema = z.object({
-  url: z.string().openapi({
+  url: z.string().meta({
     example: 'https://example.com/attachment/upload',
     description: 'Upload url',
   }),
-  uploadMethod: z.string().openapi({ example: 'POST', description: 'Upload method' }),
-  token: z.string().openapi({ example: 'xxxxxxxx', description: 'Secret key' }),
-  requestHeaders: z.record(z.unknown()).openapi({ example: { 'Content-Type': 'image/png' } }),
+  uploadMethod: z.string().meta({ example: 'POST', description: 'Upload method' }),
+  token: z.string().meta({ example: 'xxxxxxxx', description: 'Secret key' }),
+  requestHeaders: z
+    .record(z.string(), z.unknown())
+    .meta({ example: { 'Content-Type': 'image/png' } }),
 });
 
 export type SignatureVo = z.infer<typeof signatureVoSchema>;

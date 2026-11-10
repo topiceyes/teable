@@ -1,27 +1,47 @@
-import { Injectable, Logger } from '@nestjs/common';
-import type { IOtOperation, IRecord } from '@teable/core';
 import {
-  FieldOpBuilder,
-  IdPrefix,
-  RecordOpBuilder,
-  TableOpBuilder,
-  ViewOpBuilder,
+  Injectable,
+  Logger,
+  NotFoundException,
+  Optional,
+  UnauthorizedException,
+} from '@nestjs/common';
+import type {
+  ICustomHttpExceptionData,
+  IFieldVo,
+  ILocalization,
+  IOtOperation,
+  IRecord,
+  ISnapshotBase,
 } from '@teable/core';
-import { PrismaService } from '@teable/db-main-prisma';
-import { Knex } from 'knex';
-import { groupBy } from 'lodash';
-import { InjectModel } from 'nest-knexjs';
+import { getRandomString, IdPrefix, RecordOpBuilder } from '@teable/core';
+import type { ITableVo } from '@teable/openapi';
+import { isTableProvisionPendingError, TABLE_PROVISION_PENDING_CODE } from '@teable/v2-core';
+// Cancellation classification only; this import does not make HTTP requests.
+// eslint-disable-next-line no-restricted-imports
+import { isCancel } from 'axios';
+import { omit } from 'lodash';
 import { ClsService } from 'nestjs-cls';
+import { I18nService } from 'nestjs-i18n';
 import type { CreateOp, DeleteOp, EditOp } from 'sharedb';
 import ShareDb from 'sharedb';
 import type { SnapshotMeta } from 'sharedb/lib/sharedb';
 import { FieldService } from '../features/field/field.service';
-import { RecordService } from '../features/record/record.service';
 import { TableService } from '../features/table/table.service';
-import { ViewService } from '../features/view/view.service';
 import type { IClsStore } from '../types/cls';
-import type { IAdapterService, IReadonlyAdapterService } from './interface';
-import { WsAuthService } from './ws-auth.service';
+import type { I18nTranslations } from '../types/i18n.generated';
+import { exceptionParse } from '../utils/exception-parse';
+import {
+  RawOpType,
+  type ICreateOp,
+  type IEditOp,
+  type IShareDbReadonlyAdapterService,
+} from './interface';
+import { getQueryCancellationSignal, ShareDbQueryCancelledError } from './query-cancellation';
+import { shouldSkipQueryPoll } from './query-poll-skip';
+import { FieldReadonlyServiceAdapter } from './readonly/field-readonly.service';
+import { RecordReadonlyServiceAdapter } from './readonly/record-readonly.service';
+import { TableReadonlyServiceAdapter } from './readonly/table-readonly.service';
+import { ViewReadonlyServiceAdapter } from './readonly/view-readonly.service';
 
 export interface ICollectionSnapshot {
   type: string;
@@ -31,34 +51,71 @@ export interface ICollectionSnapshot {
 
 type IProjection = { [fieldNameOrId: string]: boolean };
 
+const getLocalization = (data: unknown): ILocalization | undefined => {
+  if (!data || typeof data !== 'object' || !('localization' in data)) return;
+  const localization = (data as ICustomHttpExceptionData).localization;
+  return localization?.i18nKey ? localization : undefined;
+};
+
+const getLocaleFromCookie = (cookie: unknown): string | undefined => {
+  if (typeof cookie !== 'string') return;
+  const match = /(?:^|;\s*)NEXT_LOCALE=([^;]+)/.exec(cookie);
+  return match ? decodeURIComponent(match[1]) : undefined;
+};
+
+// Accept-Language tags in preference order (q-weighted), e.g. "ja,zh-CN;q=0.8" -> ["ja", "zh-CN"].
+const getAcceptLanguages = (header: unknown): string[] => {
+  if (typeof header !== 'string') return [];
+  return header
+    .split(',')
+    .map((part, index) => {
+      const [tag, ...params] = part.trim().split(';');
+      const q = params.map((p) => /^\s*q=([\d.]+)/.exec(p)?.[1]).find(Boolean);
+      return { tag: tag.trim(), q: q ? Number(q) : 1, index };
+    })
+    .filter(({ tag, q }) => tag && tag !== '*' && q > 0)
+    .sort((a, b) => b.q - a.q || a.index - b.index)
+    .map(({ tag }) => tag);
+};
+
+/**
+ * Runs a callback-style ShareDB method that is implemented with async/await. ShareDB expects
+ * these methods to return void, so the promise is settled here and an unexpected rejection is
+ * forwarded to the trailing callback instead of becoming an unhandled rejection.
+ */
+const settle = (promise: Promise<unknown>, args: readonly unknown[]): void => {
+  promise.catch((error) => {
+    const callback = args[args.length - 1];
+    if (typeof callback === 'function') callback(error);
+  });
+};
+
 @Injectable()
 export class ShareDbAdapter extends ShareDb.DB {
-  private logger = new Logger(ShareDbAdapter.name);
+  private readonly logger = new Logger(ShareDbAdapter.name);
+
+  // Read by sharedb QueryEmitter (lib/query-emitter.js): ops arriving while a
+  // poll is in flight or within this window are coalesced into a single
+  // trailing poll, instead of one poll per op.
+  pollDebounce = Number(process.env.SHAREDB_QUERY_POLL_DEBOUNCE_MS ?? 200);
 
   closed: boolean;
 
   constructor(
     private readonly cls: ClsService<IClsStore>,
-    private readonly tableService: TableService,
-    private readonly recordService: RecordService,
-    private readonly fieldService: FieldService,
-    private readonly viewService: ViewService,
-    private readonly prismaService: PrismaService,
-    @InjectModel('CUSTOM_KNEX') private readonly knex: Knex,
-    private readonly wsAuthService: WsAuthService
+    private readonly tableService: TableReadonlyServiceAdapter,
+    private readonly recordService: RecordReadonlyServiceAdapter,
+    private readonly fieldService: FieldReadonlyServiceAdapter,
+    private readonly viewService: ViewReadonlyServiceAdapter,
+    private readonly tableServiceInner: TableService,
+    @Optional() private readonly fieldServiceInner?: FieldService,
+    @Optional() private readonly i18n?: I18nService<I18nTranslations>
   ) {
     super();
     this.closed = false;
   }
 
-  getService(type: IdPrefix): IAdapterService {
-    if (IdPrefix.Record === type) {
-      return this.recordService;
-    }
-    throw new Error(`QueryType: ${type} has no adapter service implementation`);
-  }
-
-  getReadonlyService(type: IdPrefix): IReadonlyAdapterService {
+  getReadonlyService(type: IdPrefix): IShareDbReadonlyAdapterService {
     switch (type) {
       case IdPrefix.View:
         return this.viewService;
@@ -72,7 +129,21 @@ export class ShareDbAdapter extends ShareDb.DB {
     throw new Error(`QueryType: ${type} has no readonly adapter service implementation`);
   }
 
-  query = async (
+  // Translate the query's field-id projection (string[]) into the snapshot
+  // projection shape ({ [fieldId]: true }). Returns undefined when the query
+  // carries no projection, leaving the ShareDB native projection in place.
+  private queryProjection(query: unknown): IProjection | undefined {
+    const projection = (query as { projection?: string[] } | undefined)?.projection;
+    if (!Array.isArray(projection) || projection.length === 0) {
+      return undefined;
+    }
+    return projection.reduce<IProjection>((acc, fieldId) => {
+      acc[fieldId] = true;
+      return acc;
+    }, {});
+  }
+
+  query = (
     collection: string,
     query: unknown,
     projection: IProjection,
@@ -80,20 +151,37 @@ export class ShareDbAdapter extends ShareDb.DB {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     callback: (err: any, snapshots: Snapshot[], extra?: any) => void
   ) => {
+    const signal = getQueryCancellationSignal(options);
     this.queryPoll(collection, query, options, (error, results, extra) => {
       if (error) {
+        if (signal?.aborted && error instanceof ShareDbQueryCancelledError) {
+          return callback(null, [], undefined);
+        }
         return callback(error, []);
       }
+      if (signal?.aborted) return callback(null, [], undefined);
       if (!results.length) {
-        return callback(undefined, []);
+        return callback(undefined, [], extra);
       }
 
       this.getSnapshotBulk(
         collection,
         results as string[],
-        projection,
-        undefined,
+        // ShareDB's native projection arg is only populated for registered
+        // projection collections (we register none), so it is always empty.
+        // The field selection the client cares about rides inside the query
+        // (e.g. a view's visible field ids) — forward it so the bulk snapshot
+        // only carries those fields.
+        this.queryProjection(query) ?? projection,
+        options,
         (error, snapshots) => {
+          if (error) {
+            if (signal?.aborted && error instanceof ShareDbQueryCancelledError) {
+              return callback(null, [], undefined);
+            }
+            return callback(error, []);
+          }
+          if (signal?.aborted) return callback(null, [], undefined);
           callback(
             error,
             // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
@@ -105,52 +193,142 @@ export class ShareDbAdapter extends ShareDb.DB {
     });
   };
 
-  async queryPoll(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private toShareDbError(error: Error, options?: any) {
+    const exception = exceptionParse(error);
+    const data = 'data' in error ? error.data : undefined;
+    // ShareDB serializes only code/message, so the client cannot translate
+    // data.localization itself; send the message in the requester's language.
+    const localized = this.translateLocalization(data, options);
+    if (localized) {
+      exception.message = localized;
+    }
+    // ShareDB serializes only code/message. Preserve the pending identity there,
+    // before HTTP normalization discards the domain metadata.
+    if (
+      data &&
+      typeof data === 'object' &&
+      'domainCode' in data &&
+      isTableProvisionPendingError({ code: data.domainCode })
+    ) {
+      exception.code = TABLE_PROVISION_PENDING_CODE;
+    }
+    return exception;
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private translateLocalization(data: unknown, options?: any): string | undefined {
+    const localization = getLocalization(data);
+    if (!this.i18n || !localization) return;
+    try {
+      const message = this.i18n.t(`sdk.${localization.i18nKey}` as never, {
+        lang: this.getRequesterLang(options),
+        args: localization.context,
+      });
+      return typeof message === 'string' && message ? message : undefined;
+    } catch (e) {
+      this.logger.warn(`Failed to localize ShareDB error ${localization.i18nKey}: ${e}`);
+      return;
+    }
+  }
+
+  // Same order the page picks its language: the page's own (sent on the socket URL),
+  // then the NEXT_LOCALE cookie, then Accept-Language, then English.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private getRequesterLang(options?: any): string {
+    const pick = (key: string) => options?.[key] || options?.agentCustom?.[key];
+    const supported = this.i18n?.getSupportedLanguages() ?? [];
+    const candidates = [
+      pick('lang'),
+      getLocaleFromCookie(pick('cookie')),
+      ...getAcceptLanguages(pick('acceptLanguage')),
+    ];
+    for (const candidate of candidates) {
+      if (typeof candidate !== 'string' || !candidate) continue;
+      const tag = candidate.toLowerCase();
+      const match =
+        supported.find((lang) => lang.toLowerCase() === tag) ??
+        supported.find((lang) => lang.toLowerCase() === tag.split('-')[0]);
+      if (match) return match;
+    }
+    return 'en';
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private getAuthHeaders(options: any) {
+    const cookie = options?.cookie || options?.agentCustom?.cookie;
+    const shareId = options?.shareId || options?.agentCustom?.shareId;
+    const baseShareId = options?.baseShareId || options?.agentCustom?.baseShareId;
+    const templateHeader = options?.templateHeader || options?.agentCustom?.templateHeader;
+    if (!cookie && !shareId && !baseShareId && !templateHeader) {
+      this.logger.error(`No cookie found in options agentCustom: ${JSON.stringify(options)}`);
+      throw new UnauthorizedException('Unauthorized request not authorized');
+    }
+    return { cookie, shareViewId: shareId, baseShareId, templateHeader };
+  }
+
+  queryPoll(...args: Parameters<ShareDbAdapter['queryPollAsync']>): void {
+    settle(this.queryPollAsync(...args), args);
+  }
+
+  async queryPollAsync(
     collection: string,
     query: unknown,
-    _options: unknown,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    callback: (error: ShareDb.Error | null, ids: string[], extra?: any) => void
+    options: any,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    callback: (error: any, ids: string[], extra?: any) => void
   ) {
+    const signal = getQueryCancellationSignal(options);
     try {
-      let currentUser = this.cls.get('user');
-      const { sessionTicket } = (query ?? {}) as { sessionTicket?: string };
-
-      if (!currentUser && sessionTicket) {
-        currentUser = await this.wsAuthService.checkSession(sessionTicket);
-      }
-
-      await this.cls.runWith(this.cls.get(), async () => {
-        this.cls.set('user', currentUser);
-
-        const [docType, collectionId] = collection.split('_');
-
-        const queryResult = await this.getReadonlyService(docType as IdPrefix).getDocIdsByQuery(
-          collectionId,
-          query
-        );
-        callback(null, queryResult.ids, queryResult.extra);
-      });
+      if (signal?.aborted) throw new ShareDbQueryCancelledError();
+      const authHeaders = this.getAuthHeaders(options);
+      await this.cls.runWith(
+        {
+          ...this.cls.get(),
+          ...authHeaders,
+          interactiveQueryAbort: signal,
+        },
+        async () => {
+          const [docType, collectionId] = collection.split('_');
+          const queryResult = await this.getReadonlyService(docType as IdPrefix).getDocIdsByQuery(
+            collectionId,
+            query
+          );
+          if (signal?.aborted) throw new ShareDbQueryCancelledError();
+          callback(null, queryResult.ids, queryResult.extra);
+        }
+      );
     } catch (e) {
+      if (signal?.aborted && (e instanceof ShareDbQueryCancelledError || isCancel(e))) {
+        return callback(new ShareDbQueryCancelledError(), []);
+      }
+      this.logger.error(e);
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      callback(e as any, []);
+      callback(this.toShareDbError(e as Error, options), []);
     }
   }
 
   // Return true to avoid polling if there is no possibility that an op could
-  // affect a query's results
+  // affect a query's results; the decision logic lives in query-poll-skip/
   // eslint-disable-next-line @typescript-eslint/ban-ts-comment
   // @ts-ignore
   skipPoll(
-    _collection: string,
+    collection: string,
     _id: string,
     op: CreateOp | DeleteOp | EditOp,
-    _query: unknown
+    query: unknown
   ): boolean {
-    // ShareDB is in charge of doing the validation of ops, so at this point we
-    // should be able to assume that the op is structured validly
-    if (op.create || op.del) return false;
-    return !op.op;
+    // decision counts are observed via otel metrics inside query-poll-skip;
+    // per-event logging is debug-only — this fires hundreds of thousands of
+    // times a day in production
+    const isShouldSkipQueryPoll = shouldSkipQueryPoll(collection, _id, op, query);
+    if (isShouldSkipQueryPoll) {
+      this.logger.debug(
+        `skipping poll for op on ${collection} ${_id} because modified fields do not affect the query`
+      );
+    }
+    return isShouldSkipQueryPoll;
   }
 
   close(callback: () => void) {
@@ -159,121 +337,8 @@ export class ShareDbAdapter extends ShareDb.DB {
     if (callback) callback();
   }
 
-  private async updateSnapshot(
-    version: number,
-    collection: string,
-    docId: string,
-    ops: IOtOperation[]
-  ) {
-    const [docType, collectionId] = collection.split('_');
-    let opBuilder;
-    switch (docType as IdPrefix) {
-      case IdPrefix.View:
-        opBuilder = ViewOpBuilder;
-        break;
-      case IdPrefix.Field:
-        opBuilder = FieldOpBuilder;
-        break;
-      case IdPrefix.Record:
-        opBuilder = RecordOpBuilder;
-        break;
-      case IdPrefix.Table:
-        opBuilder = TableOpBuilder;
-        break;
-      default:
-        throw new Error(`UpdateSnapshot: ${docType} has no service implementation`);
-    }
-
-    const ops2Contexts = opBuilder.ops2Contexts(ops);
-    const service = this.getService(docType as IdPrefix);
-    // group by op name execute faster
-    const ops2ContextsGrouped = groupBy(ops2Contexts, 'name');
-    for (const opName in ops2ContextsGrouped) {
-      const opContexts = ops2ContextsGrouped[opName];
-      await service.update(version, collectionId, docId, opContexts);
-    }
-  }
-
-  private async createSnapshot(collection: string, _docId: string, snapshot: unknown) {
-    const [docType, collectionId] = collection.split('_');
-    await this.getService(docType as IdPrefix).create(collectionId, snapshot);
-  }
-
-  private async deleteSnapshot(version: number, collection: string, docId: string) {
-    const [docType, collectionId] = collection.split('_');
-    await this.getService(docType as IdPrefix).del(version, collectionId, docId);
-  }
-
-  // Persists an op and snapshot if it is for the next version. Calls back with
-  // callback(err, succeeded)
-  async commit(
-    collection: string,
-    id: string,
-    rawOp: CreateOp | DeleteOp | EditOp,
-    snapshot: ICollectionSnapshot,
-    options: unknown,
-    callback: (err: unknown, succeed?: boolean, complete?: boolean) => void
-  ) {
-    /*
-     * op: CreateOp {
-     *   src: '24545654654646',
-     *   seq: 1,
-     *   v: 0,
-     *   create: { type: 'http://sharejs.org/types/JSONv0', data: { ... } },
-     *   m: { ts: 12333456456 } }
-     * }
-     * snapshot: PostgresSnapshot
-     */
-
-    const [docType, collectionId] = collection.split('_');
-
-    try {
-      await this.prismaService.$tx(async (prisma) => {
-        const opsResult = await prisma.ops.aggregate({
-          _max: { version: true },
-          where: { collection: collectionId, docId: id },
-        });
-
-        if (opsResult._max.version != null) {
-          const maxVersion = opsResult._max.version + 1;
-
-          if (rawOp.v !== maxVersion) {
-            this.logger.log({ message: 'op crashed', crashed: rawOp.op });
-            throw new Error(`${id} version mismatch: maxVersion: ${maxVersion} rawOpV: ${rawOp.v}`);
-          }
-        }
-
-        // 1. save op in db;
-        await prisma.ops.create({
-          data: {
-            docId: id,
-            docType,
-            collection: collectionId,
-            version: rawOp.v,
-            operation: JSON.stringify(rawOp),
-            createdBy: this.cls.get('user.id'),
-          },
-        });
-
-        // create snapshot
-        if (rawOp.create) {
-          await this.createSnapshot(collection, id, rawOp.create.data);
-        }
-
-        // update snapshot
-        if (rawOp.op) {
-          await this.updateSnapshot(snapshot.v, collection, id, rawOp.op);
-        }
-
-        // delete snapshot
-        if (rawOp.del) {
-          await this.deleteSnapshot(snapshot.v, collection, id);
-        }
-      });
-      callback(null, true, true);
-    } catch (err) {
-      callback(err);
-    }
+  commit() {
+    throw new Error('Method not implemented.');
   }
 
   private snapshots2Map<T>(snapshots: ({ id: string } & T)[]): Record<string, T> {
@@ -283,55 +348,93 @@ export class ShareDbAdapter extends ShareDb.DB {
     }, {});
   }
 
+  private snapshots2MapWithMissing(
+    ids: string[],
+    snapshotData: ISnapshotBase<unknown>[]
+  ): Record<string, Snapshot> {
+    const snapshotDataMap = new Map(snapshotData.map((snapshot) => [snapshot.id, snapshot]));
+    const snapshots = ids.map((id) => {
+      const snapshot = snapshotDataMap.get(id);
+      if (!snapshot) {
+        return new Snapshot(id, 0, null, undefined, null);
+      }
+      return new Snapshot(snapshot.id, snapshot.v, snapshot.type, snapshot.data, null);
+    });
+    return this.snapshots2Map(snapshots);
+  }
+
   // Get the named document from the database. The callback is called with (err,
   // snapshot). A snapshot with a version of zero is returned if the document
   // has never been created in the database.
-  async getSnapshotBulk(
+  getSnapshotBulk(...args: Parameters<ShareDbAdapter['getSnapshotBulkAsync']>): void {
+    settle(this.getSnapshotBulkAsync(...args), args);
+  }
+
+  async getSnapshotBulkAsync(
     collection: string,
     ids: string[],
     projection: IProjection | undefined,
-    options: unknown,
-    callback: (err: ShareDb.Error | null, data?: Record<string, Snapshot>) => void
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    options: any,
+    callback: (err: unknown, data?: Record<string, Snapshot>) => void
   ) {
+    // QueryEmitter's inserted-snapshot path only passes agentCustom. Its callback
+    // runs in queryPoll's CLS child, which still owns this subscription's signal.
+    const signal = collection.startsWith(`${IdPrefix.Record}_`)
+      ? (getQueryCancellationSignal(options) ?? this.cls.get('interactiveQueryAbort'))
+      : undefined;
     try {
+      if (signal?.aborted) throw new ShareDbQueryCancelledError();
       const [docType, collectionId] = collection.split('_');
-
-      const snapshotData = await this.getReadonlyService(docType as IdPrefix).getSnapshotBulk(
-        collectionId,
-        ids,
-        projection && projection['$submit'] ? undefined : projection
-      );
-
-      if (snapshotData.length) {
-        const snapshots = snapshotData.map(
-          (snapshot) =>
-            new Snapshot(
-              snapshot.id,
-              snapshot.v,
-              snapshot.type,
-              snapshot.data,
-              null // TODO: metadata
-            )
-        );
-        callback(null, this.snapshots2Map(snapshots));
-      } else {
-        const snapshots = ids.map((id) => new Snapshot(id, 0, null, undefined, null));
-        callback(null, this.snapshots2Map(snapshots));
+      let authHeaders;
+      try {
+        authHeaders = this.getAuthHeaders(options);
+      } catch {
+        // For internal (server-side) connections without auth, resolve field docs directly
+        if (docType === IdPrefix.Field && this.fieldServiceInner) {
+          const snapshotData = await this.fieldServiceInner.getSnapshotBulk(collectionId, ids);
+          callback(null, this.snapshots2MapWithMissing(ids, snapshotData));
+          return;
+        }
+        throw new UnauthorizedException('Unauthorized request not authorized');
       }
+      const snapshotData = await this.cls.runWith(
+        {
+          ...this.cls.get(),
+          ...authHeaders,
+          interactiveQueryAbort: signal,
+        },
+        () =>
+          this.getReadonlyService(docType as IdPrefix).getSnapshotBulk(
+            collectionId,
+            ids,
+            projection && projection['$submit'] ? undefined : projection
+          )
+      );
+      if (signal?.aborted) throw new ShareDbQueryCancelledError();
+      callback(null, this.snapshots2MapWithMissing(ids, snapshotData));
     } catch (err) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      callback(err as any);
+      if (signal?.aborted && (err instanceof ShareDbQueryCancelledError || isCancel(err))) {
+        return callback(new ShareDbQueryCancelledError());
+      }
+      this.logger.error(err);
+      callback(this.toShareDbError(err as Error, options));
     }
   }
 
-  async getSnapshot(
+  getSnapshot(...args: Parameters<ShareDbAdapter['getSnapshotAsync']>): void {
+    settle(this.getSnapshotAsync(...args), args);
+  }
+
+  async getSnapshotAsync(
     collection: string,
     id: string,
     projection: IProjection | undefined,
-    options: unknown,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    options: any,
     callback: (err: unknown, data?: Snapshot) => void
   ) {
-    this.getSnapshotBulk(collection, [id], projection, options, (err, data) => {
+    await this.getSnapshotBulk(collection, [id], projection, options, (err, data) => {
       if (err) {
         callback(err);
       } else {
@@ -339,6 +442,159 @@ export class ShareDbAdapter extends ShareDb.DB {
         callback(null, data![id]);
       }
     });
+  }
+
+  private async getSnapshotData(
+    docType: string,
+    collectionId: string,
+    ids: string[],
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    options: any
+  ) {
+    if (ids.length === 0) {
+      return [];
+    }
+    if (docType === IdPrefix.Table) {
+      return await this.tableServiceInner.getSnapshotBulk(collectionId, ids, {
+        ignoreDefaultViewId: true,
+      });
+    }
+    const authHeaders = this.getAuthHeaders(options);
+    const snapshots = await this.cls.runWith(
+      {
+        ...this.cls.get(),
+        ...authHeaders,
+      },
+      () => this.getReadonlyService(docType as IdPrefix).getSnapshotBulk(collectionId, ids)
+    );
+
+    // Filter out meta field for Field type to prevent it from being sent to frontend
+    if (docType === IdPrefix.Field) {
+      return snapshots.map((snapshot) => ({
+        ...snapshot,
+        data: omit(snapshot.data as object, ['meta']),
+      }));
+    }
+
+    return snapshots;
+  }
+
+  private hasGapVersion({
+    opType,
+    currentVersion,
+    fromVersion,
+  }: {
+    opType: RawOpType;
+    currentVersion: number;
+    fromVersion: number;
+  }) {
+    if (opType === RawOpType.Del) {
+      return false;
+    }
+
+    if (fromVersion > currentVersion) {
+      return false;
+    }
+    return true;
+  }
+
+  private getIdsWithGapVersion(
+    fromMap: Record<string, number>,
+    versionAndTypeMap: Record<string, { version: number; type: RawOpType }>
+  ): string[] {
+    const ids: string[] = [];
+    for (const [id, from] of Object.entries(fromMap)) {
+      const versionAndType = versionAndTypeMap[id];
+      if (!versionAndType) continue;
+      if (
+        this.hasGapVersion({
+          opType: versionAndType.type,
+          currentVersion: versionAndType.version,
+          fromVersion: from,
+        })
+      ) {
+        ids.push(id);
+      }
+    }
+    return ids;
+  }
+
+  async internalGetOps(
+    collection: string,
+    id: string,
+    from: number,
+    to: number | null,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    options: any,
+    callback: (error: unknown, data?: unknown) => void,
+    dataFunctions: {
+      getVersionAndType: (
+        collectionId: string,
+        id: string
+      ) => Promise<{ version: number; type: RawOpType }>;
+      getSnapshotData: (
+        docType: IdPrefix,
+        collectionId: string,
+        ids: string[],
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        options: any
+      ) => Promise<ISnapshotBase<unknown>[]>;
+    }
+  ) {
+    const { getVersionAndType, getSnapshotData } = dataFunctions;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const [docType, collectionId] = collection.split('_');
+
+      const { version, type } = await getVersionAndType(collectionId, id);
+
+      if (!this.hasGapVersion({ opType: type, currentVersion: version, fromVersion: from })) {
+        callback(null, []);
+        return;
+      }
+
+      const snapshotData = await getSnapshotData(docType as IdPrefix, collectionId, [id], options);
+
+      if (!snapshotData.length) {
+        throw new NotFoundException(`docType: ${docType}, id: ${id} not found`);
+      }
+
+      const { data } = snapshotData[0];
+      const baseRaw = {
+        src: getRandomString(21),
+        seq: 1,
+        v: version,
+      };
+      if (type === RawOpType.Create) {
+        callback(null, [
+          {
+            ...baseRaw,
+            create: {
+              type: 'json0',
+              data,
+            },
+          } as ICreateOp,
+        ]);
+        return;
+      }
+
+      const editOp = this.getOpsFromSnapshot(docType as IdPrefix, data);
+      const gapVersion = Math.max((to || baseRaw.v + 1) - from, 0);
+      const editOps = new Array(gapVersion).fill(0).map((_, i) => {
+        return {
+          ...baseRaw,
+          src: getRandomString(21),
+          v: from + i,
+        } as IEditOp;
+      });
+      if (gapVersion > 0) {
+        editOps[gapVersion - 1].op = editOp;
+      }
+      callback(null, editOps);
+    } catch (err) {
+      this.logger.error(err);
+      callback(this.toShareDbError(err as Error, options));
+    }
   }
 
   // Get operations between [from, to) non-inclusively. (Ie, the range should
@@ -350,41 +606,127 @@ export class ShareDbAdapter extends ShareDb.DB {
   // The version will be inferred from the parameters if it is missing.
   //
   // Callback should be called as callback(error, [list of ops]);
-  async getOps(
+  getOps(...args: Parameters<ShareDbAdapter['getOpsAsync']>): void {
+    settle(this.getOpsAsync(...args), args);
+  }
+
+  async getOpsAsync(
     collection: string,
     id: string,
     from: number,
-    to: number,
-    options: unknown,
+    to: number | null,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    options: any,
     callback: (error: unknown, data?: unknown) => void
   ) {
     try {
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
-      const [_, collectionId] = collection.split('_');
-      const nativeSql = this.knex('ops')
-        .select('operation')
-        .where({
-          collection: collectionId,
-          doc_id: id,
-        })
-        .andWhere('version', '>=', from)
-        .andWhere('version', '<', to)
-        .toSQL()
-        .toNative();
-
-      const res = await this.prismaService.$queryRawUnsafe<{ operation: string }[]>(
-        nativeSql.sql,
-        ...nativeSql.bindings
-      );
-
-      callback(
-        null,
-        res.map(function (row) {
-          return JSON.parse(row.operation);
-        })
-      );
+      const [docType] = collection.split('_');
+      const readonlyService = this.getReadonlyService(docType as IdPrefix);
+      await this.internalGetOps(collection, id, from, to, options, callback, {
+        getVersionAndType: async (...args) => await readonlyService.getVersionAndType(...args),
+        getSnapshotData: async (...args) => await this.getSnapshotData(...args),
+      });
     } catch (err) {
-      callback(err);
+      this.logger.error(err);
+      callback(this.toShareDbError(err as Error, options));
+    }
+  }
+
+  getOpsBulk(...args: Parameters<ShareDbAdapter['getOpsBulkAsync']>): void {
+    settle(this.getOpsBulkAsync(...args), args);
+  }
+
+  async getOpsBulkAsync(
+    collection: string,
+    fromMap: Record<string, number>,
+    toMap: Record<string, number | null> | undefined,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    options: any,
+    callback: (error: unknown, data?: unknown) => void
+  ) {
+    try {
+      const [docType, collectionId] = collection.split('_');
+      const versionAndTypeMap = await this.getReadonlyService(
+        docType as IdPrefix
+      ).getVersionAndTypeMap(collectionId, Object.keys(fromMap));
+      const needGetSnapshotDataIds = this.getIdsWithGapVersion(fromMap, versionAndTypeMap);
+
+      const snapshots = await this.getSnapshotData(
+        docType,
+        collectionId,
+        needGetSnapshotDataIds,
+        options
+      );
+      const snapshotDataMap = snapshots.reduce(
+        (acc, snapshot) => {
+          acc[snapshot.id] = snapshot;
+          return acc;
+        },
+        {} as Record<string, ISnapshotBase<unknown>>
+      );
+      const result: Record<string, unknown> = {};
+      for (const [id, from] of Object.entries(fromMap)) {
+        let resultError: unknown = null;
+        await this.internalGetOps(
+          collection,
+          id,
+          from,
+          toMap?.[id] ?? null,
+          options,
+          (err, data) => {
+            if (err) {
+              resultError = err;
+            }
+            result[id] = data;
+          },
+          {
+            getVersionAndType: async (_collectionId, id) =>
+              versionAndTypeMap[id] ?? { version: 0, type: RawOpType.Del },
+            getSnapshotData: async (...args) => {
+              const ids = args[2];
+              return ids.map((id) => snapshotDataMap[id]).filter(Boolean);
+            },
+          }
+        );
+        if (resultError) {
+          callback(resultError);
+          return;
+        }
+      }
+      callback(null, result);
+    } catch (err) {
+      this.logger.error(err);
+      callback(this.toShareDbError(err as Error, options));
+    }
+  }
+
+  private getOpsFromSnapshot(docType: string, snapshot: unknown): IOtOperation[] {
+    switch (docType) {
+      case IdPrefix.Record:
+        return Object.entries((snapshot as IRecord).fields).map(([fieldId, fieldValue]) => {
+          return RecordOpBuilder.editor.setRecord.build({
+            fieldId,
+            newCellValue: fieldValue,
+            oldCellValue: undefined,
+          });
+        });
+      case IdPrefix.Field:
+      case IdPrefix.Table:
+        return Object.entries(snapshot as IFieldVo | ITableVo)
+          .filter(([key]) => key !== 'id')
+          .map(([key, value]) => {
+            // Snapshot recovery rebuilds the client document from the database
+            // row, and a json0 component without an instruction (`{ p }`) is
+            // dropped to a no-op on the wire and then crashes ot-json0 with
+            // "invalid / missing instruction in op" on every client applying
+            // it. The field/table property builders emit exactly that shape —
+            // they omit `oi` when the value is nullish — so empty columns are
+            // written as an explicit null here, which also clears the stale
+            // value the client still holds.
+            return { p: [key], oi: value ?? null };
+          });
+      default:
+        return [];
     }
   }
 }

@@ -1,37 +1,43 @@
+import { ComputeActivityProvider } from '@teable/sdk';
 import {
   AggregationProvider,
   RecordProvider,
   RowCountProvider,
-  ActionTriggerProvider,
-  GroupPointProvider,
+  TaskStatusCollectionProvider,
 } from '@teable/sdk/context';
-import { useIsHydrated } from '@teable/sdk/hooks';
-import { DynamicCellGraph } from '../../graph/DynamicCellGraph';
-import { useCellGraphStore } from '../../graph/useCellGraphStore';
+import { SearchProvider } from '@teable/sdk/context/query';
+import { usePersonalView } from '@teable/sdk/hooks';
 import { GridToolBar } from '../tool-bar/GridToolBar';
 import type { IViewBaseProps } from '../types';
 import { GridViewBase } from './GridViewBase';
 
 export const GridView = (props: IViewBaseProps) => {
-  const { recordServerData, recordsServerData } = props;
-  const { graphOpen } = useCellGraphStore();
-  const isHydrated = useIsHydrated();
+  const { recordServerData, recordsServerData, groupPointsServerDataMap } = props;
+  const { isPersonalView, personalViewCommonQuery, personalViewAggregationQuery } =
+    usePersonalView();
+
+  // SSR/seed records are fetched with the shared view's query — a personal
+  // view's filter/sort/group would make them wrong (e.g. transiently showing
+  // rows the personal filter hides), so let the subscription deliver instead
+  const serverRecords = isPersonalView ? undefined : recordsServerData.records;
+  const serverGroupPointsMap = isPersonalView ? undefined : groupPointsServerDataMap;
 
   return (
-    <ActionTriggerProvider>
-      <GridToolBar />
-      <RecordProvider serverRecords={recordsServerData.records} serverRecord={recordServerData}>
-        <AggregationProvider>
-          <RowCountProvider>
-            <GroupPointProvider>
-              <div className="w-full grow overflow-hidden sm:pl-2">
-                {isHydrated && <GridViewBase />}
-                {graphOpen && <DynamicCellGraph />}
-              </div>
-            </GroupPointProvider>
-          </RowCountProvider>
+    <SearchProvider>
+      <RecordProvider serverRecords={serverRecords} serverRecord={recordServerData}>
+        <AggregationProvider query={personalViewAggregationQuery}>
+          <TaskStatusCollectionProvider>
+            <RowCountProvider query={personalViewCommonQuery}>
+              <ComputeActivityProvider>
+                <GridToolBar />
+                <div className="w-full grow overflow-hidden bg-background sm:ps-2">
+                  <GridViewBase groupPointsServerDataMap={serverGroupPointsMap} />
+                </div>
+              </ComputeActivityProvider>
+            </RowCountProvider>
+          </TaskStatusCollectionProvider>
         </AggregationProvider>
       </RecordProvider>
-    </ActionTriggerProvider>
+    </SearchProvider>
   );
 };

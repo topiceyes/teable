@@ -1,0 +1,20 @@
+{
+  "auth": {
+    "title": "Geben Sie Ihr Passwort ein, um diese Seite zu sehen",
+    "submit": "Abschicken",
+    "password": "Passwort",
+    "passwordTooShort": "Das Passwort muss mindestens 3 Zeichen lang sein"
+  },
+  "form": {
+    "requireLoginTip": "Für dieses Formular müssen Sie sich vor dem Absenden anmelden",
+    "login": "Anmelden"
+  },
+  "toolbar": {
+    "filterLinkSelectPlaceholder": "Auswählen..."
+  },
+  "view": {
+    "signInToEdit": "<a>Anmelden</a> zum Bearbeiten"
+  },
+  "openOnNewPage": "Auf neuer Seite öffnen",
+  "errorTips": "Die Freigabequelle hat eine Authority Matrix aktiviert, die Anzeige ist nicht erlaubt"
+}

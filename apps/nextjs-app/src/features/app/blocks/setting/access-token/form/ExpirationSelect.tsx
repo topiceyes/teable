@@ -45,6 +45,10 @@ export const ExpirationSelect = (props: IExpirationSelect) => {
         value: '90',
       },
       {
+        label: t('new.expirationList.permanent'),
+        value: 'permanent',
+      },
+      {
         label: t('new.expirationList.custom'),
         value: '-1',
       },
@@ -58,18 +62,22 @@ export const ExpirationSelect = (props: IExpirationSelect) => {
       setIsCustom(true);
       return;
     }
-    onChange?.(dayjs().add(Number(value), 'day').toDate().toLocaleDateString());
+    if (value === 'permanent') {
+      onChange?.(dayjs('2099-12-31').format('YYYY-MM-DD'));
+      return;
+    }
+    onChange?.(dayjs().add(Number(value), 'day').format('YYYY-MM-DD'));
   };
 
   const onDateChange = (date: Date | undefined) => {
     setDate(date);
-    onChange?.(date?.toLocaleDateString() || undefined);
+    onChange?.(date ? dayjs(date).format('YYYY-MM-DD') : undefined);
   };
 
   return (
     <div className="flex gap-6">
       <Select onValueChange={onValueChange}>
-        <SelectTrigger className="h-8 w-44">
+        <SelectTrigger className="w-44">
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
@@ -89,11 +97,11 @@ export const ExpirationSelect = (props: IExpirationSelect) => {
               variant={'outline'}
               size={'sm'}
               className={cn(
-                'w-[240px] justify-start text-left font-normal',
+                'w-[240px] justify-start text-start font-normal',
                 !date && 'text-muted-foreground'
               )}
             >
-              <CalendarIcon className="mr-2 size-4" />
+              <CalendarIcon className="me-2 size-4" />
               {date ? (
                 new Date(date).toLocaleDateString()
               ) : (
@@ -102,7 +110,14 @@ export const ExpirationSelect = (props: IExpirationSelect) => {
             </Button>
           </PopoverTrigger>
           <PopoverContent className="w-auto p-0" align="start">
-            <Calendar mode="single" selected={date} onSelect={onDateChange} initialFocus />
+            <Calendar
+              mode="single"
+              selected={date}
+              defaultMonth={date}
+              onSelect={onDateChange}
+              fromYear={new Date().getFullYear()}
+              initialFocus
+            />
           </PopoverContent>
         </Popover>
       )}

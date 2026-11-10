@@ -1,14 +1,18 @@
 import type { RouteConfig } from '@asteasolutions/zod-to-openapi';
-import type { IRowCountVo } from '@teable/core';
-import { rowCountVoSchema, queryBaseSchema } from '@teable/core';
+import type { IRowCountVo } from '../aggregation';
+import { rowCountVoSchema } from '../aggregation';
 import { axios } from '../axios';
+import { queryBaseSchema } from '../record';
 import { registerRoute, urlBuilder } from '../utils';
 import { z } from '../zod';
 
 export const SHARE_VIEW_ROW_COUNT = '/share/{shareId}/view/row-count';
 
 export const shareViewRowCountRoSchema = queryBaseSchema.omit({
+  // viewId is bound by the shareId; ignoreViewQuery must not be exposed — it would
+  // let a client drop the view scope and count records the view filter hides.
   viewId: true,
+  ignoreViewQuery: true,
 });
 
 export type IShareViewRowCountRo = z.infer<typeof shareViewRowCountRoSchema>;
@@ -36,8 +40,13 @@ export const ShareViewRowCountRoute: RouteConfig = registerRoute({
   tags: ['share'],
 });
 
-export const getShareViewRowCount = async (shareId: string, query: IShareViewRowCountRo) => {
+export const getShareViewRowCount = async (
+  shareId: string,
+  query: IShareViewRowCountRo,
+  options?: { signal?: AbortSignal }
+) => {
   return axios.get<IRowCountVo>(urlBuilder(SHARE_VIEW_ROW_COUNT, { shareId }), {
+    signal: options?.signal,
     params: {
       ...query,
       filter: JSON.stringify(query.filter),

@@ -1,20 +1,16 @@
-import {
-  BadRequestException,
-  Body,
-  Controller,
-  Patch,
-  UploadedFile,
-  UseInterceptors,
-} from '@nestjs/common';
+import { Body, Controller, Patch, UploadedFile, UseInterceptors } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import {
+  IUpdateUserLangRo,
   IUpdateUserNameRo,
   IUserNotifyMeta,
+  updateUserLangRoSchema,
   updateUserNameRoSchema,
   userNotifyMetaSchema,
 } from '@teable/openapi';
 import { ClsService } from 'nestjs-cls';
 import type { IClsStore } from '../../types/cls';
+import { avatarUploadInterceptorOptions } from '../../utils/avatar';
 import { ZodValidationPipe } from '../../zod.validation.pipe';
 import { UserService } from './user.service';
 
@@ -33,20 +29,7 @@ export class UserController {
     return this.userService.updateUserName(userId, updateUserNameRo.name);
   }
 
-  @UseInterceptors(
-    FileInterceptor('file', {
-      fileFilter: (_req, file, callback) => {
-        if (file.mimetype.startsWith('image/')) {
-          callback(null, true);
-        } else {
-          callback(new BadRequestException('Invalid file type'), false);
-        }
-      },
-      limits: {
-        fileSize: 3 * 1024 * 1024, // limit file size is 3MB
-      },
-    })
-  )
+  @UseInterceptors(FileInterceptor('file', avatarUploadInterceptorOptions))
   @Patch('avatar')
   async updateAvatar(@UploadedFile() file: Express.Multer.File): Promise<void> {
     const userId = this.cls.get('user.id');
@@ -60,5 +43,13 @@ export class UserController {
   ): Promise<void> {
     const userId = this.cls.get('user.id');
     return this.userService.updateNotifyMeta(userId, updateUserNotifyMetaRo);
+  }
+
+  @Patch('lang')
+  async updateLang(
+    @Body(new ZodValidationPipe(updateUserLangRoSchema)) updateUserLangRo: IUpdateUserLangRo
+  ): Promise<void> {
+    const userId = this.cls.get('user.id');
+    return this.userService.updateLang(userId, updateUserLangRo.lang);
   }
 }

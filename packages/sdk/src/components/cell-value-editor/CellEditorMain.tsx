@@ -1,5 +1,6 @@
 import type {
   IAttachmentCellValue,
+  IButtonFieldCellValue,
   ICheckboxCellValue,
   IDateFieldOptions,
   ILinkCellValue,
@@ -7,9 +8,7 @@ import type {
   ILongTextCellValue,
   IMultipleSelectCellValue,
   INumberCellValue,
-  INumberFieldOptions,
   IRatingFieldOptions,
-  ISelectFieldChoice,
   ISelectFieldOptions,
   ISingleLineTextCellValue,
   ISingleLineTextFieldOptions,
@@ -17,10 +16,15 @@ import type {
   IUserCellValue,
   IUserFieldOptions,
 } from '@teable/core';
-import { ColorUtils, FieldType } from '@teable/core';
+import { FieldType } from '@teable/core';
+import { temporaryPaste } from '@teable/openapi';
+import { useTheme } from '@teable/ui-lib';
 import { useCallback, useEffect, useRef } from 'react';
-import { useTableId } from '../../hooks';
-import { Field } from '../../model';
+import { useTableId, useTablePermission } from '../../hooks';
+import type { ButtonField } from '../../model/field/button.field';
+import { NumberField } from '../../model/field/number.field';
+import { ensureSelectChoice } from '../../utils';
+import { transformSelectOptions } from '../cell-value';
 import {
   AttachmentEditor,
   CheckboxEditor,
@@ -29,52 +33,63 @@ import {
   SelectEditor,
   TextEditor,
   RatingEditor,
+  MarkdownLongTextEditor,
   LongTextEditor,
   LinkEditor,
   UserEditor,
+  ButtonEditor,
 } from '../editor';
+import { isMarkdownShowAs } from '../editor/long-text/utils';
 import type { IEditorRef } from '../editor/type';
 import type { ICellValueEditor } from './type';
 
 export const CellEditorMain = (props: Omit<ICellValueEditor, 'wrapClassName' | 'wrapStyle'>) => {
-  const { field, recordId, cellValue, onChange, readonly, className } = props;
+  const { resolvedTheme } = useTheme();
+  const {
+    field,
+    recordId,
+    cellValue,
+    onChange,
+    readonly,
+    className,
+    context,
+    buttonClickStatusHook,
+    record,
+    hideExpand,
+  } = props;
   const tableId = useTableId();
+  const permission = useTablePermission();
   const { id: fieldId, type, options } = field;
   const editorRef = useRef<IEditorRef<unknown>>(null);
+  // Adding a new option mutates the field's choices schema, so it requires
+  // field|update. Share-edit (record|update only) cannot create new options.
+  // Folded into the editor's existing preventAutoNewOptions semantics rather
+  // than swallowing the onOptionAdd callback.
+  const canAddOption = Boolean(permission['field|update']);
 
   useEffect(() => {
     editorRef?.current?.setValue?.(cellValue);
   }, [cellValue]);
 
-  const selectOptions = useCallback((options: ISelectFieldOptions) => {
-    return options.choices.map(({ name, color }) => ({
-      label: name,
-      value: name,
-      color: ColorUtils.shouldUseLightTextOnColor(color) ? '#ffffff' : '#000000',
-      backgroundColor: ColorUtils.getHexForColor(color),
-    }));
-  }, []);
-
   const onOptionAdd = useCallback(
     async (name: string) => {
       if (!tableId) return;
-      if (type !== FieldType.SingleSelect && type !== FieldType.MultipleSelect) return;
 
-      const { choices = [] } = options as ISelectFieldOptions;
-      const existColors = choices.map((v) => v.color);
-      const choice = {
-        name,
-        color: ColorUtils.randomColor(existColors)[0],
-      } as ISelectFieldChoice;
-
-      const newChoices = [...choices, choice];
-
-      await Field.convertField(tableId, fieldId, {
-        type,
-        options: { ...options, choices: newChoices },
+      await temporaryPaste(tableId, {
+        content: name,
+        projection: [fieldId],
+        ranges: [
+          [0, 0],
+          [0, 0],
+        ],
       });
+
+      // temporaryPaste typecast creates the choice server-side, but the response
+      // does not include updated field options. Append locally so the immediate
+      // updateCell/render path can validate the new name before ShareDB catches up.
+      ensureSelectChoice(options as ISelectFieldOptions, name);
     },
-    [tableId, type, fieldId, options]
+    [tableId, fieldId, options]
   );
 
   switch (type) {
@@ -91,6 +106,18 @@ export const CellEditorMain = (props: Omit<ICellValueEditor, 'wrapClassName' | '
       );
     }
     case FieldType.LongText: {
+      const isMarkdown = isMarkdownShowAs(options);
+      if (isMarkdown) {
+        return (
+          <MarkdownLongTextEditor
+            className={className}
+            value={cellValue as ILongTextCellValue}
+            onChange={onChange}
+            readonly={readonly}
+            hideExpand={hideExpand}
+          />
+        );
+      }
       return (
         <LongTextEditor
           ref={editorRef}
@@ -102,14 +129,16 @@ export const CellEditorMain = (props: Omit<ICellValueEditor, 'wrapClassName' | '
       );
     }
     case FieldType.Number: {
+      const formatting = field instanceof NumberField ? field.options.formatting : undefined;
       return (
         <NumberEditor
+          key={formatting?.type ?? 'plain'}
           ref={editorRef}
           className={className}
-          options={options as INumberFieldOptions}
           value={cellValue as INumberCellValue}
           onChange={onChange}
           readonly={readonly}
+          formatting={formatting}
         />
       );
     }
@@ -130,7 +159,10 @@ export const CellEditorMain = (props: Omit<ICellValueEditor, 'wrapClassName' | '
           ref={editorRef}
           className={className}
           value={cellValue as ISingleSelectCellValue}
-          options={selectOptions(options as ISelectFieldOptions)}
+          preventAutoNewOptions={
+            (options as ISelectFieldOptions).preventAutoNewOptions || !canAddOption
+          }
+          options={transformSelectOptions((options as ISelectFieldOptions).choices, resolvedTheme)}
           onChange={onChange}
           readonly={readonly}
           onOptionAdd={onOptionAdd}
@@ -143,7 +175,8 @@ export const CellEditorMain = (props: Omit<ICellValueEditor, 'wrapClassName' | '
           ref={editorRef}
           className={className}
           value={cellValue as IMultipleSelectCellValue}
-          options={selectOptions(options as ISelectFieldOptions)}
+          preventAutoNewOptions={!canAddOption}
+          options={transformSelectOptions((options as ISelectFieldOptions).choices, resolvedTheme)}
           onChange={onChange}
           isMultiple
           readonly={readonly}
@@ -172,16 +205,22 @@ export const CellEditorMain = (props: Omit<ICellValueEditor, 'wrapClassName' | '
           options={options as IDateFieldOptions}
           value={cellValue as string}
           onChange={(selectedDay) => onChange?.(selectedDay ?? null)}
+          readonly={readonly}
         />
       );
     }
     case FieldType.Attachment: {
       return (
         <AttachmentEditor
+          key={`${field.id}-${recordId}`}
           className={className}
+          tableId={tableId}
+          recordId={recordId}
+          fieldId={field.id}
           value={cellValue as IAttachmentCellValue}
           onChange={onChange}
           readonly={readonly}
+          onDownload={props.onAttachmentDownload}
         />
       );
     }
@@ -198,7 +237,9 @@ export const CellEditorMain = (props: Omit<ICellValueEditor, 'wrapClassName' | '
         />
       );
     }
-    case FieldType.User: {
+    case FieldType.User:
+    case FieldType.CreatedBy:
+    case FieldType.LastModifiedBy: {
       return (
         <UserEditor
           className={className}
@@ -206,6 +247,21 @@ export const CellEditorMain = (props: Omit<ICellValueEditor, 'wrapClassName' | '
           options={options as IUserFieldOptions}
           onChange={onChange}
           readonly={readonly}
+          context={context}
+        />
+      );
+    }
+    case FieldType.Button: {
+      return (
+        <ButtonEditor
+          field={field as ButtonField}
+          recordId={recordId}
+          className={className}
+          value={cellValue as IButtonFieldCellValue}
+          onChange={onChange}
+          readonly={readonly}
+          statusHook={buttonClickStatusHook}
+          record={record}
         />
       );
     }

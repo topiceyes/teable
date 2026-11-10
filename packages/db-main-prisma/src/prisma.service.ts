@@ -1,9 +1,12 @@
 import type { OnModuleInit } from '@nestjs/common';
 import { Injectable, Logger } from '@nestjs/common';
-import { PrismaClient } from '@prisma/client';
-import type { Prisma } from '@prisma/client';
+import { Prisma, PrismaClient } from '@prisma/client';
 import { nanoid } from 'nanoid';
 import type { ClsService } from 'nestjs-cls';
+import type { IDatabaseTarget } from './database-url';
+import type { IPgPoolLease } from './pg-pool-registry';
+import { createPrismaPgAdapter } from './prisma-pg-adapter';
+import { TimeoutHttpException } from './utils';
 
 interface ITx {
   client?: Prisma.TransactionClient;
@@ -12,64 +15,82 @@ interface ITx {
   rawOpMaps?: unknown;
 }
 
+type ITxStoreKey = 'tx' | 'dataTx';
+
 function proxyClient(tx: Prisma.TransactionClient) {
   return new Proxy(tx, {
     get(target, p) {
       if (p === '$queryRawUnsafe' || p === '$executeRawUnsafe') {
         return async function (query: string, ...args: unknown[]) {
-          const stack = new Error().stack;
           try {
             return await target[p](query, ...args);
           } catch (e: unknown) {
-            // you can debug here
-            const newError = new Error(
-              `An error occurred in ${p}: ${(e as { message: string }).message}`
-            );
-            newError.stack = stack;
-            throw newError;
+            if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2028') {
+              throw new TimeoutHttpException();
+            }
+            throw e;
           }
         };
       }
-      // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-      // @ts-ignore
-      return target[p];
+      return target[p as keyof typeof target];
     },
   });
 }
 
 @Injectable()
-export class PrismaService
+class NamedPrismaService
   extends PrismaClient<Prisma.PrismaClientOptions, 'query'>
   implements OnModuleInit
 {
-  private readonly logger = new Logger(PrismaService.name);
+  private readonly logger: Logger;
 
   private afterTxCb?: () => void;
 
-  constructor(private readonly cls: ClsService<{ tx: ITx }>) {
+  // Default transaction options from environment variables
+  // Prisma's built-in defaults: timeout=5000ms, maxWait=2000ms
+  private readonly defaultTxTimeout = Number(process.env.PRISMA_TRANSACTION_TIMEOUT ?? 5000);
+  private readonly defaultTxMaxWait = Number(process.env.PRISMA_TRANSACTION_MAX_WAIT ?? 2000);
+
+  constructor(
+    private readonly cls: ClsService<Record<ITxStoreKey, ITx>>,
+    target: IDatabaseTarget,
+    private readonly txStoreKey: ITxStoreKey,
+    private readonly poolLease: IPgPoolLease,
+    schema?: string
+  ) {
     const logConfig = {
       log: [
-        {
-          level: 'query',
-          emit: 'event',
-        },
+        // {
+        //   level: 'query',
+        //   emit: 'event',
+        // },
         {
           level: 'error',
           emit: 'stdout',
         },
-        {
-          level: 'info',
-          emit: 'stdout',
-        },
-        {
-          level: 'warn',
-          emit: 'stdout',
-        },
+        // {
+        //   level: 'info',
+        //   emit: 'stdout',
+        // },
+        // {
+        //   level: 'warn',
+        //   emit: 'stdout',
+        // },
       ],
     };
     const initialConfig = process.env.NODE_ENV === 'production' ? {} : { ...logConfig };
 
-    super(initialConfig);
+    super({
+      ...initialConfig,
+      adapter: createPrismaPgAdapter(poolLease.pool, schema),
+    });
+
+    this.logger = new Logger(target === 'meta' ? MetaPrismaService.name : DataPrismaService.name);
+
+    // Log transaction timeout configuration on startup (must be after super())
+    console.log(
+      `[${target} PrismaService] Transaction defaults: timeout=${this.defaultTxTimeout}ms, maxWait=${this.defaultTxMaxWait}ms (from env: PRISMA_TRANSACTION_TIMEOUT=${process.env.PRISMA_TRANSACTION_TIMEOUT}, PRISMA_TRANSACTION_MAX_WAIT=${process.env.PRISMA_TRANSACTION_MAX_WAIT})`
+    );
   }
 
   bindAfterTransaction(fn: () => void) {
@@ -93,23 +114,33 @@ export class PrismaService
     }
   ): Promise<R> {
     let result: R = undefined as R;
-    const txClient = this.cls.get('tx.client');
+    const txClient = this.cls.get(`${this.txStoreKey}.client`);
     if (txClient) {
       return await fn(txClient);
     }
 
+    // Apply default timeout and maxWait from environment if not explicitly provided
+    const txOptions = {
+      timeout: options?.timeout ?? this.defaultTxTimeout,
+      maxWait: options?.maxWait ?? this.defaultTxMaxWait,
+      ...(options?.isolationLevel && { isolationLevel: options.isolationLevel }),
+    };
+
     await this.cls.runWith(this.cls.get(), async () => {
       result = await super.$transaction<R>(async (prisma) => {
         prisma = proxyClient(prisma);
-        this.cls.set('tx.client', prisma);
-        this.cls.set('tx.id', nanoid());
-        this.cls.set('tx.timeStr', new Date().toISOString());
-        const res = await fn(prisma);
-        this.cls.set('tx.client', undefined);
-        this.cls.set('tx.id', undefined);
-        this.cls.set('tx.timeStr', undefined);
-        return res;
-      }, options);
+        this.cls.set(`${this.txStoreKey}.client`, prisma);
+        this.cls.set(`${this.txStoreKey}.id`, nanoid());
+        this.cls.set(`${this.txStoreKey}.timeStr`, new Date().toISOString());
+        try {
+          // can not delete await here
+          return await fn(prisma);
+        } finally {
+          this.cls.set(`${this.txStoreKey}.client`, undefined);
+          this.cls.set(`${this.txStoreKey}.id`, undefined);
+          this.cls.set(`${this.txStoreKey}.timeStr`, undefined);
+        }
+      }, txOptions);
       this.afterTxCb?.();
     });
 
@@ -117,7 +148,7 @@ export class PrismaService
   }
 
   txClient(): Prisma.TransactionClient {
-    const txClient = this.cls.get('tx.client');
+    const txClient = this.cls.get(`${this.txStoreKey}.client`);
     if (!txClient) {
       // console.log('transactionId', 'none');
       return this;
@@ -140,5 +171,30 @@ export class PrismaService
         Duration: `${e.duration} ms`,
       });
     });
+  }
+
+  async onModuleDestroy() {
+    try {
+      await this.$disconnect();
+    } finally {
+      await this.poolLease.release();
+    }
+  }
+}
+
+@Injectable()
+export class MetaPrismaService extends NamedPrismaService {
+  constructor(cls: ClsService<Record<ITxStoreKey, ITx>>, poolLease: IPgPoolLease, schema?: string) {
+    super(cls, 'meta', 'tx', poolLease, schema);
+  }
+}
+
+@Injectable()
+export class PrismaService extends MetaPrismaService {}
+
+@Injectable()
+export class DataPrismaService extends NamedPrismaService {
+  constructor(cls: ClsService<Record<ITxStoreKey, ITx>>, poolLease: IPgPoolLease, schema?: string) {
+    super(cls, 'data', 'dataTx', poolLease, schema);
   }
 }

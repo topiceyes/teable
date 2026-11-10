@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/naming-convention */
 export enum FieldType {
   SingleLineText = 'singleLineText',
   LongText = 'longText',
@@ -8,11 +9,10 @@ export enum FieldType {
   SingleSelect = 'singleSelect',
   Date = 'date',
   Number = 'number',
-  Duration = 'duration',
   Rating = 'rating',
   Formula = 'formula',
   Rollup = 'rollup',
-  Count = 'count',
+  ConditionalRollup = 'conditionalRollup',
   Link = 'link',
   CreatedTime = 'createdTime',
   LastModifiedTime = 'lastModifiedTime',
@@ -57,12 +57,22 @@ export const RelationshipRevert = {
 export const isMultiValueLink = (relationship: Relationship): boolean =>
   relationship === Relationship.ManyMany || relationship === Relationship.OneMany;
 
-export const PRIMARY_SUPPORTED_TYPES = [
+export const PRIMARY_SUPPORTED_TYPES = new Set([
   FieldType.SingleLineText,
   FieldType.LongText,
+  FieldType.User,
+  FieldType.MultipleSelect,
+  FieldType.SingleSelect,
   FieldType.Date,
   FieldType.Number,
-];
+  FieldType.Rating,
+  FieldType.Formula,
+  FieldType.CreatedTime,
+  FieldType.LastModifiedTime,
+  FieldType.CreatedBy,
+  FieldType.LastModifiedBy,
+  FieldType.AutoNumber,
+]);
 
 export const IMPORT_SUPPORTED_TYPES = [
   FieldType.SingleLineText,
@@ -75,3 +85,23 @@ export const IMPORT_SUPPORTED_TYPES = [
   FieldType.SingleSelect,
   FieldType.User,
 ];
+
+export const UNIQUE_VALIDATION_FIELD_TYPES = new Set([
+  FieldType.SingleLineText,
+  FieldType.LongText,
+  FieldType.Number,
+  FieldType.Date,
+]);
+
+export const NOT_NULL_VALIDATION_FIELD_TYPES = new Set([
+  FieldType.SingleLineText,
+  FieldType.LongText,
+  FieldType.Number,
+  FieldType.SingleSelect,
+  FieldType.MultipleSelect,
+  FieldType.User,
+  FieldType.Date,
+  FieldType.Rating,
+  FieldType.Attachment,
+  FieldType.Link,
+]);

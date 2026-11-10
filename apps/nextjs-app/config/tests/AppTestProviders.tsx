@@ -1,19 +1,14 @@
-import type { DriverClient } from '@teable/core';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { IAppContext } from '@teable/sdk/context';
-import { AppContext, FieldContext, ThemeKey, ViewContext } from '@teable/sdk/context';
+import { AppContext, FieldContext, TableContext, ViewContext } from '@teable/sdk/context';
 import { defaultLocale } from '@teable/sdk/context/app/i18n';
 import type { IFieldInstance, IViewInstance } from '@teable/sdk/model';
-import { noop } from 'lodash';
 import type { FC, PropsWithChildren } from 'react';
+import { useRef } from 'react';
 import { I18nextTestStubProvider } from './I18nextTestStubProvider';
 
 export const createAppContext = (context: Partial<IAppContext> = {}) => {
   const defaultContext: IAppContext = {
-    driver: 'sqlite3' as DriverClient,
-    connected: false,
-    theme: ThemeKey.Dark,
-    isAutoTheme: false,
-    setTheme: noop,
     locale: defaultLocale,
   };
   // eslint-disable-next-line react/display-name
@@ -25,9 +20,25 @@ export const createAppContext = (context: Partial<IAppContext> = {}) => {
 const MockProvider = createAppContext();
 
 export const AppTestProviders: FC<PropsWithChildren> = ({ children }) => {
+  const queryClientRef = useRef<QueryClient>(undefined);
+
+  if (!queryClientRef.current) {
+    queryClientRef.current = new QueryClient({
+      defaultOptions: {
+        queries: {
+          retry: false,
+          refetchOnWindowFocus: false,
+        },
+      },
+    });
+  }
+  const queryClient = queryClientRef.current;
+
   return (
     <I18nextTestStubProvider>
-      <MockProvider>{children}</MockProvider>
+      <MockProvider>
+        <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+      </MockProvider>
     </I18nextTestStubProvider>
   );
 };
@@ -39,8 +50,10 @@ export const TestAnchorProvider: FC<
   }
 > = ({ children, fields = [], views = [] }) => {
   return (
-    <ViewContext.Provider value={{ views }}>
-      <FieldContext.Provider value={{ fields }}>{children}</FieldContext.Provider>
-    </ViewContext.Provider>
+    <TableContext.Provider value={{ tables: [] }}>
+      <ViewContext.Provider value={{ views }}>
+        <FieldContext.Provider value={{ fields }}>{children}</FieldContext.Provider>
+      </ViewContext.Provider>
+    </TableContext.Provider>
   );
 };

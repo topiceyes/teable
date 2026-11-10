@@ -1,28 +1,71 @@
-import { useMutation, useQueryClient } from '@tanstack/react-query';
-import type { IGetBaseVo, IGetSpaceVo } from '@teable/openapi';
-import { deleteSpace, updateSpace } from '@teable/openapi';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { Role } from '@teable/core';
+import type { IGetBaseVo, IGetSpaceVo, ISubscriptionSummaryVo } from '@teable/openapi';
+import {
+  PinType,
+  deleteSpace,
+  permanentDeleteSpace,
+  updateSpace,
+  getSpaceUniqueCollaboratorList,
+} from '@teable/openapi';
 import { ReactQueryKeys } from '@teable/sdk/config';
+import { useContentDir } from '@teable/sdk/hooks';
 import { Card, CardContent, CardHeader, CardTitle } from '@teable/ui-lib/shadcn';
+import { useRouter } from 'next/router';
 import { useTranslation } from 'next-i18next';
-import { type FC, useEffect, useState } from 'react';
+import { type FC, useEffect, useMemo, useState } from 'react';
 import { spaceConfig } from '@/features/i18n/space.config';
+import { LevelWithUpgrade } from '../../components/billing/LevelWithUpgrade';
+import { InviteSpacePopover } from '../../components/collaborator/space/InviteSpacePopover';
+import { uniqueCollaboratorToSpaceItem } from '../../components/collaborator-manage/utils';
+import { CollaboratorAvatars } from '../../components/space/CollaboratorAvatars';
 import { SpaceActionBar } from '../../components/space/SpaceActionBar';
 import { SpaceRenaming } from '../../components/space/SpaceRenaming';
-import { DraggableBaseGrid } from './DraggableBaseGrid';
+import { useIsCloud } from '../../hooks/useIsCloud';
+import { BaseList } from './BaseList';
+import { DataDbBadge } from './DataDbBadge';
+import { StarButton } from './space-side-bar/StarButton';
 
 interface ISpaceCard {
   space: IGetSpaceVo;
   bases?: IGetBaseVo[];
+  subscription?: ISubscriptionSummaryVo;
+  disallowSpaceInvitation?: boolean | null;
 }
 export const SpaceCard: FC<ISpaceCard> = (props) => {
-  const { space, bases } = props;
+  const { space, bases, subscription, disallowSpaceInvitation } = props;
+  const router = useRouter();
+  const contentDir = useContentDir();
+  const isCloud = useIsCloud();
   const queryClient = useQueryClient();
   const [renaming, setRenaming] = useState<boolean>(false);
   const [spaceName, setSpaceName] = useState<string>(space.name);
   const { t } = useTranslation(spaceConfig.i18nNamespaces);
 
+  // Get all principals with access, including base-only collaborators
+  const { data: collaboratorsData } = useQuery({
+    queryKey: ReactQueryKeys.spaceUniqueCollaboratorList(space.id, {
+      skip: 0,
+      take: 100,
+    }),
+    queryFn: ({ queryKey }) =>
+      getSpaceUniqueCollaboratorList(queryKey[1], queryKey[2]).then((res) => res.data),
+  });
+
+  const collaborators = useMemo(
+    () => (collaboratorsData?.collaborators || []).map(uniqueCollaboratorToSpaceItem),
+    [collaboratorsData]
+  );
+
   const { mutate: deleteSpaceMutator } = useMutation({
     mutationFn: deleteSpace,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ReactQueryKeys.spaceList() });
+    },
+  });
+
+  const { mutate: permanentDeleteSpaceMutator } = useMutation({
+    mutationFn: permanentDeleteSpace,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ReactQueryKeys.spaceList() });
     },
@@ -32,7 +75,7 @@ export const SpaceCard: FC<ISpaceCard> = (props) => {
     mutationFn: updateSpace,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ReactQueryKeys.spaceList() });
-      queryClient.invalidateQueries({ queryKey: ['space'] });
+      queryClient.invalidateQueries({ queryKey: ReactQueryKeys.space(space.id) });
     },
   });
 
@@ -53,36 +96,64 @@ export const SpaceCard: FC<ISpaceCard> = (props) => {
   };
 
   return (
-    <Card className="w-full">
+    <Card className="w-full bg-muted/30 shadow-none">
       <CardHeader className="pt-5">
-        <div className="flex items-center justify-between gap-3">
-          <SpaceRenaming
-            spaceName={spaceName!}
-            isRenaming={renaming}
-            onChange={(e) => setSpaceName(e.target.value)}
-            onBlur={(e) => toggleUpdateSpace(e)}
-          >
-            <CardTitle className="truncate" title={space.name}>
-              {space.name}
-            </CardTitle>
-          </SpaceRenaming>
+        <div className="flex w-full items-center justify-between gap-3">
+          <div className="group flex flex-1 items-center gap-2 overflow-hidden">
+            <SpaceRenaming
+              spaceName={spaceName!}
+              isRenaming={renaming}
+              onChange={(e) => setSpaceName(e.target.value)}
+              onBlur={(e) => toggleUpdateSpace(e)}
+            >
+              <CardTitle dir={contentDir} className="truncate leading-5" title={space.name}>
+                {space.name}
+              </CardTitle>
+            </SpaceRenaming>
+            <StarButton className="opacity-100" id={space.id} type={PinType.Space} />
+            {isCloud && (
+              <LevelWithUpgrade
+                level={subscription?.level}
+                status={subscription?.status}
+                spaceId={space.id}
+                withUpgrade={space.role === Role.Owner}
+                organization={space?.organization}
+                appSumoTier={subscription?.appSumoTier}
+              >
+                <DataDbBadge dataDb={space.dataDb} />
+              </LevelWithUpgrade>
+            )}
+            {!isCloud && space?.organization && (
+              <div className="text-sm text-gray-500">{space.organization.name}</div>
+            )}
+            {!isCloud && <DataDbBadge dataDb={space.dataDb} />}
+          </div>
           <SpaceActionBar
-            className="flex shrink-0 items-center gap-3"
             buttonSize="xs"
             space={space}
-            invQueryFilters={['base-all']}
+            invQueryFilters={ReactQueryKeys.baseAll() as unknown as string[]}
+            disallowSpaceInvitation={disallowSpaceInvitation}
             onDelete={() => deleteSpaceMutator(space.id)}
+            onPermanentDelete={() => permanentDeleteSpaceMutator(space.id)}
             onRename={() => setRenaming(true)}
           />
         </div>
       </CardHeader>
-      <CardContent>
+      <CardContent className="space-y-4">
         {bases?.length ? (
-          <DraggableBaseGrid bases={bases} />
+          <BaseList baseIds={bases.map((base) => base.id)} />
         ) : (
           <div className="flex h-24 w-full items-center justify-center">
             {t('space:spaceIsEmpty')}
           </div>
+        )}
+
+        {collaborators.length > 0 && (
+          <InviteSpacePopover space={space}>
+            <div className="cursor-pointer">
+              <CollaboratorAvatars collaborators={collaborators} maxDisplay={15} />
+            </div>
+          </InviteSpacePopover>
         )}
       </CardContent>
     </Card>

@@ -6,6 +6,10 @@ extend(utc);
 extend(timezone);
 
 export * from './types';
+export * from './affiliate';
+export * from './attribution';
+export * from './consent';
+export * from './returning-user';
 export * from './array';
 export * from './asserts';
 export * from './convert';
@@ -16,4 +20,3 @@ export * from './formula';
 export * from './query';
 export * from './errors';
 export * from './auth';
-export * from './import';

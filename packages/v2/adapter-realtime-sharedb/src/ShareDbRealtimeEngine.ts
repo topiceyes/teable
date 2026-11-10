@@ -1,0 +1,201 @@
+import type {
+  DomainError,
+  IExecutionContext,
+  IRealtimeEngine,
+  RealtimeApplyChangeOptions,
+  RealtimeChange,
+  RealtimeDocId,
+  RealtimeEnsureOptions,
+} from '@teable/v2-core';
+import { domainError, RealtimeDocId as RealtimeDocIdValue } from '@teable/v2-core';
+import { inject, injectable } from '@teable/v2-di';
+import { err } from 'neverthrow';
+import type { Result } from 'neverthrow';
+
+import type { IComputeActivitySignalConfig } from './ComputeActivitySignal';
+import { v2ShareDbTokens } from './di/tokens';
+import type { IShareDbPresencePublisher } from './ShareDbPresencePublisher';
+import type { IShareDbOpPublisher, ShareDbOp } from './ShareDbPublisher';
+
+const v2ProjectionOpSourcePrefix = '@@v2-projection:';
+
+@injectable()
+export class ShareDbRealtimeEngine implements IRealtimeEngine {
+  constructor(
+    @inject(v2ShareDbTokens.publisher)
+    private readonly publisher: IShareDbOpPublisher,
+    @inject(v2ShareDbTokens.presence)
+    private readonly presence: IShareDbPresencePublisher,
+    @inject(v2ShareDbTokens.computeActivitySignal)
+    private readonly computeActivitySignal: IComputeActivitySignalConfig
+  ) {}
+
+  async ensure(
+    context: IExecutionContext,
+    docId: RealtimeDocId,
+    initial: unknown,
+    options?: RealtimeEnsureOptions
+  ): Promise<Result<void, DomainError>> {
+    const docIdResult = RealtimeDocIdValue.parse(docId);
+    if (docIdResult.isErr()) return err(docIdResult.error);
+
+    const { collection, docId: documentId } = docIdResult.value;
+    const op: ShareDbOp = {
+      create: {
+        type: 'json0',
+        data: initial,
+      },
+      del: undefined,
+      op: undefined,
+      src: this.toProjectionSource(context.requestId),
+      seq: 1,
+      v: 0,
+      m: {
+        ts: Date.now(),
+      },
+      c: collection,
+      d: documentId,
+    };
+
+    // An already persisted document cannot become a new member of any
+    // collection query, so the collection channel (query subscriptions, one
+    // getDocIdsByQuery poll per subscriber) has nothing to learn from this
+    // create; only doc subscribers still receive it, which lets a client that
+    // holds an empty doc heal itself.
+    const channels = options?.expectExisting
+      ? [`${collection}.${documentId}`]
+      : [collection, `${collection}.${documentId}`];
+    return this.publisher.publish(channels, op);
+  }
+
+  async applyChange(
+    context: IExecutionContext,
+    docId: RealtimeDocId,
+    change: RealtimeChange | ReadonlyArray<RealtimeChange>,
+    options?: RealtimeApplyChangeOptions
+  ): Promise<Result<void, DomainError>> {
+    const docIdResult = RealtimeDocIdValue.parse(docId);
+    if (docIdResult.isErr()) return err(docIdResult.error);
+
+    const { collection, docId: documentId } = docIdResult.value;
+
+    // Convert RealtimeChange to json0 operation
+    const changes = Array.isArray(change) ? change : [change];
+    if (changes.length === 0)
+      return err(domainError.validation({ message: 'No changes to apply' }));
+
+    const json0Op = changes.flatMap((item) => this.toJson0Op(item));
+
+    const op: ShareDbOp = {
+      create: undefined,
+      del: undefined,
+      op: json0Op,
+      src: this.toProjectionSource(context.requestId),
+      seq: 1,
+      v: options?.version ?? 0,
+      m: {
+        ts: Date.now(),
+      },
+      c: collection,
+      d: documentId,
+    };
+
+    const channels = [collection, `${collection}.${documentId}`];
+    return this.publisher.publish(channels, op);
+  }
+
+  private toJson0Op(change: RealtimeChange): unknown[] {
+    const path = [...change.path];
+
+    switch (change.type) {
+      case 'set': {
+        // json0 object replace: { p: path, od: oldValue, oi: newValue }
+        // `undefined` is not expressible in json0: it vanishes during JSON
+        // serialization, leaving an instruction-less `{ p }` component that
+        // crashes ot-json0 ("invalid / missing instruction in op") on every
+        // client applying the op. Normalize absent values to `null` instead.
+        const value = change.value === undefined ? null : change.value;
+        if (change.oldValue !== undefined) {
+          return [{ p: path, oi: value, od: change.oldValue }];
+        }
+        return [{ p: path, oi: value }];
+      }
+      case 'insert': {
+        // json0 list insert: { p: path.concat(index), li: value }
+        // `li` drops out of the wire component when the value is `undefined`,
+        // which leaves the same instruction-less `{ p }` the `set` branch
+        // normalizes, so absent values become `null` here as well.
+        const value = change.value === undefined ? null : change.value;
+        return [{ p: [...path, change.index], li: value }];
+      }
+      case 'delete': {
+        // json0 list delete: { p: path.concat(index), ld: value }
+        // For multiple deletes, we need multiple ops (delete from end to start to keep indices valid)
+        const ops: unknown[] = [];
+        for (let i = change.count - 1; i >= 0; i--) {
+          ops.push({ p: [...path, change.index + i], ld: true });
+        }
+        return ops;
+      }
+    }
+  }
+
+  async delete(
+    context: IExecutionContext,
+    docId: RealtimeDocId,
+    options?: RealtimeApplyChangeOptions
+  ): Promise<Result<void, DomainError>> {
+    const docIdResult = RealtimeDocIdValue.parse(docId);
+    if (docIdResult.isErr()) return err(docIdResult.error);
+
+    const { collection, docId: documentId } = docIdResult.value;
+    const op: ShareDbOp = {
+      create: undefined,
+      del: true,
+      op: undefined,
+      src: this.toProjectionSource(context.requestId),
+      seq: 1,
+      v: options?.version ?? 1,
+      m: {
+        ts: Date.now(),
+      },
+      c: collection,
+      d: documentId,
+    };
+
+    const channels = [collection, `${collection}.${documentId}`];
+    return this.publisher.publish(channels, op);
+  }
+
+  async invalidateCollection(
+    context: IExecutionContext,
+    collection: string,
+    change: RealtimeChange
+  ): Promise<Result<void, DomainError>> {
+    const op: ShareDbOp = {
+      create: undefined,
+      del: undefined,
+      op: this.toJson0Op(change),
+      src: this.toProjectionSource(context.requestId),
+      seq: 1,
+      v: 0,
+      m: {
+        ts: Date.now(),
+      },
+      c: collection,
+    };
+    return this.publisher.publish([collection], op);
+  }
+
+  async notifyTableComputeActivity(
+    _context: IExecutionContext,
+    tableId: string
+  ): Promise<Result<void, DomainError>> {
+    const channel = this.computeActivitySignal.resolveChannel(tableId);
+    return this.presence.publish(channel, [{ actionKey: this.computeActivitySignal.actionKey }]);
+  }
+
+  private toProjectionSource(requestId: string | undefined): string {
+    return `${v2ProjectionOpSourcePrefix}${requestId ?? 'unknown'}`;
+  }
+}

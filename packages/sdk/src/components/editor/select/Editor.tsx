@@ -1,27 +1,54 @@
 import { X } from '@teable/icons';
-import { Button, Popover, PopoverContent, PopoverTrigger } from '@teable/ui-lib';
-import classNames from 'classnames';
+import { Button, Popover, PopoverContent, PopoverTrigger, cn } from '@teable/ui-lib';
 import { keyBy } from 'lodash';
 import type { ForwardRefRenderFunction } from 'react';
-import { forwardRef, useImperativeHandle, useMemo, useRef, useState } from 'react';
+import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
+import { SelectTag } from '../../cell-value/cell-select/SelectTag';
+import { useModalRefElement } from '../../expand-record/useModalRefElement';
 import type { IEditorRef } from '../type';
 import type { ISelectEditorMain, ISelectValue } from './EditorMain';
 import { SelectEditorMain } from './EditorMain';
-import { SelectTag } from './SelectTag';
 
 const SelectEditorBase: ForwardRefRenderFunction<
   IEditorRef<string | string[] | undefined>,
-  ISelectEditorMain<boolean> & { onOptionAdd?: (name: string) => Promise<void> }
+  ISelectEditorMain<boolean>
 > = (props, ref) => {
   const { value, options = [], isMultiple, onChange, className, style, readonly } = props;
   const [open, setOpen] = useState(false);
   const selectRef = useRef<HTMLButtonElement>(null);
   const editorRef = useRef<IEditorRef<string | string[] | undefined>>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const modalRef = useModalRefElement();
 
   const optionsMap = useMemo(() => keyBy(options, 'value'), [options]);
-  const arrayValue = isMultiple ? (value as string[]) : value ? [value] : [];
+  const arrayValue = isMultiple
+    ? Array.isArray(value)
+      ? (value as string[])
+      : value
+        ? [value as string]
+        : []
+    : value
+      ? [value]
+      : [];
 
   const displayOptions = arrayValue?.map((value) => optionsMap[value as string]).filter(Boolean);
+
+  // Nested modal Popover sets ExpandRecord DialogContent to pointer-events:none
+  // (T7102). Dialog also preventDefaults interact-outside, so Radix dismiss
+  // cannot close the list — match DateEditor and listen in capture phase.
+  useEffect(() => {
+    if (!open) return;
+
+    const handlePointerDown = (e: PointerEvent) => {
+      const target = e.target as Node | null;
+      if (target && !contentRef.current?.contains(target) && !selectRef.current?.contains(target)) {
+        setOpen(false);
+      }
+    };
+
+    document.addEventListener('pointerdown', handlePointerDown, true);
+    return () => document.removeEventListener('pointerdown', handlePointerDown, true);
+  }, [open]);
 
   useImperativeHandle(ref, () => ({
     focus: () => editorRef.current?.focus?.(),
@@ -48,14 +75,14 @@ const SelectEditorBase: ForwardRefRenderFunction<
       variant="outline"
       role="combobox"
       aria-expanded={open}
-      className={classNames(
-        'w-full h-auto min-h-[40px] sm:min-h-[32px] flex flex-wrap justify-start hover:bg-transparent gap-2',
+      className={cn(
+        'w-full h-auto min-h-9 flex py-1 flex-wrap dark:bg-[color-mix(in_oklab,white_5%,hsl(var(--background)))] hover:border-primary/30 hover:bg-background dark:hover:bg-[color-mix(in_oklab,white_5%,hsl(var(--background)))] justify-start gap-1.5 px-2',
         className
       )}
     >
       {displayOptions?.map(({ value, label, backgroundColor, color }) => (
         <SelectTag
-          className="flex items-center"
+          className={cn('flex items-center', !readonly && 'pe-1.5')}
           key={value}
           label={label}
           color={color}
@@ -63,7 +90,8 @@ const SelectEditorBase: ForwardRefRenderFunction<
         >
           {!readonly && (
             <X
-              className="cursor-pointer opacity-50 hover:opacity-100"
+              className="size-[14px] shrink-0 cursor-pointer opacity-70 hover:opacity-100"
+              style={{ color: 'inherit' }}
               onClick={(e) => {
                 e.preventDefault();
                 onDelete(value);
@@ -80,11 +108,17 @@ const SelectEditorBase: ForwardRefRenderFunction<
       {readonly ? (
         triggerContent
       ) : (
-        <Popover open={open} onOpenChange={setOpen} modal>
+        <Popover open={open} onOpenChange={setOpen}>
           <PopoverTrigger ref={selectRef} asChild>
             {triggerContent}
           </PopoverTrigger>
-          <PopoverContent className="p-0" style={{ width: selectRef.current?.offsetWidth || 0 }}>
+          <PopoverContent
+            ref={contentRef}
+            container={modalRef.current}
+            className="p-0"
+            style={{ width: selectRef.current?.offsetWidth || 0 }}
+            onEscapeKeyDown={(e) => e.stopPropagation()}
+          >
             <SelectEditorMain ref={editorRef} {...props} onChange={onChangeInner} />
           </PopoverContent>
         </Popover>

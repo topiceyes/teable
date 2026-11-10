@@ -1,0 +1,164 @@
+import {
+  getFieldComputeBatchProgress,
+  computeReliabilitySchema,
+  publicComputeError,
+  type DomainError,
+  type IGetComputeActivityQueryInput,
+  type TableComputeActivitySnapshot,
+} from '@teable/v2-core';
+import { ok } from 'neverthrow';
+import type { Result } from 'neverthrow';
+import { z } from 'zod';
+
+import {
+  apiOkResponseDtoSchema,
+  type HttpErrorStatus,
+  type IApiErrorResponseDto,
+  type IApiOkResponseDto,
+  type IApiResponseDto,
+} from '../shared/http';
+import { fieldComputeMetaDtoSchema, tableComputeMetaDtoSchema } from './dto';
+
+export type IGetComputeActivityRequestDto = IGetComputeActivityQueryInput;
+
+export const computeActivityAnomalySchema = z.object({
+  fieldId: z.string(),
+  kind: z.enum(['failed', 'high_complexity', 'all_target_records', 'stale']),
+  message: z.string(),
+  estimatedComplexity: z.number().optional(),
+});
+
+export const computeActivityDiagnosticsSchema = z.object({
+  reliability: computeReliabilitySchema.optional(),
+  computeMode: z.literal('server'),
+  executionState: z.enum(['running', 'paused']).optional(),
+  activeFieldCount: z.number(),
+  queuedFieldCount: z.number(),
+  calculatingFieldCount: z.number(),
+  failedFieldCount: z.number(),
+  highComplexityFieldCount: z.number(),
+  anomalies: z.array(computeActivityAnomalySchema),
+  pause: z
+    .object({
+      effective: z.boolean(),
+      blockers: z.array(
+        z.object({
+          id: z.string(),
+          scopeType: z.enum(['space', 'base', 'table']),
+          scopeId: z.string(),
+          pausedAt: z.string(),
+          pausedBy: z.string().nullable(),
+          resumeAt: z.string().nullable(),
+          reason: z.string().nullable(),
+        })
+      ),
+      queuedTaskCount: z.number().int().nonnegative(),
+      oldestQueuedAt: z.string().nullable(),
+    })
+    .optional(),
+});
+
+export const getComputeActivityResponseDataSchema = z.object({
+  observedAt: z.string().datetime().optional(),
+  observationState: z.enum(['available', 'syncing', 'unavailable']).optional(),
+  tableId: z.string(),
+  baseId: z.string(),
+  table: tableComputeMetaDtoSchema
+    .extend({
+      generation: z.number().optional(),
+      updatedAt: z.string().optional(),
+    })
+    .nullable(),
+  fields: z.array(
+    fieldComputeMetaDtoSchema.extend({
+      fieldId: z.string(),
+      tableId: z.string().optional(),
+      baseId: z.string().optional(),
+      activeTaskCount: z.number().optional(),
+      processingTaskCount: z.number().optional(),
+      generation: z.number().optional(),
+      hasAllTargetRecords: z.boolean().optional(),
+      queuedAt: z.string().nullable().optional(),
+      updatedAt: z.string().optional(),
+      lastCompletedAt: z.string().nullable().optional(),
+      batchProgress: z
+        .object({
+          total: z.number().int().nonnegative(),
+          completed: z.number().int().nonnegative(),
+        })
+        .optional(),
+    })
+  ),
+  diagnostics: computeActivityDiagnosticsSchema,
+});
+
+export type IGetComputeActivityResponseDataDto = z.infer<
+  typeof getComputeActivityResponseDataSchema
+>;
+
+export type IGetComputeActivityResponseDto = IApiResponseDto<IGetComputeActivityResponseDataDto>;
+export type IGetComputeActivityOkResponseDto =
+  IApiOkResponseDto<IGetComputeActivityResponseDataDto>;
+export type IGetComputeActivityErrorResponseDto = IApiErrorResponseDto;
+
+export type IGetComputeActivityEndpointResult =
+  | { status: 200; body: IGetComputeActivityOkResponseDto }
+  | { status: HttpErrorStatus; body: IGetComputeActivityErrorResponseDto };
+
+export const getComputeActivityOkResponseSchema = apiOkResponseDtoSchema(
+  getComputeActivityResponseDataSchema
+);
+export { apiErrorResponseDtoSchema as getComputeActivityErrorResponseSchema } from '../shared/http';
+
+export const mapComputeActivitySnapshotToDto = (
+  snapshot: TableComputeActivitySnapshot
+): Result<IGetComputeActivityResponseDataDto, DomainError> => {
+  return ok({
+    observedAt: snapshot.observedAt,
+    observationState: snapshot.observationState,
+    tableId: snapshot.tableId,
+    baseId: snapshot.baseId,
+    table: snapshot.table
+      ? {
+          status: snapshot.table.status,
+          calculatingFieldCount: snapshot.table.calculatingFieldCount,
+          queuedFieldCount: snapshot.table.queuedFieldCount,
+          estimatedComplexity: snapshot.table.estimatedComplexity || undefined,
+          recentCompletions: snapshot.table.recentCompletions,
+          computeMode: 'server' as const,
+          generation: snapshot.table.generation,
+          updatedAt: snapshot.table.updatedAt,
+        }
+      : null,
+    fields: snapshot.fields.map((field) => ({
+      fieldId: field.fieldId,
+      tableId: field.tableId,
+      baseId: field.baseId,
+      status: field.status,
+      estimatedComplexity: field.estimatedComplexity || undefined,
+      estimatedDirtyRecords: field.estimatedDirtyRecords || undefined,
+      startedAt: field.startedAt ?? undefined,
+      lastDurationMs: field.lastDurationMs ?? undefined,
+      lastError: publicComputeError(field.lastError),
+      reliability: field.reliability,
+      activeTaskCount: field.activeTaskCount,
+      processingTaskCount: field.processingTaskCount,
+      generation: field.generation,
+      hasAllTargetRecords: field.hasAllTargetRecords,
+      queuedAt: field.queuedAt,
+      updatedAt: field.updatedAt,
+      lastCompletedAt: field.lastCompletedAt,
+      batchProgress: getFieldComputeBatchProgress(field),
+    })),
+    diagnostics: {
+      ...snapshot.diagnostics,
+      anomalies: snapshot.diagnostics.anomalies.map((item) =>
+        item.kind === 'failed'
+          ? { ...item, message: 'Computed results have not been updated' }
+          : item
+      ),
+      executionState: snapshot.diagnostics.executionState,
+      pause: snapshot.diagnostics.pause,
+    },
+  });
+};

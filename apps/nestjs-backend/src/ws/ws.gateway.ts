@@ -1,52 +1,248 @@
-import url from 'url';
-import { Logger } from '@nestjs/common';
-import type { OnGatewayConnection, OnGatewayDisconnect, OnGatewayInit } from '@nestjs/websockets';
-import { WebSocketGateway } from '@nestjs/websockets';
-import WebSocketJSONStream from '@teamwork/websocket-json-stream';
+import type http from 'node:http';
+import type { AdaptableWebSocket } from '@an-epiphany/websocket-json-stream';
+import { WebSocketJSONStream } from '@an-epiphany/websocket-json-stream';
+import type { OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
+import { HttpAdapterHost } from '@nestjs/core';
 import type { Request } from 'express';
-import type { Server } from 'ws';
-import { SessionHandleService } from '../features/auth/session/session-handle.service';
+import sockjs from 'sockjs';
+import { recordCompressionNegotiation } from '../share-db/metrics/compression-metrics';
+import { RealtimeMetricsService } from '../share-db/metrics/realtime-metrics.service';
 import { ShareDbService } from '../share-db/share-db.service';
-import { WsAuthService } from '../share-db/ws-auth.service';
+import { createSockjsServerOptions } from './sockjs-options';
 
-@WebSocketGateway({ path: '/socket', perMessageDeflate: true })
-export class WsGateway implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect {
-  private logger = new Logger(WsGateway.name);
+@Injectable()
+export class WsGateway implements OnModuleInit, OnModuleDestroy {
+  private readonly logger = new Logger(WsGateway.name);
+  private sockjsServer: sockjs.Server | null = null;
+  private readonly activeConnections = new Set<sockjs.Connection>();
+
+  // Track user → connections for session lifecycle metrics
+  private readonly userConnectionMap = new Map<string, Set<sockjs.Connection>>();
+  // Track connection → { userId, connectTime } for duration calculation
+  private readonly connectionMeta = new Map<
+    sockjs.Connection,
+    { userId: string; connectTime: number }
+  >();
 
   constructor(
     private readonly shareDb: ShareDbService,
-    private readonly wsAuthService: WsAuthService,
-    private readonly sessionHandleService: SessionHandleService
+    private readonly httpAdapterHost: HttpAdapterHost,
+    @Optional() private readonly realtimeMetrics?: RealtimeMetricsService
   ) {}
 
-  handleDisconnect() {
-    this.logger.log('ws:on:close');
-  }
+  onModuleInit() {
+    const httpServer = this.httpAdapterHost.httpAdapter.getHttpServer() as http.Server;
 
-  handleConnection(client: unknown) {
-    this.logger.log('ws:on:connection', client);
-  }
-
-  afterInit(server: Server) {
-    this.logger.log('WsGateway afterInit');
-    server.on('connection', async (webSocket, request: Request) => {
-      try {
-        const newUrl = new url.URL(request.url || '', 'https://example.com');
-        const shareId = newUrl.searchParams.get('shareId');
-        if (shareId) {
-          const cookie = request.headers.cookie;
-          await this.wsAuthService.checkShareCookie(shareId, cookie);
+    this.sockjsServer = sockjs.createServer(
+      createSockjsServerOptions((severity: string, message: string) => {
+        if (severity === 'error') {
+          this.logger.error(message);
+        } else if (severity === 'info') {
+          this.logger.log(message);
         } else {
-          const sessionId = await this.sessionHandleService.getSessionIdFromRequest(request);
-          await this.wsAuthService.checkSession(sessionId);
+          this.logger.debug(message);
         }
-        this.logger.log('ws:on:connection');
-        const stream = new WebSocketJSONStream(webSocket);
-        this.shareDb.listen(stream, request);
-      } catch (error) {
-        webSocket.send(JSON.stringify({ error }));
-        webSocket.close();
-      }
+      })
+    );
+
+    this.sockjsServer.on('connection', this.handleConnection);
+    this.sockjsServer.installHandlers(httpServer);
+    this.logger.log('WsGateway (SockJS) initialized');
+  }
+
+  private readonly handleConnection = (conn: sockjs.Connection) => {
+    if (!conn) return;
+
+    this.activeConnections.add(conn);
+    this.realtimeMetrics?.recordConnectionOpen();
+    this.logger.log(`sockjs:on:connection (active: ${this.activeConnections.size})`);
+
+    // Handle connection close to clean up tracking
+    conn.on('close', () => {
+      this.activeConnections.delete(conn);
+      this.realtimeMetrics?.recordConnectionClose();
+
+      // Track user session end
+      this.handleUserDisconnect(conn);
+
+      this.logger.log(`sockjs:on:close (active: ${this.activeConnections.size})`);
     });
+
+    try {
+      const stream = new WebSocketJSONStream(conn as unknown as AdaptableWebSocket, {
+        adapterType: 'sockjs-node',
+      });
+
+      // Extract request with headers (including cookies for auth)
+      const request = this.getRequestFromConnection(conn);
+
+      // Records whether Sec-WebSocket-Extensions survived whatever sits in front
+      // of this pod; `offer_missing` on a websocket connection means compression
+      // is silently off for that client.
+      const negotiation = recordCompressionNegotiation(
+        conn.protocol,
+        request.headers?.['sec-websocket-extensions'] as string | undefined
+      );
+      if (negotiation === 'offer_missing') {
+        this.logger.debug(
+          `sockjs:on:connection no permessage-deflate offer reached the pod ` +
+            `(transport: ${conn.protocol}) — check for a proxy stripping Sec-WebSocket-Extensions`
+        );
+      }
+
+      this.shareDb.listen(stream, request);
+
+      // After listen, the ShareDB agent will have custom.userId set by auth middleware
+      // We defer userId binding to allow the auth middleware to resolve
+      this.deferUserBinding(conn);
+    } catch (error) {
+      this.logger.error('Connection error', error);
+      this.realtimeMetrics?.recordConnectionError();
+      conn.write(JSON.stringify({ error }));
+      conn.close();
+      this.activeConnections.delete(conn);
+    }
+  };
+
+  /**
+   * Defer user binding since ShareDB auth middleware resolves userId asynchronously.
+   */
+  private deferUserBinding(conn: sockjs.Connection) {
+    setTimeout(() => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const session = (conn as any)?._session;
+      const userId = session?.agent?.custom?.userId;
+
+      if (userId) {
+        this.handleUserConnect(conn, userId);
+      }
+    }, 100);
+  }
+
+  private handleUserConnect(conn: sockjs.Connection, userId: string) {
+    this.connectionMeta.set(conn, { userId, connectTime: Date.now() });
+
+    let userConns = this.userConnectionMap.get(userId);
+    if (!userConns) {
+      userConns = new Set();
+      this.userConnectionMap.set(userId, userConns);
+
+      // First connection for this user → OTEL session metric
+      this.realtimeMetrics?.recordSessionStart();
+    }
+    userConns.add(conn);
+  }
+
+  private handleUserDisconnect(conn: sockjs.Connection) {
+    const meta = this.connectionMeta.get(conn);
+    this.connectionMeta.delete(conn);
+
+    if (!meta) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const userId = (conn as any)?._session?.agent?.custom?.userId;
+      if (!userId) return;
+      const userConns = this.userConnectionMap.get(userId);
+      if (userConns) {
+        userConns.delete(conn);
+        if (userConns.size === 0) {
+          this.userConnectionMap.delete(userId);
+          this.realtimeMetrics?.recordSessionEnd();
+        }
+      }
+      return;
+    }
+
+    const { userId } = meta;
+    const userConns = this.userConnectionMap.get(userId);
+    if (!userConns) return;
+
+    userConns.delete(conn);
+
+    if (userConns.size === 0) {
+      this.userConnectionMap.delete(userId);
+      this.realtimeMetrics?.recordSessionEnd();
+    }
+  }
+
+  /**
+   * Extract HTTP request from SockJS connection.
+   *
+   * SockJS transports provide request access differently:
+   * - XHR (xhr-polling, xhr-streaming): Full request at _session.recv.request
+   * - WebSocket: Request stored in faye-websocket driver at _session.recv.ws._driver._request
+   *
+   * @see https://github.com/sockjs/sockjs-node/blob/main/lib/transport/response-receiver.js
+   * @see https://github.com/sockjs/sockjs-node/blob/main/lib/transport/websocket.js
+   * @see https://github.com/faye/faye-websocket-node (uses websocket-driver internally)
+   */
+  private getRequestFromConnection(conn: sockjs.Connection): Request {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const recv = (conn as any)?._session?.recv;
+
+    // XHR transports: ResponseReceiver stores full request with cookies
+    if (recv?.request) {
+      return recv.request as Request;
+    }
+
+    // WebSocket transport: FayeWebsocket stores request in driver._request
+    // Path: recv.ws (FayeWebsocket) -> _driver (Hybi/Base) -> _request (IncomingMessage)
+    const wsRequest = recv?.ws?._driver?._request;
+    if (wsRequest) {
+      return wsRequest as Request;
+    }
+
+    // Fallback: use connection's url and headers (no cookies)
+    this.logger.warn(
+      `Could not find original request for connection (protocol: ${conn.protocol}), falling back to filtered headers`
+    );
+    return {
+      url: conn.url || '/socket',
+      headers: conn.headers || {},
+    } as unknown as Request;
+  }
+
+  getActiveUserCount(): number {
+    return this.userConnectionMap.size;
+  }
+
+  getUserConnectionCount(userId: string): number {
+    return this.userConnectionMap.get(userId)?.size ?? 0;
+  }
+
+  async onModuleDestroy() {
+    try {
+      this.logger.log('Starting graceful shutdown...');
+
+      // Terminate all active connections
+      for (const conn of this.activeConnections) {
+        try {
+          conn.close();
+        } catch {
+          // Ignore errors during connection close
+        }
+      }
+      this.activeConnections.clear();
+      this.userConnectionMap.clear();
+      this.connectionMeta.clear();
+
+      // Close ShareDb
+      await new Promise<void>((resolve, reject) => {
+        this.shareDb.close((err) => {
+          if (err) {
+            reject(err);
+          } else {
+            resolve();
+          }
+        });
+      });
+
+      // Clean up sockjs server reference
+      this.sockjsServer = null;
+
+      this.logger.log('Graceful shutdown completed');
+    } catch (err) {
+      this.logger.error('Module close error: ' + (err as Error).message, (err as Error)?.stack);
+    }
   }
 }

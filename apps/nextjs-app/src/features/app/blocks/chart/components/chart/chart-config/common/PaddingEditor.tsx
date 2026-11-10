@@ -1,0 +1,85 @@
+import { Input, Label } from '@teable/ui-lib';
+import { useTranslation } from 'next-i18next';
+import { useState } from 'react';
+import type { IChartPadding } from '../../../../types';
+
+export const PaddingEditor = (props: {
+  value?: IChartPadding;
+  onChange: (value?: IChartPadding) => void;
+}) => {
+  const { value, onChange } = props;
+  const { t } = useTranslation('chart');
+  const [padding, setPadding] = useState(value);
+  return (
+    <div className="flex flex-col gap-2 p-0.5">
+      <div className="flex items-center gap-2">
+        <Label className="w-14 text-end text-xs">{t('form.padding.top')}</Label>
+        <Input
+          type="number"
+          className="text-[13px]"
+          size="sm"
+          value={padding?.top || ''}
+          onBlur={() => onChange(padding)}
+          onChange={(e) => {
+            const number = Number.parseFloat(e.target.value);
+            setPadding({
+              ...padding,
+              top: Number.isNaN(number) ? undefined : number,
+            });
+          }}
+        />
+      </div>
+      <div className="flex items-center gap-2">
+        <Label className="w-14 text-end text-xs">{t('form.padding.right')}</Label>
+        <Input
+          type="number"
+          className="text-[13px]"
+          size="sm"
+          value={padding?.right || ''}
+          onBlur={() => onChange(padding)}
+          onChange={(e) => {
+            const number = Number.parseFloat(e.target.value);
+            setPadding({
+              ...padding,
+              right: Number.isNaN(number) ? undefined : number,
+            });
+          }}
+        />
+      </div>
+      <div className="flex items-center gap-2">
+        <Label className="w-14 text-end text-xs">{t('form.padding.bottom')}</Label>
+        <Input
+          type="number"
+          className="text-[13px]"
+          size="sm"
+          value={padding?.bottom || ''}
+          onBlur={() => onChange(padding)}
+          onChange={(e) => {
+            const number = Number.parseFloat(e.target.value);
+            setPadding({
+              ...padding,
+              bottom: Number.isNaN(number) ? undefined : number,
+            });
+          }}
+        />
+      </div>
+      <div className="flex items-center gap-2">
+        <Label className="w-14 text-end text-xs">{t('form.padding.left')}</Label>
+        <Input
+          type="number"
+          className="text-[13px]"
+          size="sm"
+          value={padding?.left || ''}
+          onBlur={() => onChange(padding)}
+          onChange={(e) => {
+            const number = Number.parseFloat(e.target.value);
+            setPadding({
+              ...padding,
+              left: Number.isNaN(number) ? undefined : number,
+            });
+          }}
+        />
+      </div>
+    </div>
+  );
+};

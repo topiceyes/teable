@@ -1,15 +1,22 @@
 import { useTableId, useTables } from '@teable/sdk';
 import { TableListItem } from './TableListItem';
+import { useTableHref } from './useTableHref';
 
 export const NoDraggableList: React.FC = () => {
   const tables = useTables();
   const tableId = useTableId();
+  const { hrefMap: tableHrefMap } = useTableHref();
 
   return (
     <ul>
       {tables.map((table) => (
         <li key={table.id}>
-          <TableListItem table={table} isActive={table.id === tableId} />
+          <TableListItem
+            table={table}
+            href={tableHrefMap[table.id]}
+            isActive={table.id === tableId}
+            className="cursor-pointer"
+          />
         </li>
       ))}
     </ul>

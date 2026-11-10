@@ -1,0 +1,136 @@
+/* eslint-disable @typescript-eslint/naming-convention */
+import { Kysely, PostgresDialect } from 'kysely';
+import type * as Pg from 'pg';
+import { createCancellablePool } from './cancellablePool';
+import type { PostgresProtocolConnectionConstructor } from './cancelRequest';
+import type { IV2PostgresDbConfig } from './config';
+
+// Use webpack's special require that bypasses bundling, falling back to dynamic import
+// This is needed because webpack transforms dynamic imports in ways that bypass
+// OpenTelemetry's module instrumentation (require-in-the-middle).
+// By using native require, we ensure pg is properly instrumented for tracing.
+declare const __non_webpack_require__: NodeRequire | undefined;
+const useNativeRequire = typeof __non_webpack_require__ !== 'undefined';
+
+export const loadPg = async (): Promise<typeof Pg> => {
+  if (useNativeRequire) {
+    // In webpack environment, use native require to ensure OTel instrumentation works
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return __non_webpack_require__!('pg') as any;
+  }
+  // In non-webpack environment (playground, tests), use standard import
+  return import('pg');
+};
+
+export interface IV2PostgresDbDependencies {
+  pool?: Pg.Pool;
+}
+
+const createPgDb = async <DB>(
+  config: IV2PostgresDbConfig,
+  dependencies: IV2PostgresDbDependencies
+): Promise<Kysely<DB>> => {
+  const connectionString = config.pg.connectionString;
+  if (!connectionString) {
+    throw new Error('Missing pg.connectionString');
+  }
+
+  // Use loadPg to ensure OTel instrumentation works in webpack environment
+  const pg = await loadPg();
+  const Pool = pg.Pool ?? (hasPgDefault(pg) ? pg.default.Pool : undefined);
+  if (!Pool) {
+    throw new Error('Missing pg.Pool');
+  }
+
+  const poolOptions = resolvePoolOptions(config);
+  const pool = dependencies.pool ?? new Pool(poolOptions);
+  if (!dependencies.pool) {
+    pool.on('error', handlePgPoolError);
+  }
+  const Connection = pg.Connection ?? (hasPgDefault(pg) ? pg.default.Connection : undefined);
+  if (!Connection) throw new Error('Missing pg.Connection');
+  const dialectPool = createCancellablePool(
+    pool,
+    Connection as unknown as PostgresProtocolConnectionConstructor,
+    !dependencies.pool
+  );
+
+  const db = new Kysely<DB>({
+    dialect: new PostgresDialect({
+      pool: dialectPool,
+    }),
+  });
+  return config.pg.schema ? db.withSchema(config.pg.schema) : db;
+};
+
+export const createV2PostgresDb = async <DB = unknown>(
+  config: IV2PostgresDbConfig,
+  dependencies: IV2PostgresDbDependencies = {}
+): Promise<Kysely<DB>> => {
+  return createPgDb<DB>(config, dependencies);
+};
+
+type PgDefaultExport = {
+  Pool: typeof Pg.Pool;
+  Connection: typeof Pg.Connection;
+};
+
+export const hasPgDefault = (
+  value: typeof Pg
+): value is typeof Pg & {
+  default: PgDefaultExport;
+} => {
+  return 'default' in value && !!value.default && 'Pool' in value.default;
+};
+
+type PgPoolOptions = {
+  connectionString: string;
+  max?: number;
+  idleTimeoutMillis?: number;
+  connectionTimeoutMillis?: number;
+  maxUses?: number;
+  allowExitOnIdle?: boolean;
+};
+
+type PgPoolError = Error & { code?: string };
+
+const ignoredPgPoolErrorCodes = new Set(['57P01', '57P02']);
+
+export const shouldIgnorePgPoolError = (error: unknown): boolean => {
+  if (!(error instanceof Error)) return false;
+  const code = (error as PgPoolError).code;
+  return typeof code === 'string' && ignoredPgPoolErrorCodes.has(code);
+};
+
+export const handlePgPoolError = (error: unknown): void => {
+  if (shouldIgnorePgPoolError(error)) {
+    return;
+  }
+  console.error('[v2-adapter-db-postgres-pg] Unexpected idle pg pool error', error);
+};
+
+const resolvePoolOptions = (config: IV2PostgresDbConfig): PgPoolOptions => {
+  const { connectionString, pool } = config.pg;
+  const poolOptions: PgPoolOptions = { connectionString, ...pool };
+
+  // Align with v1: if connection_limit is present in the DSN, use it as pool max.
+  if (poolOptions.max == null) {
+    const maxFromDsn = readConnectionLimit(connectionString);
+    poolOptions.max = maxFromDsn ?? 20;
+  }
+
+  return poolOptions;
+};
+
+const readConnectionLimit = (connectionString: string): number | undefined => {
+  try {
+    const url = new URL(connectionString);
+    const value = url.searchParams.get('connection_limit');
+    if (!value) return undefined;
+    const parsed = Number.parseInt(value, 10);
+    if (!Number.isFinite(parsed) || parsed <= 0) return undefined;
+    return parsed;
+  } catch {
+    return undefined;
+  }
+};

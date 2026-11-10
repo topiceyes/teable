@@ -1,43 +1,108 @@
 import { dehydrate, QueryClient } from '@tanstack/react-query';
+import { Role } from '@teable/core';
 import { ReactQueryKeys } from '@teable/sdk';
 import type { GetServerSideProps } from 'next';
 import type { ReactElement } from 'react';
 import { SpaceInnerPage } from '@/features/app/blocks/space';
-import { SpaceLayout } from '@/features/app/layouts/SpaceLayout';
+import { SpaceInnerLayout } from '@/features/app/layouts/SpaceInnerLayout';
+import { settingConfig } from '@/features/i18n/setting.config';
 import { spaceConfig } from '@/features/i18n/space.config';
+import ensureLogin from '@/lib/ensureLogin';
 import { getTranslationsProps } from '@/lib/i18n';
 import type { NextPageWithLayout } from '@/lib/type';
 import withAuthSSR from '@/lib/withAuthSSR';
+import withEnv from '@/lib/withEnv';
 
 const Node: NextPageWithLayout = () => <SpaceInnerPage />;
-export const getServerSideProps: GetServerSideProps = withAuthSSR(async (context, ssrApi) => {
-  const { spaceId } = context.query;
-  const queryClient = new QueryClient();
+export const getServerSideProps: GetServerSideProps = withEnv(
+  ensureLogin(
+    withAuthSSR(async (context, ssrApi) => {
+      const { spaceId } = context.query;
+      const queryClient = new QueryClient();
 
-  await queryClient.fetchQuery({
-    queryKey: ['space', spaceId as string],
-    queryFn: ({ queryKey }) => ssrApi.getSpaceById(queryKey[1]),
-  });
+      // Fetch space info and base list first to check if auto-creation is needed
+      const [space, baseList] = await Promise.all([
+        queryClient.fetchQuery({
+          queryKey: ReactQueryKeys.space(spaceId as string),
+          queryFn: ({ queryKey }) => ssrApi.getSpaceById(queryKey[1]),
+        }),
+        queryClient.fetchQuery({
+          queryKey: ReactQueryKeys.baseAll(),
+          queryFn: () => ssrApi.getBaseList(),
+        }),
+        queryClient.fetchQuery({
+          queryKey: ReactQueryKeys.recentlyBase(),
+          queryFn: () => ssrApi.getRecentlyBase(),
+        }),
+      ]);
 
-  await queryClient.fetchQuery({
-    queryKey: ['base-list', spaceId as string],
-    queryFn: ({ queryKey }) => ssrApi.getBaseListBySpaceId(queryKey[1]),
-  });
+      // Check if user is owner and space has no bases
+      const basesInSpace = baseList.filter((base) => base.spaceId === spaceId);
+      const isOwner = space.role === Role.Owner;
 
-  await queryClient.fetchQuery({
-    queryKey: ReactQueryKeys.spaceCollaboratorList(spaceId as string),
-    queryFn: ({ queryKey }) => ssrApi.getSpaceCollaboratorList(queryKey[1]),
-  });
+      // Check if this is a template apply request - skip auto-create if so
+      const { action, tid } = context.query;
+      const isTemplateApply = action === 'createFromTemplate' && tid;
 
-  return {
-    props: {
-      dehydratedState: dehydrate(queryClient),
-      ...(await getTranslationsProps(context, spaceConfig.i18nNamespaces)),
-    },
-  };
-});
+      // If owner enters an empty space, auto-create a base and redirect
+      // Skip auto-create if template apply is requested
+      if (isOwner && basesInSpace.length === 0 && !isTemplateApply) {
+        const newBase = await ssrApi.createBase({
+          spaceId: spaceId as string,
+        });
+        const queryString = context.req.url?.split('?')[1];
+        const baseDest = queryString ? `/base/${newBase.id}?${queryString}` : `/base/${newBase.id}`;
+        return {
+          redirect: {
+            destination: baseDest,
+            permanent: false,
+          },
+        };
+      }
+
+      await Promise.all([
+        queryClient.fetchQuery({
+          queryKey: ReactQueryKeys.spaceUniqueCollaboratorList(spaceId as string, {
+            skip: 0,
+            take: 30,
+            orderBy: 'asc',
+          }),
+          queryFn: ({ queryKey }) =>
+            ssrApi.getSpaceUniqueCollaboratorList(queryKey[1], queryKey[2]),
+        }),
+
+        queryClient.fetchQuery({
+          queryKey: ReactQueryKeys.spaceList(),
+          queryFn: () => ssrApi.getSpaceList(),
+        }),
+
+        queryClient.fetchQuery({
+          queryKey: ReactQueryKeys.getPublicSetting(),
+          queryFn: () => ssrApi.getPublicSetting(),
+        }),
+      ]);
+
+      if (process.env.NEXT_BUILD_ENV_EDITION?.toUpperCase() === 'CLOUD') {
+        await queryClient.fetchQuery({
+          queryKey: ReactQueryKeys.subscriptionSummary(spaceId as string),
+          queryFn: ({ queryKey }) => ssrApi.getSubscriptionSummary(queryKey[1]),
+        });
+      }
+
+      return {
+        props: {
+          ...(await getTranslationsProps(context, [
+            ...new Set([...spaceConfig.i18nNamespaces, ...settingConfig.i18nNamespaces]),
+          ])),
+          dehydratedState: dehydrate(queryClient),
+        },
+      };
+    })
+  )
+);
 
 Node.getLayout = function getLayout(page: ReactElement, pageProps) {
-  return <SpaceLayout {...pageProps}>{page}</SpaceLayout>;
+  return <SpaceInnerLayout {...pageProps}>{page}</SpaceInnerLayout>;
 };
+
 export default Node;

@@ -5,7 +5,7 @@ import { FieldType, DbFieldType, CellValueType } from '../constant';
 import { FieldCore } from '../field';
 import type { ITimeZoneString } from '../formatting';
 import { DateFormattingPreset, defaultDatetimeFormatting, TimeFormatting } from '../formatting';
-import type { IDateFieldOptions } from './date.field';
+import type { IDateFieldOptions } from './date-option.schema';
 import { DateFieldCore } from './date.field';
 
 // eslint-disable-next-line @typescript-eslint/naming-convention
@@ -65,11 +65,100 @@ describe('DateFieldCore', () => {
     ).toBe('2023/06/19 06:50, 2023/06/19 06:50');
   });
 
+  it('should fallback to default formatting when formatting is missing', () => {
+    const fieldWithoutFormatting = plainToInstance(DateFieldCore, {
+      ...json,
+      options: {},
+    });
+
+    const formatted = fieldWithoutFormatting.cellValue2String('2023-06-19T06:50:48.017Z');
+    expect(formatted).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(() => fieldWithoutFormatting.convertStringToCellValue('2023-06-19')).not.toThrow();
+  });
+
   it('should convert string to cellValue', () => {
     expect(field.convertStringToCellValue('2023/06/19 06:50')).toBe('2023-06-19T06:50:00.000Z');
     expect(field.convertStringToCellValue('abc')).toBeNull();
     expect(lookupField.convertStringToCellValue('2023/06/19 06:50')).toBeNull();
     expect(lookupField.convertStringToCellValue('abc')).toBeNull();
+    expect(field.convertStringToCellValue('2023/1/13 06:50')).toBe('2023-01-13T06:50:00.000Z');
+
+    // european and us date format
+    const europeanField = plainToInstance(DateFieldCore, {
+      ...json,
+      options: {
+        formatting: {
+          date: DateFormattingPreset.European,
+          time: TimeFormatting.Hour24,
+          timeZone: DEFAULT_TIME_ZONE,
+        },
+        defaultValue: 'now',
+      },
+    });
+    expect(europeanField.convertStringToCellValue('5/1/2024')).toBe('2024-01-05T00:00:00.000Z');
+    const usField = plainToInstance(DateFieldCore, {
+      ...json,
+      options: {
+        formatting: {
+          date: DateFormattingPreset.US,
+          time: TimeFormatting.Hour24,
+          timeZone: DEFAULT_TIME_ZONE,
+        },
+        defaultValue: 'now',
+      },
+    });
+    expect(usField.convertStringToCellValue('5/1/2024 06:50')).toBe('2024-05-01T06:50:00.000Z');
+  });
+
+  it('should parse text to date with Chinese date format', () => {
+    const fieldWithAsian = plainToInstance(DateFieldCore, {
+      ...json,
+      options: {
+        formatting: {
+          date: 'YYYY 年 M 月 D 日',
+          time: TimeFormatting.None,
+          timeZone: 'Asia/Shanghai',
+        },
+      },
+    });
+    expect(fieldWithAsian.convertStringToCellValue('2025-10-12 11:17')).toBe(
+      '2025-10-12T03:17:00.000Z'
+    );
+    expect(fieldWithAsian.convertStringToCellValue('2025 年 10 月 12 日')).toBe(
+      '2025-10-11T16:00:00.000Z'
+    );
+  });
+
+  it('should parse single-digit month/day with seconds', () => {
+    const fieldWithAsian = plainToInstance(DateFieldCore, {
+      ...json,
+      options: {
+        formatting: {
+          date: DateFormattingPreset.Asian,
+          time: TimeFormatting.Hour24,
+          timeZone: 'Asia/Shanghai',
+        },
+      },
+    });
+    expect(fieldWithAsian.convertStringToCellValue('2025/7/31 14:15:32')).toBe(
+      '2025-07-31T06:15:32.000Z'
+    );
+  });
+
+  it('should parse single-digit month/day with seconds', () => {
+    const fieldWithAsian = plainToInstance(DateFieldCore, {
+      ...json,
+      options: {
+        formatting: {
+          date: DateFormattingPreset.Asian,
+          time: TimeFormatting.None,
+          timeZone: 'Asia/Shanghai',
+        },
+      },
+    });
+    expect(fieldWithAsian.convertStringToCellValue('2025/7/31 14:15:32')).toBe(
+      '2025-07-31T06:15:32.000Z'
+    );
   });
 
   it('should repair invalid value', () => {
@@ -82,20 +171,24 @@ describe('DateFieldCore', () => {
   it('should valid cellValue', () => {
     const date = new Date();
     const cellValue = date.toISOString();
+    const cellValueWithoutMs = '2026-01-06T00:00:00+00:00';
     const lookupFieldOne = plainToInstance(DateFieldCore, {
       ...json,
       lookupJson,
       isMultipleCellValue: false,
     });
     expect(field.validateCellValue(cellValue).success).toBe(true);
+    expect(field.validateCellValue(cellValueWithoutMs).success).toBe(true);
     expect(field.validateCellValue(date.getTime()).success).toBe(false);
     expect(field.validateCellValue('xxx').success).toBe(false);
 
     expect(lookupField.validateCellValue([cellValue]).success).toBe(true);
+    expect(lookupField.validateCellValue([cellValueWithoutMs]).success).toBe(true);
     expect(lookupField.validateCellValue(cellValue).success).toBe(false);
     expect(lookupField.validateCellValue([{ id: 'actxxx' }]).success).toBe(false);
 
     expect(lookupFieldOne.validateCellValue(cellValue).success).toBe(true);
+    expect(lookupFieldOne.validateCellValue(cellValueWithoutMs).success).toBe(true);
   });
 
   describe('validateOptions', () => {

@@ -1,0 +1,2072 @@
+{
+  "operationPreview": {
+    "copySource": "Copy from: {{names}}",
+    "title": "What will change",
+    "deleteFieldTitle": "Delete field",
+    "deleteTableTitle": "Delete table",
+    "copyTableTitle": "Copy table",
+    "copyBaseTitle": "Copy project",
+    "changedEffectsTitle": "What else changes",
+    "preservedTitle": "Stays connected",
+    "loading": "Loading details…",
+    "failed": "The preview could not be loaded. Retry before confirming.",
+    "blockedTitle": "This operation cannot proceed",
+    "emptyEffects": "Impact details are unavailable.",
+    "copyStructureDetail": "Copy fields and views",
+    "copyWithRecordsDetail": "Copy fields, views and records",
+    "copyStructureOnlyDetail": "Copy fields and views without records",
+    "moveToTrash": "Move to Trash; it can be restored while retained.",
+    "permanentDelete": "Permanently delete this table. It cannot be restored from Trash.",
+    "relatedUnknown": "Some affected resource details are unavailable.",
+    "coverageTitle": "Some impacts are unconfirmed · View scope",
+    "coverageUnknown": "Not fully checked: {{scopes}}.",
+    "coverageSeparator": ", ",
+    "resourceCoverageUnknown": "related-resource details",
+    "executionCoverageUnknown": "execution-time effects",
+    "uncertaintyDetail": "other effects",
+    "recordCountUnknown": "record count",
+    "retentionUnknown": "The Trash retention period is not checked.",
+    "storageUnknown": "Storage impact is not checked.",
+    "retentionStorageUnknown": "The Trash retention period and storage impact are not checked.",
+    "inTables": "In table: {{names}}",
+    "affectedFields": "Affected fields:",
+    "affectedViews": "Affected views:",
+    "labels": {
+      "tables": "Tables",
+      "fields": "Fields",
+      "views": "Views",
+      "records": "Records"
+    },
+    "quantity": {
+      "estimate": "About {{value}}",
+      "range": "{{lower}}–{{upper}} (estimated)",
+      "atLeast": "At least {{value}} (estimated)",
+      "atMost": "Up to {{value}} (estimated)",
+      "expected": "About {{value}} expected",
+      "unknown": "Count unavailable"
+    },
+    "messages": {
+      "fieldDeleted": "Delete this field and its values in all records",
+      "symmetricLinkRemovedDetail": "Delete the corresponding two-way link field",
+      "fieldDependenciesChangedDetail": "Update dependent fields; final values are not specified",
+      "fieldViewsChangedDetail": "Update view settings after deleting the field",
+      "fieldMetadataMissingDetail": "Some cross-table impacts could not be checked.",
+      "crossSpaceBlocked": "This table has links to another space and cannot be copied here. Remove those links or choose a destination that supports them.",
+      "destinationBlocked": "This copy is not allowed with the current selections. Review the destination and your access, or ask a space owner for help.",
+      "restrictedCopy": "This project has restricted permissions that prevent copying. Ask a project owner for help.",
+      "crossDatabaseRecordsBlocked": "Records cannot be copied to this destination. Turn off record copying or choose another destination.",
+      "primaryFieldBlocked": "The primary field cannot be deleted. Choose another field.",
+      "genericBlocked": "This operation cannot proceed with the current selections. Review them or ask a space owner for help.",
+      "linksConvertedDetail": "Convert linked fields to text; links to the deleted table will be lost",
+      "copyLinksConverted": "Convert linked fields to text in the copy; original record links will be lost",
+      "crossSpaceConvertedDetail": "Convert cross-space links to text in the copy",
+      "linksDisconnectedDetail": "Convert fields depending on unselected tables to text; links and calculations will be lost",
+      "linksPreservedDetail": "Keep links to the original tables in this space",
+      "selfLinksRemapped": "Point self-links to the copied table",
+      "dependentFieldsError": "Dependent fields will stop calculating",
+      "dependentFieldsUpdatedDetail": "Update dependent fields; final values are not specified",
+      "alreadyTrashed": "This table is already in Trash.",
+      "unknownLinksDetail": "Some linked tables could not be classified; whether their links are kept or converted is unknown.",
+      "truncatedEffectsDetail": "Only part of the affected-resource list is shown."
+    }
+  },
+  "actions": {
+    "title": "дії",
+    "add": "Додати",
+    "save": "Зберегти",
+    "doNotSave": "Не зберігати",
+    "submit": "Надіслати",
+    "confirm": "Підтвердити",
+    "continue": "Продовжити",
+    "close": "Закрити",
+    "edit": "Редагувати",
+    "fill": "Заповнити",
+    "update": "Оновити",
+    "create": "Створити",
+    "delete": "Видалити",
+    "clear": "Очистити",
+    "cancel": "Скасування",
+    "undo": "Скасувати",
+    "zoomIn": "Збільшити",
+    "zoomOut": "Зменшити",
+    "back": "Назад",
+    "download": "Завантажити",
+    "remove": "Прибрати",
+    "removeConfig": "Вилучити конфігурацію",
+    "retry": "Повторити",
+    "saveSucceed": "Збереження успішне!",
+    "submitSucceed": "Надсилання успішне!",
+    "editSucceed": "Редагування успішне!",
+    "updateSucceed": "Оновлення успішне!",
+    "deleteSucceed": "Видалення успішне!",
+    "resetSucceed": "Очищення кошика успішно!",
+    "restoreSucceed": "Відновлення успішно!",
+    "loading": "Завантаження...",
+    "refreshPage": "Оновити сторінку",
+    "yesDelete": "Так, видалити",
+    "rename": "Перейменувати",
+    "duplicate": "Дублювати",
+    "export": "Експорт",
+    "import": "Імпорт",
+    "change": "Змінити",
+    "upgrade": "Оновити",
+    "upgradeToLevel": "Оновити до {{level}}",
+    "search": "Пошук",
+    "loadMore": "Завантажити більше",
+    "collapseSidebar": "Згорнути бічну панель",
+    "restore": "Відновити",
+    "permanentDelete": "Видалити назавжди",
+    "globalSearch": "Глобальний пошук",
+    "fieldSearch": "Пошук за полем",
+    "tableIndex": "Індекс",
+    "showAllRow": "Показати всі рядки",
+    "hideNotMatchRow": "Приховати рядки без збігу",
+    "more": "Більше",
+    "expand": "Розгорнути",
+    "view": "Переглянути",
+    "preview": "Попередній перегляд",
+    "viewAndEdit": "Переглянути та редагувати",
+    "deleteTip": "Ви впевнені, що хочете видалити «{{name}}»?",
+    "move": "Перемістити в",
+    "turnOn": "Увімкнути",
+    "exit": "Вийти",
+    "next": "Наступна",
+    "previous": "Попередня",
+    "select": "Вибрати",
+    "refresh": "Оновити",
+    "login": "Увійти",
+    "useTemplate": "Використати шаблон",
+    "copyLink": "Копіювати посилання",
+    "openLink": "Відкрити посилання",
+    "backToSpace": "Назад до простору",
+    "switchBase": "Змінити проєкт",
+    "collapse": "Згорнути",
+    "viewDetails": "Переглянути деталі",
+    "getMore": "Отримати більше",
+    "copySuccess": "Копіювання успішне",
+    "share": "Поділитися"
+  },
+  "quickAction": {
+    "title": "Швидкі дії",
+    "placeHolder": "Введіть команду або виконайте пошук..."
+  },
+  "commandPalette": {
+    "title": "Палітра команд",
+    "placeholder": "Пошук ресурсів або команд…",
+    "aiPlaceholder": "Знайдіть ресурс, виконайте команду або запитайте Cuppy…",
+    "commandsPlaceholder": "Пошук команд…",
+    "commands": "Команди",
+    "askCuppy": "Запитати Cuppy",
+    "askQuery": "Запитати Cuppy: {{query}}",
+    "aiHint": "Використовує поточний проєкт, таблицю та подання",
+    "recent": "Нещодавно відкриті",
+    "noRecent": "Тут з’являться нещодавно відкриті ресурси та подання.",
+    "actions": "Швидкі дії",
+    "results": "Результати",
+    "noResults": "За запитом «{{query}}» нічого не знайдено",
+    "noResultsHint": "Спробуйте іншу назву, запитайте Cuppy або виконайте пошук у поточній таблиці.",
+    "noResultsHintWithoutAI": "Спробуйте іншу назву або виконайте пошук у поточній таблиці.",
+    "appearance": "Зовнішній вигляд",
+    "shortcuts": "Сполучення клавіш",
+    "back": "Назад",
+    "select": "Вибрати",
+    "open": "Відкрити",
+    "execute": "Виконати",
+    "close": "Закрити",
+    "newTab": "Відкрити в новій вкладці",
+    "loading": "Пошук…",
+    "searchFailed": "Не вдалося завантажити результати пошуку",
+    "retry": "Спробувати знову",
+    "currentTable": "Пошук у поточній таблиці",
+    "searchTableQuery": "Знайти «{{query}}» у поточній таблиці",
+    "createTableQuery": "Створити таблицю «{{name}}»",
+    "createDashboard": "Нова інформаційна панель",
+    "createApp": "Новий застосунок",
+    "createWorkflow": "Нова автоматизація",
+    "createRoutine": "Нове завдання за розкладом",
+    "createFolder": "Нова папка",
+    "createView": "Створити: {{name}}",
+    "invite": "Запросити співавторів",
+    "folderCreated": "Папку створено",
+    "actionFailed": "Не вдалося виконати цю дію",
+    "backspace": "Вийти з режиму команд, якщо рядок пошуку порожній",
+    "toggle": "Відкрити або закрити палітру",
+    "aiMode": "ШІ",
+    "space": "Простір",
+    "project": "Проєкт"
+  },
+  "password": {
+    "setInvalid": "Пароль недійсний, не менше 8 символів і повинен містити принаймні одну літеру та одну цифру."
+  },
+  "template": {
+    "non": {
+      "share": "Поділитися",
+      "copy": "Скопійовано"
+    },
+    "aiTitle": "Давайте будувати разом",
+    "aiGreeting": "Чим я можу допомогти, {{name}}?",
+    "aiSubTitle": "Перша AI-платформа, де команди співпрацюють над даними та генерують виробничі додатки",
+    "guideTitle": "Почніть зі свого сценарію",
+    "watchVideo": "Дивитися відео",
+    "title": "Шаблон",
+    "description": "Створити новий проєкт з шаблону",
+    "browseAll": "Переглянути Усі",
+    "templateTitle": "Почати з шаблону",
+    "loadMore": "Завантажити Більше",
+    "allTemplatesLoaded": "Усі шаблони завантажені",
+    "createTemplate": "Створити Шаблон",
+    "promptBox": {
+      "start": "Почати"
+    },
+    "useTemplateDialog": {
+      "title": "Виберіть простір",
+      "description": "Виберіть простір для застосування шаблону",
+      "noSpaceDescription": "You don't have any spaces yet. Create one to continue.",
+      "newSpacePlaceholder": "Space name",
+      "createSpace": "Create",
+      "loadFailed": "Не вдалося завантажити відомості про шаблон."
+    },
+    "searchPlaceholder": "Пошук шаблонів",
+    "rankThisMonth": "№{{rank}} цього місяця",
+    "listing": {
+      "newest": "Найновіші",
+      "featured": "Рекомендовані"
+    },
+    "detail": {
+      "install": "Встановити",
+      "installs": "Встановлення",
+      "author": "Автор",
+      "updated": "Останнє оновлення",
+      "history": "Історія версій",
+      "firstRelease": "Перший випуск",
+      "about": "Про шаблон",
+      "noChangelog": "Загальне оновлення"
+    }
+  },
+  "baseShare": {
+    "shareTitle": "Поділитися",
+    "shareToWeb": "Опублікувати в інтернеті",
+    "noPermissionTip": "У вас немає прав керувати налаштуваннями спільного доступу",
+    "linkHolderLabel": "Власник посилання",
+    "linkHolderCanView": "Може переглядати",
+    "linkHolderCanViewDesc": "Будь-хто з посиланням може переглядати дані",
+    "linkHolderCanEdit": "Може редагувати",
+    "linkHolderCanEditDesc": "Авторизовані користувачі можуть редагувати записи в таблиці",
+    "linkHolderCanCopyAndSave": "Зберегти як копію",
+    "linkHolderCanCopyAndSaveDesc": "Будь-хто з посиланням може зберегти копію у свій простір",
+    "refreshLink": "Перегенерувати посилання",
+    "advanced": "Додатково",
+    "allowCopyData": "Дозволити читачам копіювати дані",
+    "restrictByPassword": "Захист паролем",
+    "embedConfig": "Налаштування вбудовування",
+    "embedPreview": "Перегляд вбудовування",
+    "copyCode": "Копіювати код",
+    "enterPassword": "Введіть пароль",
+    "passwordTitle": "Встановити пароль",
+    "copyLinkAndPassword": "Копіювати посилання та пароль",
+    "linkAndPasswordText": "Посилання {{brand}}: {{url}} Пароль: {{password}}",
+    "generatePassword": "Згенерувати випадковий пароль",
+    "deleteConfirmTitle": "Видалити посилання спільного доступу",
+    "deleteConfirmDescription": "Цю дію не можна скасувати. Люди з цим посиланням більше не зможуть отримати доступ до спільного проєкту.",
+    "createSuccess": "Посилання спільного доступу створено",
+    "createFailed": "Не вдалося створити посилання спільного доступу",
+    "updateFailed": "Не вдалося оновити налаштування спільного доступу",
+    "deleteSuccess": "Посилання спільного доступу видалено",
+    "deleteFailed": "Не вдалося видалити посилання спільного доступу",
+    "refreshSuccess": "Посилання спільного доступу перегенеровано",
+    "refreshFailed": "Не вдалося перегенерувати посилання спільного доступу"
+  },
+  "share": {
+    "copyToSpaceDialog": {
+      "title": "Копіювати до простору",
+      "description": "Виберіть простір для копіювання цього проєкту",
+      "baseName": "Назва проєкту",
+      "baseNamePlaceholder": "Введіть назву проєкту",
+      "selectSpace": "Виберіть простір",
+      "noSpaceDescription": "Немає доступних просторів. Створіть новий простір, щоб продовжити.",
+      "newSpacePlaceholder": "Space name",
+      "createSpace": "Create",
+      "copyTarget": "Copy to",
+      "createNewBase": "Новий проєкт",
+      "copyToExistingBase": "Наявний проєкт",
+      "selectBase": "Вибрати проєкт",
+      "selectBasePlaceholder": "Вибрати проєкт",
+      "noBaseInSpace": "У цьому просторі немає доступних проєктів. Виберіть «Новий проєкт»."
+    }
+  },
+  "settings": {
+    "title": "Налаштування екземпляра",
+    "allSetting": "Налаштування простору й особисті",
+    "personal": {
+      "title": "Особисте"
+    },
+    "templateAdmin": {
+      "title": "Керування шаблонами",
+      "noData": "Немає даних",
+      "importing": "Імпортування...",
+      "usageCount": "Кількість використань: {{count}}",
+      "useTemplate": "Використати цей шаблон",
+      "createdBy": "від {{user}}",
+      "backToTemplateList": "Повернутися до списку шаблонів",
+      "tips": {
+        "errorCategoryName": "Категорія не існує або була видалена",
+        "needSnapshot": "Перед публікацією створіть знімок, назва та опис шаблону не можуть бути порожніми",
+        "needPublish": "Опублікуйте шаблон перед встановленням як рекомендований",
+        "needBaseSource": "Виберіть проєкт-джерело перед створенням знімка",
+        "forbiddenUpdateSystemTemplate": "Системний шаблон не можна змінити",
+        "addCategoryTips": "Спочатку введіть назву категорії в поле пошуку.",
+        "categoryNamePlaceholder": "Введіть назву категорії",
+        "subCategoryNamePlaceholder": "Назва підгалузі",
+        "noSubCategory": "Підгалузей ще немає. Натисніть галузь ліворуч, щоб позначити її.",
+        "duplicateCategoryName": "Назва категорії вже існує",
+        "teamNamePlaceholder": "Назва команди",
+        "addTeamTips": "Спочатку введіть назву команди.",
+        "keyPlaceholder": "URL-ключ, наприклад yoga",
+        "invalidKey": "Ключ може містити лише малі літери, цифри та дефіси"
+      },
+      "category": {
+        "menu": {
+          "getStarted": "Почати",
+          "recommended": "Рекомендовані",
+          "all": "Усі",
+          "browseByCategory": "Перегляд за категоріями",
+          "byTeam": "За командами"
+        }
+      },
+      "header": {
+        "cover": "Обкладинка",
+        "name": "Назва",
+        "description": "Опис",
+        "markdownDescription": "Опис у markdown",
+        "category": "Категорія",
+        "isSystem": "Системний",
+        "source": "Джерело",
+        "status": "Опубліковано",
+        "publishSnapshot": "Опублікувати знімок",
+        "snapshotTime": "Час знімка",
+        "actions": "Дії",
+        "featured": "Рекомендований",
+        "createdBy": "Створено",
+        "userNonExistent": "Користувач не існує",
+        "preview": "Попередній перегляд",
+        "usage": "Використання",
+        "visit": "Відвідування",
+        "requirements": "Інтеграції",
+        "slug": "URL-slug"
+      },
+      "actions": {
+        "title": "Дії",
+        "publish": "Опублікувати",
+        "delete": "Видалити",
+        "duplicate": "Дублювати",
+        "preview": "Попередній перегляд",
+        "use": "Використати",
+        "pinTop": "Закріпити зверху",
+        "addCategory": "Додати категорію",
+        "addSubCategory": "Нова підгалузь",
+        "addSubCategoryUnder": "Нова підгалузь у «{{name}}»",
+        "selectCategory": "Вибрати категорію",
+        "addTeam": "Нова команда",
+        "industries": "Галузі",
+        "teams": "Команди",
+        "viewTemplate": "Переглянути шаблон",
+        "manageCategory": "Керування категоріями"
+      },
+      "relatedTemplates": "Пов'язані шаблони",
+      "noImage": "Немає зображення",
+      "baseSelectPanel": {
+        "title": "Виберіть джерело шаблону",
+        "description": "Виберіть проєкт для шаблону",
+        "confirm": "Підтвердити",
+        "search": "Пошук...",
+        "cancel": "Скасувати",
+        "selectBase": "Вибрати проєкт",
+        "createTemplate": "Створити шаблон",
+        "abnormalBase": "Проєкт не існує або його видалено"
+      }
+    },
+    "back": "Назад додому",
+    "account": {
+      "title": "Мій профіль",
+      "tab": "Мій обліковий запис",
+      "profileTitle": "Профіль",
+      "photo": "Фото профілю",
+      "photoDesc": "PNG, JPEG або WebP, до 3 МБ.",
+      "updatePhoto": "Оновити фото",
+      "updateNameDesc": "Псевдонім або ім'я — те, як ви хочете, щоб до вас зверталися в Teable",
+      "securityTitle": "Безпека облікового запису",
+      "dataTitle": "Дані та обліковий запис",
+      "email": "Електронна пошта",
+      "password": "Пароль",
+      "passwordDesc": "Установіть постійний пароль для входу до свого облікового запису.",
+      "changePassword": {
+        "title": "Змінити пароль",
+        "desc": "Введіть поточний пароль і встановіть новий",
+        "current": "Поточний пароль",
+        "new": "Новий пароль",
+        "confirm": "Підтвердити новий пароль"
+      },
+      "changePasswordError": {
+        "disMatch": "Ваш новий пароль не збігається.",
+        "equal": "Ваш новий пароль має відрізнятися від поточного.",
+        "invalid": "Ваш поточний пароль недійсний."
+      },
+      "changePasswordSuccess": {
+        "title": "🎉 Пароль успішно змінено.",
+        "desc": "Ви будете перенаправлені на сторінку входу через 2 секунди."
+      },
+      "manageToken": "Токен доступу",
+      "addPassword": {
+        "title": "Додати пароль",
+        "desc": "Установіть постійний пароль для входу до свого облікового запису.",
+        "password": "Введіть свій пароль",
+        "confirm": "Підтвердьте свій пароль"
+      },
+      "addPasswordError": {
+        "disMatch": "Ваш пароль не збігається."
+      },
+      "addPasswordSuccess": {
+        "title": "🎉 Пароль додано успішно."
+      },
+      "changeEmail": {
+        "title": "Змінити адресу електронної пошти",
+        "desc": "Будь ласка, перевірте пароль і підтвердьте нову адресу електронної пошти",
+        "current": "Поточний пароль",
+        "new": "Нова пошта",
+        "code": "Код підтвердження",
+        "getCode": "Надіслати код",
+        "error": {
+          "invalidCode": "Невірний код підтвердження.",
+          "invalidPassword": "Невірний пароль.",
+          "invalidConflict": "Нова електронна адреса вже зареєстрована.",
+          "invalidSameEmail": "Нова електронна адреса збігається з поточною.",
+          "sendMailRateLimit": "Будь ласка, зачекайте {{seconds}} с перед надсиланням нового листа"
+        },
+        "success": {
+          "title": "🎉 Електронну адресу успішно змінено.",
+          "desc": "Вас буде перенаправлено на сторінку входу через 2 с.",
+          "sendSuccess": "Код підтвердження успішно надіслано."
+        }
+      },
+      "deleteAccount": {
+        "title": "Видалити обліковий запис",
+        "desc": "Цю дію неможливо скасувати. Після видалення обліковий запис не вдасться відновити.",
+        "spaces": {
+          "title": "Простори, де ви єдиний власник",
+          "body": "Під час видалення облікового запису ці простори буде переміщено до кошика. Щоб зберегти простір, спершу передайте його іншому учаснику.",
+          "loading": "Перевіряємо простори, де ви єдиний власник…",
+          "blockedHint": "Простори з позначкою «Не видаляється» мають активну підписку. Вирішіть це питання, перш ніж видаляти обліковий запис.",
+          "willTransfer": "Буде передано",
+          "notDeletable": "Не видаляється",
+          "cancelSubscription": "Керувати планом",
+          "transferTo": "Передати учаснику (необов’язково)",
+          "transferToSubscribed": "Передати учаснику (з підпискою)"
+        },
+        "confirm": {
+          "title": "Введіть <code>DELETE</code> для підтвердження",
+          "placeholder": "DELETE"
+        },
+        "loading": "Видалення…"
+      }
+    },
+    "notify": {
+      "title": "Сповіщення",
+      "label": "Діяльність у вашому просторі",
+      "desc": "Отримувати електронні листи, коли ви отримуєте коментарі, згадки, запрошення на сторінку, нагадування, запити на доступ і зміни власності."
+    },
+    "setting": {
+      "title": "Мої налаштування",
+      "interfaceTitle": "Інтерфейс",
+      "theme": "Тема",
+      "themeDesc": "Виберіть тему для програми.",
+      "dark": "Темна",
+      "light": "Світла",
+      "system": "Системна",
+      "version": "Версія програми",
+      "infraVersion": "Версія інфраструктури",
+      "language": "Мова",
+      "interactionMode": "Режим взаємодії",
+      "mouseMode": "Режим курсора",
+      "touchMode": "Сенсорний режим",
+      "systemMode": "Слідувати системі",
+      "buySelfHostedLicense": "Придбати ліцензію для self-hosted",
+      "teableSkill": "Навичка Teable"
+    },
+    "teableSkill": {
+      "intro": "Дозвольте вашому AI Agent підключитися до проєкту, щоб запитувати дані, керувати таблицями, полями та поданнями, імпортувати чи оновлювати записи, а також створювати автоматизації та застосунки.",
+      "worksWith": "Працює з усіма основними агентами",
+      "more": "+ більше",
+      "copy": "Копіювати",
+      "installPromptLabel": "Prompt встановлення skill",
+      "installCommandLabel": "Команда встановлення skill",
+      "installPrompt": "Будь ласка, прочитай https://github.com/teableio/agent-skills, дотримуйся guide, допоможи мені встановити Teable agent skill і завершити автентифікацію Teable CLI. Мій інстанс Teable — {{origin}}; для автентифікації використовуй `teable auth login --endpoint {{origin}}`.",
+      "step1Title": "Установити Skill",
+      "step1Description": "Скопіюйте цей prompt в AI Agent. Він встановить Teable skill і відкриє браузер для завершення автентифікації Teable CLI.",
+      "step3Title": "Спробуйте навичку Teable",
+      "step3Description": "Після встановлення навички спробуйте ці prompt.",
+      "tryPrompts": {
+        "schema": {
+          "prompt": "Створи просту CRM-таблицю в цьому проєкті.",
+          "note": "Прості стартові prompt"
+        },
+        "template": {
+          "prompt": "Завантаж усі рахунки з цієї локальної папки до <Таблиця квитанцій> {вставте URL таблиці} і витягни ключові поля.",
+          "note": "Локальні файли → Teable"
+        },
+        "validate": {
+          "prompt": "Імпортуй нові GitHub issues до <Bug Tracker> {вставте URL таблиці}.",
+          "note": "Кросплатформені дані → Teable"
+        },
+        "trace": {
+          "prompt": "Перевір <Таблиця завдань> {вставте URL таблиці} і познач прострочені завдання.",
+          "note": "Очистити або впорядкувати дані Teable"
+        }
+      }
+    },
+    "nav": {
+      "settings": "Налаштування",
+      "logout": "Вийти",
+      "contactSupport": "Зв'язатися з підтримкою"
+    },
+    "integration": {
+      "title": "Інтеграції",
+      "thirdPartyIntegrations": {
+        "title": "Сторонні інтеграції",
+        "description": "Ви надали доступ до свого облікового запису {{count}} застосункам.",
+        "lastUsed": "Останнє використання: {{date}}",
+        "revoke": "Відкликати",
+        "owner": "Власник: {{user}}",
+        "revokeTitle": "Відкликати авторизацію?",
+        "revokeDesc": "{{name}} більше не зможе звертатися до Teable API. Скасувати цю дію неможливо.",
+        "scopeTitle": "Дозволи",
+        "scopeDesc": "Цей застосунок зможе отримати такі області доступу:",
+        "notifications": "Сповіщення",
+        "notificationsDesc": "Дозволити {{name}} надсилати вам сповіщення"
+      },
+      "userIntegration": {
+        "title": "Підключені облікові записи",
+        "description": "Підключіть зовнішні облікові записи, щоб дозволити Teable доступ до ваших ресурсів і їх синхронізацію.",
+        "emptyDescription": "Немає підключених облікових записів",
+        "actions": {
+          "reconnect": "Перепідключити"
+        },
+        "slack": {
+          "user": "Користувач Slack",
+          "workspace": "Робочий простір Slack"
+        },
+        "deleteTitle": "Видалити підключений обліковий запис",
+        "deleteDesc": "Видалити {{name}}?",
+        "create": "Підключити новий обліковий запис",
+        "manage": "Керування підключеними обліковими записами",
+        "searchPlaceholder": "Пошук підключених облікових записів",
+        "defaultName": "Інтеграція {{name}}",
+        "callback": {
+          "error": "Не вдалося авторизуватися",
+          "title": "Авторизацію виконано",
+          "desc": "Тепер це вікно можна закрити."
+        }
+      }
+    },
+    "developerTools": {
+      "title": "Інструменти розробника"
+    }
+  },
+  "noun": {
+    "table": "Таблиця",
+    "view": "Перегляд",
+    "space": "Простір",
+    "base": "Проєкт",
+    "field": "Поле",
+    "record": "Запис",
+    "dashboard": "Дашборд",
+    "automation": "Автоматизація",
+    "authorityMatrix": "Матриця повноважень",
+    "design": "Дизайн",
+    "adminPanel": "Системне адміністрування",
+    "license": "Самостійна ліцензія",
+    "instanceId": "Ідентифікатор екземпляра",
+    "beta": "Бета",
+    "trash": "Кошик",
+    "global": "Глобальний",
+    "organizationPanel": "Налаштування організації",
+    "unknownError": "Невідома помилка",
+    "pluginPanel": "Панель",
+    "pluginContextMenu": "Контекстне меню",
+    "plugin": "Плагіни",
+    "copy": "Копія",
+    "credits": "Кредити",
+    "aiChat": "ШІ-чат",
+    "app": "Додаток",
+    "webSearch": "Веб-пошук",
+    "folder": "Папка",
+    "newAutomation": "Нова автоматизація",
+    "routine": "Рутина",
+    "newRoutine": "Нова рутина",
+    "newApp": "Новий додаток",
+    "newFolder": "Нова папка",
+    "template": "Шаблон",
+    "installedTemplates": "Встановлені шаблони"
+  },
+  "level": {
+    "free": "Безкоштовно",
+    "plus": "Плюс",
+    "pro": "Профі",
+    "business": "Бізнес",
+    "enterprise": "Підприємство"
+  },
+  "noResult": "Немає результату.",
+  "allNodes": "Усі вузли",
+  "noDescription": "Без опису",
+  "untitled": "Без назви",
+  "untitledBase": "Проєкт без назви",
+  "name": "Назва",
+  "description": "Опис",
+  "required": "Обов'язково",
+  "characters": "символів",
+  "atLeastOne": "Принаймні зарезервуйте {{noun}}",
+  "guide": {
+    "prev": "Попер.",
+    "next": "Наступний",
+    "done": "Готово",
+    "skip": "Пропустити",
+    "createSpaceTooltipTitle": "Створити простір",
+    "createSpaceTooltipContent": "Teable організована в простори, де кожна область запрошує користувачів до співпраці. <br></br>Простори в Teable служать основним навігаційним елементом у рядку меню, пропонуючи базову платформу для користувачів, щоб додавати та керувати проєктами за потреби.",
+    "createBaseTooltipTitle": "Створити проєкт",
+    "createBaseTooltipContent": "Проєкт зберігає ваші дані та надає доступ до автоматизацій і панелі застосунків.",
+    "createTableTooltipTitle": "Створити таблицю",
+    "createTableTooltipContent": "Таблиці призначені для ефективної обробки різноманітних наборів даних, пропонуючи універсальне відображення інформації за допомогою різних типів даних.",
+    "createViewTooltipTitle": "Створити вигляд",
+    "createViewTooltipContent": "Наразі користувачі можуть створювати режими перегляду сітки, галереї, канбану та форми, а перегляди календаря заплановано для наступних випусків. <br></br>Ця різноманітність надає користувачам комплексний набір інструментів для різноманітних завдань керування даними.",
+    "viewFilteringTooltipTitle": "Фільтрація записів",
+    "viewFilteringTooltipContent": "Однією з основних особливостей представлень є можливість фільтрувати записи з представлення відповідно до встановлених вами умов. <br></br>Коли запис відфільтровується на основі умови, він не видаляється — він просто прихований від певного подання, яке ви використовуєте для перегляду таблиці.",
+    "viewSortingTooltipTitle": "Сортування записів",
+    "viewSortingTooltipContent": "Перебуваючи в поданні, ви можете відсортувати свої записи так, щоб вони відображалися в певному порядку відповідно до значень у певних полях. <br></br>Сортування ваших записів в одному поданні не впливає на порядок записів в інших поданнях — це стосується лише подання, яке ви зараз використовуєте для перегляду таблиці.",
+    "viewGroupingTooltipTitle": "Групування записів",
+    "viewGroupingTooltipContent": "Групування записів дозволяє творцям створювати набір з однієї чи кількох умов, які допоможуть класифікувати набір даних, представлений у певному поданні.",
+    "apiButtonTooltipTitle": "API",
+    "apiButtonTooltipContent": "Teable пропонує потужний API, який підтримує майже всі функції продукту, дозволяючи розробникам здійснювати виклики за допомогою <a>Токен</a>."
+  },
+  "token": "Токен",
+  "poweredBy": "Працює завдяки <0></0>",
+  "invite": {
+    "dialog": {
+      "title": "Поділитися простором {{spaceName}}",
+      "desc_one": "У цьому просторі <b>{{count}} співавторів</b>. Додавання співавтора в простір дасть йому доступ до всіх проєктів у цьому просторі.",
+      "desc_few": "У цьому просторі <b>{{count}} співавторів</b>. Додавання співавтора в простір дасть йому доступ до всіх проєктів в цьому просторі.",
+      "desc_many": "У цьому просторі <b>{{count}} співавторів</b>. Додавання співавтора в простір дасть йому доступ до всіх проєктів в цьому просторі.",
+      "desc_other": "У цьому просторі <b>{{count}} співавторів</b>. Додавання співавтора в простір дасть йому доступ до всіх проєктів в цьому просторі.",
+      "tabEmail": "Запросити електронною поштою",
+      "emailPlaceholder": "Введіть електронні адреси, розділені клавішею Enter",
+      "tabLink": "Запросити на посилання",
+      "linkPlaceholder": "Створити посилання запрошення, яке надасть <0/> доступ будь-кому, хто його відкриє.",
+      "emailSend": "Надіслати запрошення",
+      "directAccessDescription": "Запрошені учасники можуть безпосередньо перейти за посиланням нижче та приєднатися до співпраці",
+      "linkSend": "Створити посилання",
+      "spaceTitle": "Співавтори простору",
+      "spaceTitleWithCount": "Співавтори простору ({{count}})",
+      "baseTitle": "Співавтори проєкту",
+      "allCollaboratorsTitle": "Усі співавтори (простір і проєкт)",
+      "baseOnly": "Лише проєкт",
+      "collaboratorSearchPlaceholder": "Знайдіть співавтора простору на ім'я або електронну пошту",
+      "collaboratorJoin": "приєднався {{joinTime}}",
+      "collaboratorRemove": "Видалити співавтора",
+      "basePermissionRemove": "Видалити доступ до проєкту",
+      "goToBase": "Перейти до проєкту",
+      "linkTitle": "Посилання запрошення",
+      "linkCreatedTime": "створено {{createdTime}}",
+      "linkCopySuccess": "Посилання скопійоване",
+      "linkRemove": "Видалити посилання",
+      "noInviteLinks": "Посилань-запрошень немає",
+      "linkDescription": "Створіть посилання-запрошення та призначте дозволи",
+      "haveAccess": "Мають доступ"
+    },
+    "base": {
+      "title": "Поділитися {{baseName}}",
+      "desc_one": "Проєкт використовується спільно з {{count}} учасником.",
+      "desc_few": "Проєкт використовується спільно з {{count}} учасниками.",
+      "desc_many": "Проєкт використовується спільно з {{count}} учасниками.",
+      "desc_other": "Проєкт використовується спільно з {{count}} учасниками.",
+      "baseTitle": "Співавтори проєкту",
+      "collaboratorSearchPlaceholder": "Знайдіть співробітника проєкту на ім'я або електронну пошту",
+      "baseTitleWithCount": "Співавтори проєкту ({{count}})"
+    },
+    "addOrgCollaborator": {
+      "title": "Додати співавтора організації",
+      "button": "Додати з організації",
+      "placeholder": "Виберіть члена організації або відділ"
+    },
+    "sendInvitationSuccess": "Запрошення надіслано",
+    "table": {
+      "collaborator": "Співавтор",
+      "accessPermission": "Дозвіл доступу",
+      "joinAt": "Дата приєднання",
+      "lastLogin": "Останній вхід",
+      "expandPermissions": "Розгорнути дозволи для {{name}}",
+      "collapsePermissions": "Згорнути дозволи для {{name}}",
+      "basePermissionsOnly": "Доступ лише до вибраних проєктів",
+      "basePermissionCount": "Права доступу до проєктів: {{count}}"
+    },
+    "authority": {
+      "title": "Матрицю дозволів увімкнено",
+      "description": "Фактичні права співавторів залежать від призначених їм ролей; користувачі без призначення використовують роль за замовчуванням",
+      "viewDetail": "Переглянути деталі"
+    },
+    "app": {
+      "previewAppError": "Помилка застосунку"
+    }
+  },
+  "help": {
+    "title": "Допомога",
+    "appLink": "https://app.teable.ai",
+    "mainLink": "https://help.teable.ai",
+    "apiLink": "https://help.teable.ai/en/api-doc/token"
+  },
+  "pagePermissionChangeTip": "Дозволи сторінки оновлено. Будь ласка, оновіть сторінку, щоб побачити найновіший вміст.",
+  "listEmptyTips": "Список порожній",
+  "billing": {
+    "overLimits": "Перевищені ліміти",
+    "overLimitsDescription": "Ваш поточний тарифний план перевищив ліміт використання. Будь ласка, оновіть план, щоб продовжити використання цієї функції без переривань.",
+    "userLimitExceededDescription": "Поточна ліцензія досягла максимальної кількості користувачів. Будь ласка, відключіть деяких користувачів або оновіть ліцензію.",
+    "unavailableInPlanTips": "Поточний тарифний план не підтримує цю функцію",
+    "levelTips": "Це простір зараз на тарифі {{level}}",
+    "enterpriseFeature": "Корпоративна функція",
+    "automationRequiresUpgrade": "Оновіть до Enterprise Edition (EE), щоб увімкнути автоматизацію",
+    "authorityMatrixRequiresUpgrade": "Оновіть до Enterprise Edition (EE), щоб увімкнути матрицю дозволів",
+    "viewPricing": "Переглянути ціни",
+    "billable": "Платний",
+    "billableByAuthorityMatrix": "Білінг, створений матрицею повноважень",
+    "seatConfirm": {
+      "matrixTitle": "Додавання учасників збільшить вартість підписки",
+      "matrixDesc": "Цей учасник наразі має безкоштовну роль («Перегляд»/«Коментатор»). Після додавання до матриці повноважень він займе 1 місце підписки, і вартість відповідно зросте.",
+      "seatLimitTitle": "Недостатньо місць ліцензії",
+      "seatLimitDesc": "Цей екземпляр використовує {{seats}} із {{seatLimit}} ліцензованих місць, і решти місць недостатньо для цієї дії. Зверніться до адміністратора, щоб придбати додаткові місця. Якщо потрібен лише перегляд або коментарі, використайте безкоштовну роль «Перегляд» або «Коментатор».",
+      "seatLimitConfirm": "Зрозуміло",
+      "fixedSeatTitle": "Недостатньо місць у вашому тарифі",
+      "fixedSeatDesc": "Ваш тариф включає {{quantity}} місць, із яких {{seats}} уже зайнято. Якщо продовжити, ліміт місць буде перевищено, і після 7-денного пільгового періоду простір буде переведено на безкоштовний тариф. Якщо потрібен лише перегляд або коментарі, використайте безкоштовну роль «Перегляд» або «Коментатор»."
+    },
+    "licenseExpiredGracePeriod": "Термін дії вашої ліцензії для самостійного розміщення закінчився і буде понижена до безкоштовного плану {{expiredTime}}. Будь ласка, оновіть ліцензію, щоб зберегти доступ до преміум-функцій.",
+    "licenseAutoFetchFailed": "Не вдалося автоматично продовжити ліцензію. До зниження залишилося {{days}} дн. пільгового періоду.",
+    "licenseAutoFetchRetryFailed": "Автопродовження знову не вдалося. Перевірте з'єднання з сервером Teable або оновіть ліцензію вручну.",
+    "licenseExpiredGracePeriodDays": "Термін дії ліцензії минув. До зниження залишилося {{days}} дн. пільгового періоду.",
+    "spaceSubscriptionModal": {
+      "title": "Оновити тарифний план простору",
+      "description": "Ви можете оновити тільки ті місця, де ви є власником"
+    },
+    "contactAdminToUpgrade": "Зверніться до власника простору, щоб підвищити тарифний план.",
+    "status": {
+      "active": "Активно",
+      "canceled": "Скасовано",
+      "incomplete": "Не завершено",
+      "incompleteExpired": "Термін не завершено",
+      "trialing": "Пробний період",
+      "pastDue": "Прострочено",
+      "unpaid": "Не оплачено",
+      "paused": "Припинено",
+      "seatLimitExceeded": "Перевищено кількість місць"
+    }
+  },
+  "admin": {
+    "setting": {
+      "instanceTitle": "Налаштування інстансу",
+      "description": "Змініть налаштування для поточного екземпляра",
+      "allowSignUp": "Дозволити створення нових облікових записів",
+      "allowSignUpDescription": "Вимкнення цієї опції заборонить реєстрацію нових користувачів, і кнопка реєстрації більше не відображатиметься на сторінці входу.",
+      "bannedEmailDomains": "Заборонені поштові домени",
+      "bannedEmailDomainsDescription": "Адреси електронної пошти цих доменів не можуть зареєструватися, і пов'язані з ними листи-запрошення не надсилатимуться. Введіть домен і натисніть Enter, щоб додати його.",
+      "bannedEmailDomainsInvalid": "Введіть коректний домен, наприклад example.com",
+      "allowSpaceInvitation": "Дозволити запрошення в простір",
+      "allowSpaceInvitationDescription": "Відключення цієї опції заборонить користувачам, крім адміністраторів, запрошувати інших у простір. При увімкненні нові користувачі, запрошені електронною поштою, можуть завершити реєстрацію, натиснувши на посилання-запрошення в листі, але спільні посилання-запрошення не працюватимуть.",
+      "allowSpaceCreation": "Дозволити всім створювати нові простори",
+      "allowSpaceCreationDescription": "Вимкнення цієї опції заборонить користувачам, крім адміністраторів, створювати нові простори.",
+      "enableEmailVerification": "Увімкнути перевірку електронної пошти",
+      "enableEmailVerificationDescription": "Увімкнення цієї опції вимагатиме від користувачів підтвердження своєї електронної адреси при створенні нового облікового запису.",
+      "enableWaitlist": "Увімкнути чергу",
+      "enableWaitlistDescription": "Увімкнення цієї опції дозволить користувачам зареєструватися лише за допомогою привілей.",
+      "generalSettings": "Загальні налаштування",
+      "aiSettings": "Налаштування AI",
+      "brandingSettings": {
+        "title": "Налаштування брендингу",
+        "description": "Доступно лише в корпоративній версії",
+        "brandName": "Назва бренду",
+        "logo": "Логотип",
+        "logoUpload": "Завантажити логотип",
+        "logoUploadDescription": "Завантажте зображення логотипу, підтримуються формати PNG, JPEG, рекомендований розмір 100x100px. Максимальний розмір завантаження 500KB."
+      },
+      "ai": {
+        "name": "Ім'я",
+        "nameDescription": "Ім'я LLM провайдера",
+        "customModel": "Власна модель",
+        "customModelDescription": "Власні моделі можна використовувати в ШІ-полях, ШІ-автоматизаціях та інтерфейсі ШІ-чату. Моделі генерації зображень потрібно позначити для тестування",
+        "updateLLMProvider": "Оновити LLM провайдера",
+        "addProvider": "Додати LLM провайдера",
+        "addProviderDescription": "Додати новий LLM провайдера до списку",
+        "providerType": "Тип провайдера",
+        "baseUrl": "Базовий URL",
+        "apiKey": "API ключ",
+        "baseUrlDescription": "Базовий URL LLM провайдера",
+        "apiKeyDescription": "API ключ провайдера LLM",
+        "models": "Моделі",
+        "modelsDescription": "Моделі, що підтримуються LLM-провайдером",
+        "modelsSelectedCount": "Вибрано моделей: {{count}}",
+        "clearAllModels": "Очистити всі моделі",
+        "customModelPlaceholder": "Введіть назву власної моделі",
+        "addModelFill": "Додати",
+        "modelIdReservedAt": "ID моделі не може містити «@»",
+        "baseUrlRequired": "Базовий URL обов'язковий",
+        "fetchModelListError": "Не вдалося отримати список моделей",
+        "provider": "LLM провайдер",
+        "aiAbilitySettings": "Налаштування можливостей ШІ",
+        "aiAbilitySettingsDescription": "Налаштуйте можливості ШІ",
+        "modelPreferences": "Модель переваги",
+        "modelPreferencesDescription": "Уподобання моделі для провайдера LLM",
+        "embeddingModel": "Модель вбудовування",
+        "embeddingModelDescription": "Optional. For Document Q&A. Usually, the model ID contains \"embedding\".",
+        "translationModel": "Модель перекладу",
+        "translationModelDescription": "Модель перекладу для використання",
+        "chatModel": "Модель чату",
+        "chatModelDescription": "Модель чату для використання, Підказка: середня модель кодування за замовчуванням використовується для генерації AI формул та споріднених функцій",
+        "chatModels": {
+          "lg": "Розширена модель чату",
+          "lgDescription": "Для планування, програмування та інших складних сценаріїв завдань. Рекомендовано: claude-sonnet-4.5",
+          "md": "Модель для завдань середньої складності",
+          "mdDescription": "Для щоденних розмов і загальних завдань",
+          "sm": "Модель для легких завдань",
+          "smDescription": "Для простих запитів і швидких відповідей",
+          "inheritHint": "Так само, як основна модель за замовчуванням ({{model}})",
+          "modelTiers": "Рівні моделей",
+          "modelTiersDescription": "Призначте різні моделі для середніх і легких завдань; невстановлені рівні використовують основну модель за замовчуванням вище.",
+          "allInheriting": "Усі рівні використовують основну модель за замовчуванням",
+          "customized": "Налаштовано: {{count}}",
+          "tiersIntro": "Користувачі обирають один із цих рівнів у меню моделей чату; рівень за замовчуванням — їхній початковий вибір і база 1x для кредитів. Будь-який рівень можна перепризначити будь-коли.",
+          "defaultTier": "За замовчуванням",
+          "setDefault": "Зробити за замовчуванням",
+          "notOffered": "Не пропонується",
+          "lgBackground": "також основна модель для ШІ-полів та інших функцій",
+          "mdBackground": "також виконує середні фонові завдання",
+          "smBackground": "також виконує легкі фонові завдання, наприклад заголовки чатів"
+        },
+        "actions": {
+          "title": "Можливості ШІ",
+          "aiField": {
+            "title": "ШІ поле",
+            "description": "Функції ШІ полів, включаючи автозаповнення та налаштування ШІ в параметрах поля"
+          },
+          "aiChat": {
+            "title": "ШІ чат",
+            "description": "Бічна панель ШІ чату та всі функції агента",
+            "sandboxWarning": "Перед використанням потрібно налаштувати середовище виконання ШІ-чату нижче"
+          },
+          "modelSelection": {
+            "title": "Дозволити вибір моделі",
+            "description": "Дозволити користувачам обирати модель у ШІ-чаті та конструкторі застосунків"
+          }
+        },
+        "chatModelTest": {
+          "text": "Тестова модель",
+          "description": "Тестування здатності моделі обробляти зображення, PDF",
+          "notConfigLgModel": "Будь ласка, спочатку налаштуйте велику модель",
+          "confirmTitle": "Тестування здатностей моделі",
+          "confirmDescription": "Чи хочете ви протестувати можливості великої моделі чату?",
+          "confirm": "Тестова модель",
+          "cancel": "Скасувати",
+          "missingCapabilitiesWarning": "Ця модель не підтримує обробку зображень або PDF, що може призвести до недоступності деяких функцій.",
+          "modelNotSuitable": "Ця модель може не підходити для розширених функцій ШІ:",
+          "enableAITitle": "Увімкнути AI",
+          "enableAIDescription": "Тестування моделі завершено. AI наразі не ввімкнено. Чи хочете ви ввімкнути AI для використання цих можливостей моделі?",
+          "enableAI": "Увімкнути AI",
+          "skipTest": "Пропустити"
+        },
+        "chatModelAbility": {
+          "image": "Зображення",
+          "pdf": "PDF",
+          "webSearch": "Веб-пошук",
+          "toolCall": "Виклик інструментів",
+          "reasoning": "Міркування",
+          "imageGeneration": "Генерація зображень",
+          "disabledWebSearch": "Веб-пошук вимкнено",
+          "lgModelAbility": "Здатність великої моделі",
+          "missingVision": "Не підтримує обробку зображень і PDF",
+          "missingToolCall": "Не підтримує виклик інструментів/функцій",
+          "notTested": "Можливості моделі ще не перевірено. Спершу протестуйте модель у налаштуваннях провайдера",
+          "supportedFormats": "Підтримувані формати"
+        },
+        "imageModelAbility": {
+          "generation": "Текст у зображення",
+          "imageToImage": "Зображення в зображення"
+        },
+        "configUpdated": "AI налаштування оновлено",
+        "noModelFound": "Модель не знайдена",
+        "searchModel": "Пошук моделі...",
+        "selectModel": "Вибрати модель...",
+        "defaultModel": "{{name}} (За замовчуванням)",
+        "moreModels": "Більше моделей",
+        "agentModelWarningConfirm": "Зрозуміло",
+        "recommendedModelNudge": {
+          "title": "Спробуйте {{model}}",
+          "description": "Отримуйте кращі результати AI з набагато меншим використанням кредитів.",
+          "use": "Використати {{model}}",
+          "later": "Пізніше"
+        },
+        "noModelsAvailable": "Немає доступних моделей",
+        "input": "Ввід {{ratio}}",
+        "output": "Вивід {{ratio}}",
+        "inputOrOutputTip": "Співвідношення витрати-вихід являє собою обмінний курс між кредитами та токенами. Наприклад, \"1:1000\" означає, що 1 кредит приблизно дорівнює 1000 жетонів.<br></br>Примітка: за кожне використання віднімається принаймні 1 кредит. Навіть якщо фактичне споживання менше 1 кредиту, воно все одно стягуватиметься як 1 кредит.",
+        "imageOutput": "За зображення {{credits}}",
+        "imageOutputTip": "Зображення потребує кредитів, кожне зображення споживає {{credits}} кредитів",
+        "supportImageOutputTip": "Ця модель підтримує генерацію зображень",
+        "supportVisionTip": "Ця модель підтримує введення зображень",
+        "supportAudioTip": "Ця модель підтримує введення аудіо",
+        "supportVideoTip": "Ця модель підтримує введення відео",
+        "supportDeepThinkTip": "Ця модель підтримує глибоке мислення",
+        "testConnection": "Тест",
+        "testing": "Тестування...",
+        "testSuccess": "Тест успішний",
+        "testCompleteWithCount": "Тест завершено: пройдено {{success}}/{{total}} моделей",
+        "allTestsFailed": "Усі тести моделей не пройдено",
+        "testFailed": "Тест невдалий",
+        "batchTest": "Перевірити можливості моделі",
+        "test": "Перевірити",
+        "testProvider": "Перевірити",
+        "testProviderTooltip": "Перевірити всі {{count}} моделей цього провайдера",
+        "batchTesting": "Перевірка всіх моделей...",
+        "batchTestComplete": "Пакетну перевірку завершено",
+        "batchTestResults": "Результати пакетної перевірки",
+        "batchTestResultsSummary": "Перевірено {{tested}} із {{total}} моделей: пройдено {{success}}, не пройдено {{failed}}",
+        "batchTestNoModels": "Немає налаштованих моделей для перевірки",
+        "modelStatus": "Стан моделі",
+        "imageSupport": "Підтримка зображень",
+        "basicGeneration": "Базова генерація",
+        "supported": "Підтримується",
+        "notSupported": "Не підтримується",
+        "partialSupport": "Часткова підтримка",
+        "urlSupport": "URL",
+        "base64Support": "Base64",
+        "closeResults": "Закрити",
+        "retryFailed": "Повторити невдалі",
+        "stopTest": "Зупинити",
+        "pending": "Очікування",
+        "configuredModels": "Налаштовані моделі",
+        "fillRequiredFields": "Будь ласка, заповніть всі обов'язкові поля",
+        "modelsRequired": "Будь ласка, заповніть принаймні одну модель",
+        "noValidModel": "Не знайдено допустимої моделі",
+        "addCustomModel": "Додати власну модель",
+        "isOpenRouter": "OpenRouter",
+        "modelRates": "Тарифи моделей",
+        "modelSettings": "Налаштування моделі",
+        "duplicateModel": "Модель {{model}} вказана і в «{{first}}», і в «{{second}}»; модель може входити лише до одного провайдера кожного типу.",
+        "model": "Модель",
+        "inputRate": "Ввід, USD/токен",
+        "outputRate": "Вивід, USD/токен",
+        "inputRateTip": "Згенерована ціна вводу власного провайдера в USD за токен",
+        "outputRateTip": "Згенерована ціна виводу власного провайдера в USD за токен",
+        "rateExplanationTitle": "Налаштувати тарифи власного провайдера",
+        "rateExplanationFormula": "Укажіть множник відносно еталона AI Gateway. Наприклад, 0,1 означає, що ціна власного провайдера становить 10 % від еталонної.",
+        "rateExplanationExample": "Ціни на ввід, вивід, кеш, міркування, зображення та вебпошук формуються з еталона AI Gateway з тим самим множником. Під час тарифікації USD переводяться в кредити: 1 USD = 100 кредитів.",
+        "ratesDescription": "Згенеровані значення зберігаються в modelConfigs[model].pricing і використовуються для тарифікації власних провайдерів на рівні інстансу. Стовпець «Коефіцієнт» досі показує рівень витрат за Claude Opus 4.6 = 1x.",
+        "advancedRates": "Згенеровані розширені тарифи",
+        "advancedRatesDescription": "Ці розширені тарифи формуються з еталона AI Gateway із заданим множником. Вони показані для перевірки та зберігаються разом із тарифами моделі.",
+        "cacheRead": "Кеш↓",
+        "cacheWrite": "Кеш↑",
+        "reasoning": "Міркув.",
+        "perImage": "Зображення",
+        "cacheReadRateTip": "USD за кешований вхідний токен, якщо провайдер тарифікує кешований ввід окремо",
+        "cacheWriteRateTip": "USD за токен запису в кеш, якщо провайдер тарифікує запис у кеш окремо",
+        "reasoningRateTip": "USD за токен міркування, якщо провайдер тарифікує такі токени окремо",
+        "imageRateTip": "USD за згенероване зображення, якщо провайдер тарифікує за зображеннями",
+        "imageModel": "Модель зображень",
+        "imageGeneration": "Генерація зображень",
+        "imageToImage": "Зображення в зображення",
+        "clickToToggleImageModel": "💡 Натисніть, щоб позначити як модель генерації зображень",
+        "markAsImageModel": "Позначити як модель генерації зображень",
+        "imageGenerationModel": "Модель генерації зображень",
+        "markedAsImageModel": "Позначено як модель генерації зображень. Буде перевірено можливості «текст у зображення» та «зображення в зображення».",
+        "markedAsTextModel": "Позначено як текстову модель. Буде перевірено можливість роботи із зображеннями (введення зображень).",
+        "fetchPricingError": "Не вдалося отримати тарифи",
+        "openRouterId": "ID моделі шлюзу",
+        "notFound": "Не знайдено",
+        "applyPricing": "Застосувати ({{count}})",
+        "pricingApplied": "Тарифи застосовано",
+        "pricingAppliedCount": "Оновлено тарифи для {{count}} моделей",
+        "relativeRatio": "Коефіцієнт",
+        "webSearch": "Веб",
+        "referencePricingTip": "Еталонна ціна з каталогу моделей AI Gateway",
+        "applyReferencePricingTip": "Сформувати тарифи власного провайдера з цієї еталонної ціни AI Gateway",
+        "optionalPricing": "необов’язково",
+        "gatewayRatio": "Множник шлюзу",
+        "gatewayRatioTip": "Множник відносно еталона AI Gateway. 0,1 означає 10 % від еталонної ціни.",
+        "generatedPricing": "Згенеровані тарифи",
+        "generatedPricingTip": "Згенерована ціна вводу/виводу власного провайдера, зберігається в modelConfigs[model].pricing",
+        "rateExplanationManual": "Автоматично дібраного еталона немає? Виберіть еталонну модель вручну в діалозі редагування моделі.",
+        "referenceModelLabel": "Еталонна модель",
+        "relativeRatioTip": "Рівень витрат відносно Claude Opus 4.6 = 1x за наявним зваженим алгоритмом",
+        "hint": {
+          "title": "Пропозиції",
+          "missingV1Suffix": "У базовому URL, можливо, бракує суфікса «/v1». Більшість OpenAI-сумісних API потребують URL, що закінчуються на «/v1» (наприклад, https://api.openai.com/v1)",
+          "removeTrailingSlash": "Спробуйте прибрати кінцеву косу риску з базового URL",
+          "checkApiKey": "Перевірте, що ключ API правильний і не втратив чинності",
+          "azureDeployment": "Для Azure переконайтеся, що в базовому URL вказано правильні ім’я ресурсу та розгортання",
+          "checkQuotaOrPermission": "У ключа API може бракувати прав або вичерпано квоту. Перевірте стан облікового запису",
+          "checkModelName": "Назва моделі може бути неправильною. Перевірте, чи відповідає вона тому, що підтримує провайдер",
+          "checkConnection": "Не вдається підключитися до сервера. Перевірте правильність базового URL і доступність сервера",
+          "ollamaRunning": "Переконайтеся, що Ollama запущено локально. Його можна запустити командою «ollama serve»",
+          "sslCertificate": "Проблема із SSL-сертифікатом. За самопідписаного сертифіката може знадобитися додаткове налаштування",
+          "checkConfiguration": "Перевірте конфігурацію. Переконайтеся, що базовий URL, ключ API та назва моделі вказані правильно"
+        },
+        "recommended": "Рекомендовано",
+        "enabled": "Увімкнено",
+        "gatewayModels": "Моделі AI Gateway",
+        "gatewayModelsDescription": "Налаштуйте рекомендовані моделі через Vercel AI Gateway для оптимальної підтримки AI SDK",
+        "gatewayDescription": "Використовуйте AI Gateway для найкращої сумісності та надійності. Ключ API налаштовується в розділі «App» нижче.",
+        "providerDescription": "LLM провайдер для використання",
+        "noGatewayModels": "Моделі шлюзу не налаштовано. Додайте моделі, щоб почати.",
+        "addModel": "Додати модель",
+        "addGatewayModel": "Додати модель шлюзу",
+        "popularModels": "Популярні моделі",
+        "modelId": "ID моделі",
+        "modelIdHint": "Ідентифікатор моделі, який використовує AI Gateway (наприклад, anthropic/claude-sonnet-4)",
+        "searchModelPlaceholder": "Введіть текст для пошуку моделей...",
+        "noMatchingModels": "Відповідних моделей не знайдено",
+        "typeToSearch": "Введіть ключові слова для пошуку доступних моделей",
+        "modelNotFound": "Цей ID моделі не знайдено в списку доступних, перевірте написання",
+        "testModel": "Перевірити модель",
+        "testModelSuccess": "Тест моделі пройдено! API відповів коректно",
+        "testModelImageSuccess": "Наявність моделі зображень в API підтверджено",
+        "testModelNotFound": "Модель не знайдено у списку API",
+        "displayLabel": "Відображувана назва",
+        "isImageModel": "Це модель генерації зображень",
+        "capabilities": "Можливості",
+        "setAsDefault": "Зробити моделлю чату за замовчуванням",
+        "quickAdd": "Швидко додати популярні моделі:",
+        "guide": {
+          "configStatus": "Стан конфігурації",
+          "ready": "Готово",
+          "needsAttention": "Потребує уваги",
+          "incomplete": "Незавершено",
+          "aiEnabled": "ШІ увімкнено",
+          "aiEnabledDesc": "Власні моделі увімкнено для цього інстансу",
+          "aiDisabledDesc": "Увімкніть, щоб використовувати власні моделі ШІ",
+          "gatewayKey": "Ключ API шлюзу",
+          "gatewayKeyConfigured": "Ключ AI Gateway налаштовано",
+          "gatewayKeyMissing": "Налаштуйте ключ API AI Gateway для рекомендованої конфігурації",
+          "gatewayKeyRequired": "Спершу налаштуйте ключ API AI Gateway у розділі «App» нижче",
+          "gatewayModels": "Моделі шлюзу",
+          "gatewayModelsConfigured": "Увімкнено моделей: {{count}}",
+          "gatewayModelsEmpty": "Додайте моделі шлюзу для вибору користувачами",
+          "providers": "Власні провайдери",
+          "providersConfigured": "Налаштовано провайдерів: {{count}}",
+          "providersEmpty": "Власних провайдерів не налаштовано",
+          "chatModel": "Модель чату за замовчуванням",
+          "chatModelGateway": "Використовується модель шлюзу",
+          "chatModelProvider": "Використовується модель власного провайдера",
+          "chatModelMissing": "Виберіть модель чату за замовчуванням"
+        },
+        "enableCard": {
+          "title": "Сервіси ШІ",
+          "ready": "Налаштовано й готово до використання",
+          "needsConfig": "Увімкнено, але потребує налаштування нижче",
+          "disabled": "Функції ШІ наразі вимкнено",
+          "missingConfig": "Бракує конфігурації:",
+          "allConfigured": "Усі налаштування завершено"
+        },
+        "wizard": {
+          "setupProgress": "Хід налаштування",
+          "checklist": "Контрольний список",
+          "allComplete": "Усі необхідні налаштування завершено! ШІ готовий до використання.",
+          "nextStep": "Далі: {{step}}",
+          "configureAI": "Виконайте наведені кроки, щоб увімкнути ШІ",
+          "optional": "Необов’язково",
+          "gatewayHelp": "AI Gateway: один ключ API для сотень моделей; для першого використання потрібно додати банківську картку у Vercel;",
+          "gatewayByok": "підтримується (використовуйте власні ключі провайдерів)",
+          "getApiKey": "Отримати ключ API",
+          "keyInvalid": "Недійсний ключ API, перевірте й повторіть",
+          "gatewayErrorUnauthorized": "Недійсний ключ API. Перевірте, чи правильно його скопійовано",
+          "gatewayErrorNeedCreditCard": "Для використання AI Gateway потрібна банківська картка. Додайте її в панелі Vercel",
+          "gatewayErrorInsufficientQuota": "Недостатньо коштів на рахунку. Поповніть і повторіть",
+          "gatewayErrorForbidden": "Доступ заборонено. Перевірте стан облікового запису в панелі Vercel",
+          "gatewayErrorNetwork": "Помилка мережі. Перевірте підключення або налаштування проксі",
+          "pleaseTest": "Натисніть «Перевірити», щоб перевірити ключ API",
+          "test": "Перевірити",
+          "testing": "Перевірка...",
+          "attachmentTest": {
+            "title": "Режим передавання вкладень",
+            "urlMode": "Режим URL",
+            "base64Mode": "Режим Base64",
+            "accessible": "Доступно",
+            "inaccessible": "Недоступно",
+            "urlNotAccessibleWarning": "Сервіс ШІ не може звернутися до URL вкладень. Це типово для інтранет-розгортань. Режим Base64 увімкнено автоматично.",
+            "useBase64Mode": "Використовувати режим Base64",
+            "base64ModeDescription": "Перетворювати вкладення в Base64 перед надсиланням (Teable недоступний із публічної мережі)",
+            "originChanged": "PUBLIC_ORIGIN змінився",
+            "originChangedDesc": "Адреса сервера змінилася з часу останньої перевірки. Повторіть тест, щоб перевірити доступність вкладень."
+          },
+          "saveAndContinue": "Зберегти й продовжити",
+          "completeStep1First": "Спершу виконайте крок 1: налаштуйте API LLM",
+          "completeStep2First": "Спершу виконайте крок 2: додайте щонайменше одну модель",
+          "addCustom": "Власний варіант...",
+          "enabledModels": "Увімкнені моделі",
+          "chatDefault": "За замовчуванням для чату",
+          "noModelsAvailable": "Доступних моделей немає, спершу додайте моделі на кроці 2",
+          "quickSetup": "Швидке налаштування",
+          "useRecommended": "Використати рекомендоване",
+          "useRecommendedDesc": "Одним кліком зробити {{model}} моделлю за замовчуванням для всіх сценаріїв чату",
+          "chatModels": "Рівні моделей чату",
+          "chatModelTip": "Smart — основна модель: її використовують ШІ-поля, фонові завдання та рівні без власної моделі. Рівень за замовчуванням — початковий вибір користувачів чату.",
+          "selectChatModel": "Виберіть модель чату...",
+          "lgDesc": "Складні завдання, глибокий аналіз",
+          "mdDesc": "Щоденні розмови, загальні завдання",
+          "smDesc": "Прості запити, швидкі відповіді",
+          "readyToUse": "ШІ налаштовано й готовий до використання!",
+          "customProviderHelp": "Додайте власних ШІ-провайдерів (OpenAI, Anthropic, Azure тощо) і налаштуйте ключі API та моделі.",
+          "testModelCapabilities": "Перевірити можливості моделі",
+          "customModelsAutoImported": "Моделі вашого провайдера автоматично імпортовано в пул моделей.",
+          "modelsCount": "Доступно моделей: {{count}}",
+          "customModelsHint": "Щоб змінити конфігурацію моделей, поверніться до кроку 1 та відредагуйте налаштування провайдера.",
+          "gatewayOption": {
+            "title": "AI Gateway (рекомендовано)",
+            "desc": "Доступ до сотень моделей через Vercel AI Gateway з найкращою сумісністю та надійністю"
+          },
+          "customOption": {
+            "title": "Власний провайдер",
+            "desc": "Підключення до self-hosted/приватних моделей, підтримка кількох провайдерів"
+          },
+          "step": {
+            "llmApi": "Налаштувати API LLM",
+            "llmApiDesc": "Виберіть AI Gateway або налаштуйте власних провайдерів",
+            "modelPool": "Налаштувати рекомендовані моделі",
+            "modelPoolDesc": "Рекомендовані моделі для вибору користувачами в ШІ-полях і автоматизаціях",
+            "chatModel": "Задати модель чату",
+            "chatModelDesc": "Модель для ШІ-чату на бічній панелі (виберіть із рекомендованих)",
+            "providers": "Налаштувати провайдерів",
+            "providersDesc": "Додавайте та керуйте ШІ-провайдерами"
+          }
+        }
+      },
+      "app": {
+        "domain": "Домен",
+        "customDomain": "Користувацький домен (необов'язково)",
+        "customDomainDescription": "Налаштуйте свій користувацький домен для розгортання застосунку, перейдіть до <a>домену Vercel</a> для отримання користувацького домену",
+        "vercelToken": "Токен API Vercel",
+        "vercelTokenDescription": "Перейдіть до <a>налаштувань Vercel</a> для отримання токена API",
+        "aiGateway": "Vercel AI Gateway",
+        "aiGatewayDescription": "Налаштуйте Vercel AI Gateway для доступу до сотень моделей через єдиний ендпоінт. Відкрийте <a>налаштування AI Gateway</a>, щоб отримати ключ API",
+        "aiGatewayApiKey": "Ключ API AI Gateway",
+        "aiGatewayKeyConfigured": "Ключ API налаштовано",
+        "aiGatewayBaseUrl": "Власний URL шлюзу"
+      }
+    },
+    "action": {
+      "enterApiKey": "Введіть API ключ",
+      "goToConfiguration": "Перейти до налаштувань"
+    },
+    "tips": {
+      "thankYouForUsingTeable": "Дякуємо за використання teable",
+      "pleaseGoToConfiguration": "Будь ласка, перейдіть на сторінку налаштувань, щоб завершити деякі початкові налаштування, щоб насолоджуватися повною функціональністю та кращим користувацьким досвідом teable",
+      "pleaseContactAdmin": "Будь ласка, зверніться до адміністратора"
+    },
+    "configuration": {
+      "title": "Очікування налаштування",
+      "description": "Завершіть ці налаштування, щоб отримати повні функції",
+      "progressTitle": "Хід налаштування",
+      "allComplete": "Усі налаштування завершено",
+      "incomplete": "Деякі налаштування не завершено",
+      "optional": "Необов’язково",
+      "completed": "Завершено",
+      "group": {
+        "system": "Основне",
+        "ai": "Сервіси ШІ",
+        "appBuilder": "Конструктор застосунків"
+      },
+      "copyInstance": "Копіювати ID",
+      "list": {
+        "publicOrigin": {
+          "title": "Змінна середовища PUBLIC_ORIGIN",
+          "description": "Налаштування змінної середовища <strong>PUBLIC_ORIGIN</strong> не відповідає поточній адресі доступу <underline>https://example.com</underline>, імпорт xlsx, csv та функції поля вкладень можуть працювати неправильно, рекомендується встановити на <underline>https://example.com</underline>"
+        },
+        "https": {
+          "title": "Увімкнути HTTPS",
+          "description": "Ви не ввімкнули HTTPS, функція великомасштабного копіювання (300 рядків або більше) буде недоступна, рекомендується ввімкнути."
+        },
+        "llmApi": {
+          "title": "LLM API",
+          "description": "Ви ще не налаштували AI LLM API, AI чат/AI автоматизація не буде використовуватися, <anchor>перейти до налаштувань</anchor>",
+          "errorTips": "Ви ще не налаштували AI LLM API, AI чат/AI автоматизація не буде використовуватися"
+        },
+        "aiEnable": {
+          "title": "Сервіси ШІ (чат / ШІ-поле)",
+          "description": "Увімкніть, щоб використовувати ШІ-чат, ШІ-поля та автоматизації, <anchor>перейти до налаштування</anchor>"
+        },
+        "aiLlmApi": {
+          "title": "ШІ: налаштувати API LLM",
+          "description": "Виберіть AI Gateway або налаштуйте власних провайдерів, <anchor>перейти до налаштування</anchor>"
+        },
+        "aiModelPool": {
+          "title": "ШІ: налаштувати доступні моделі",
+          "description": "Увімкніть щонайменше одну модель для ШІ-полів і автоматизацій, <anchor>перейти до налаштування</anchor>"
+        },
+        "aiChatModel": {
+          "title": "ШІ: задати модель чату",
+          "description": "Виберіть модель за замовчуванням для ШІ-чату на бічній панелі, <anchor>перейти до налаштування</anchor>"
+        },
+        "appBuilderEngine": {
+          "title": "Конструктор застосунків: рушій розгортання",
+          "description": "Налаштуйте рушій розгортання (Vercel або Teable Infra) для публікації застосунків, <anchor>перейти до налаштування</anchor>"
+        },
+        "appBuilderDomain": {
+          "title": "Конструктор застосунків: власний домен",
+          "description": "Якщо хочете публікувати застосунки на власному домені, налаштуйте домен і токен Vercel, <anchor>перейти до налаштування</anchor>"
+        },
+        "email": {
+          "title": "Електронна пошта",
+          "description": "Електронна пошта не налаштована, самообслуговування відновлення пароля та функція сповіщень електронною поштою будуть недоступні, <anchor>перейти до налаштувань</anchor>",
+          "errorTips": "Електронна пошта не налаштована, самообслуговування відновлення пароля, перевірка електронної пошти/функція сповіщень будуть недоступні"
+        },
+        "sandboxOpenSandbox": {
+          "title": "Середовище виконання ШІ-чату",
+          "description": "Налаштуйте середовище виконання OpenSandbox для ШІ-чату, <anchor>перейти до налаштування</anchor>"
+        }
+      }
+    },
+    "canary": {
+      "title": "Canary-реліз",
+      "enable": "Увімкнути canary",
+      "enableDescription": "Коли ввімкнено, для вибраних просторів активуються canary-функції",
+      "spaces": "Canary-простори",
+      "spacesDescription": "Налаштовано просторів: {{count}}",
+      "configure": "Налаштувати",
+      "spaceIds": "ID просторів",
+      "spaceIdsDescription": "Введіть ID просторів: по одному в рядку або через кому/пробіл",
+      "spaceIdsPlaceholder": "spcXXXXXXXXXXX\nspcYYYYYYYYYYY",
+      "preview": "Попередній перегляд ({{count}} ID)",
+      "noSpaceIds": "ID просторів не введено"
+    }
+  },
+  "notification": {
+    "title": "Повідомлення",
+    "unread": "Непрочитані",
+    "read": "Прочитані",
+    "markAs": "Позначити це повідомлення як {{status}}",
+    "markAllAsRead": "Відзначити всі як прочитані",
+    "noUnread": "Немає {{status}} повідомлень",
+    "noAttention": "Немає сповіщень, що потребують уваги",
+    "noSeverity": "Немає сповіщень «{{severity}}»",
+    "changeSetting": "Змінити налаштування повідомлень",
+    "new": "нових {{count}}",
+    "showMore": "Показати більше",
+    "sections": {
+      "needsAction": "Важливе",
+      "all": "Усі"
+    },
+    "severity": {
+      "critical": "Важливе",
+      "warning": "Попередження",
+      "info": "Звичайне"
+    },
+    "exportBase": {
+      "successText": "Дані експорту готові",
+      "failedText": "Експорт не вдався, спробуйте ще раз"
+    },
+    "importantNotice": {
+      "title": "Important Notice",
+      "acknowledge": "I Understand"
+    },
+    "oauthApp": {
+      "message": "Від {{app}}: {{text}}"
+    }
+  },
+  "role": {
+    "title": {
+      "owner": "Власник",
+      "creator": "Творець",
+      "editor": "Редактор",
+      "commenter": "Коментатор",
+      "viewer": "Перегляд"
+    },
+    "description": {
+      "owner": "Може повністю налаштовувати проєкти, застосунки, автоматизацію та матриці повноважень, а також керувати налаштуваннями простору й оплатою",
+      "creator": "Може повністю налаштовувати проєкти, застосунки, автоматизацію та матриці повноважень",
+      "editor": "Може редагувати записи та подання, але не може налаштовувати таблиці або поля",
+      "commenter": "Може коментувати записи",
+      "viewer": "Не може редагувати чи коментувати"
+    }
+  },
+  "trash": {
+    "spaceTrash": "Кошик простору",
+    "type": "Тип",
+    "resetTrash": "Очистити кошик",
+    "deletedBy": "Ким",
+    "deletedTime": "Час",
+    "fromSpace": "З простору \"{{name}}\"",
+    "permanentDeleteTips": "Ви впевнені, що хочете остаточно видалити \"{{name}}\" {{resource}}?",
+    "resetTrashConfirm": "Ви впевнені, що хочете очистити кошик?",
+    "addToTrash": "Перемістити в кошик",
+    "description": "Дані в кошику все ще займають місце для використання записів та використання вкладень.",
+    "spaceDescription": "Відновити простори, видалені протягом останніх {{retentionDays}} днів",
+    "spaceInnerDescription": "Відновити проєкти, видалені з цього простору протягом останніх {{retentionDays}} днів",
+    "baseDescription": "Відновити ресурси, видалені з цього проєкту протягом останніх {{retentionDays}} днів"
+  },
+  "pluginCenter": {
+    "pluginUrlEmpty": "URL-адреса пуста",
+    "install": "Встановити",
+    "publisher": "Видавець",
+    "lastUpdated": "Останнє оновлення",
+    "pluginNotFound": "Плагін не знайдено",
+    "pluginEmpty": {
+      "title": "Плагінів ще немає"
+    }
+  },
+  "automation": {
+    "turnOnTip": "Ви впевнені, що хочете увімкнути поточну автоматизацію?"
+  },
+  "email": {
+    "title": "Ел. пошта",
+    "send": "Надіслати",
+    "config": "Налаштування електронної пошти",
+    "customConfig": "Користувацький поштовий сервер",
+    "notify": "Поштові сповіщення",
+    "automation": "Автоматизація електронної пошти",
+    "customNotifyConfig": "Користувацькі налаштування поштових сповіщень",
+    "customAutomationConfig": "Користувацькі налаштування автоматизації електронної пошти",
+    "addConfig": "Додати налаштування",
+    "editConfig": "Редагувати налаштування",
+    "resetConfig": "Скинути",
+    "unsubscribeLink": "Додати посилання для відписки",
+    "unsubscribeLinkDescription": "Увімкніть для маркетингових листів: додає посилання для відписки в один клік і пропускає одержувачів, які відписалися. Для відповідей і сповіщень залиште вимкненим.",
+    "testEmail": "Тестова електронна пошта",
+    "testEmailPlaceholder": "Будь ласка, введіть тестову електронну пошту",
+    "testEmailError": "Будь ласка, введіть правильну адресу тестової електронної пошти",
+    "testEmailSend": "Тестове повідомлення успішно надіслано, перевірте свою поштову скриньку",
+    "configError": "Будь ласка, введіть правильні налаштування електронної пошти",
+    "host": "Адреса сервера",
+    "hostDescription": "Будь ласка, введіть адресу SMTP поштового сервера, наприклад: smtp.example.com",
+    "port": "Порт",
+    "secure": "SSL/TLS",
+    "auth": "Автентифікація",
+    "username": "Ім'я користувача",
+    "password": "Пароль",
+    "sender": "Адреса відправника",
+    "senderName": "Ім'я відправника",
+    "subscribe": "Підписатися",
+    "unsubscribe": "Відписатися",
+    "unsubscribeList": "Список відписки",
+    "unsubscribeTime": "Час відписки",
+    "source": "Джерело",
+    "sourceAutomationDeleted": "Автоматизацію або вузол видалено",
+    "sourceApiSend": "Надсилання листа через API",
+    "processing": "Обробка...",
+    "unsubscribeH1": "Підтвердити скасування підписки?",
+    "unsubscribeH2": "Ви збираєтеся відписатися від майбутніх рекламних акцій та оновлень продуктів Teable. Ви впевнені, що хочете відписатися?",
+    "subscribeH1": "Підтвердити підписку?",
+    "subscribeH2": "Ви збираєтеся підписатися на майбутні рекламні акції та оновлення продуктів Teable. Ви впевнені, що хочете підписатися?",
+    "unsubscribeListTip": "Наступні користувачі поточного проєкту відписалися, ви більше не зможете надсилати їм електронні листи. Під час імпорту електронних листів, будь ласка, розмістіть адреси електронної пошти в першому стовпці та назвіть заголовок \"email\".",
+    "templates": {
+      "resetPassword": {
+        "subject": "Скинути пароль - {{brandName}}",
+        "title": "Скиньте ваш пароль",
+        "message": "Якщо ви не запитували цю зміну, будь ласка, проігноруйте цей лист. В іншому випадку натисніть кнопку нижче, щоб скинути пароль.",
+        "buttonText": "Скинути пароль"
+      },
+      "emailVerifyCode": {
+        "signupVerification": {
+          "subject": "Підтвердження реєстрації - {{brandName}}",
+          "title": "Підтвердження реєстрації",
+          "message": "Ваш код підтвердження {{code}}, будь ласка, використайте його протягом {{expiresIn}} хвилин."
+        },
+        "signinVerification": {
+          "subject": "Підтвердження входу - {{brandName}}",
+          "title": "Підтвердження входу",
+          "message": "Ваш код для входу: {{code}}. Використайте його протягом {{expiresIn}} хвилин. Якщо ви не запитували код, просто проігноруйте цей лист."
+        },
+        "domainVerification": {
+          "subject": "Підтвердження домену - {{brandName}}",
+          "title": "Підтвердження домену",
+          "message": "Ваш одноразовий код: {{code}}, будь ласка, використайте його протягом {{expiresIn}} хвилин."
+        },
+        "changeEmailVerification": {
+          "subject": "Підтвердження зміни електронної пошти - {{brandName}}",
+          "title": "Підтвердження зміни електронної пошти",
+          "message": "Ваш код підтвердження {{code}}, будь ласка, використайте його протягом {{expiresIn}} хвилин."
+        }
+      },
+      "collaboratorCellTag": {
+        "subject": "{{fromUserName}} додав вас до поля {{fieldName}} запису в {{tableName}}",
+        "title": "<strong>{{fromUserName}}</strong> додав вас до поля <strong>{{fieldName}}</strong> запису в <strong>{{tableName}}</strong>",
+        "buttonText": "Переглянути запис"
+      },
+      "collaboratorMultiRowTag": {
+        "subject": "{{fromUserName}} додав вас до {{refLength}} записів у {{tableName}}",
+        "title": "<strong>{{fromUserName}}</strong> додав вас до <strong>{{refLength}}</strong> записів у <strong>{{tableName}}</strong>",
+        "buttonText": "Переглянути записи",
+        "more": "і ще {{remaining}}"
+      },
+      "invite": {
+        "subject": "{{name}} ({{email}}) запросив вас до {{resourceAlias}} {{resourceName}} - {{brandName}}",
+        "title": "Запрошення до співпраці",
+        "message": "<strong>{{name}}</strong> ({{email}}) запросив вас до {{resourceAlias}} <strong>{{resourceName}}</strong>.",
+        "buttonText": "Прийняти запрошення"
+      },
+      "waitlistInvite": {
+        "subject": "Ласкаво просимо - {{brandName}}",
+        "title": "Ласкаво просимо",
+        "message": "Ви успішно приєдналися до списку очікування {{brandName}}. Будь ласка, використовуйте наступний код запрошення для реєстрації: {{code}}, його можна використати {{times}} разів.",
+        "buttonText": "Зареєструватися"
+      },
+      "test": {
+        "subject": "Тестовий лист - {{brandName}}",
+        "title": "Тестовий лист",
+        "message": "Це тестовий лист, будь ласка, проігноруйте його."
+      },
+      "notify": {
+        "template": {
+          "approved": {
+            "title": "Ваш шаблон {{name}} опубліковано",
+            "message": "{{name}} пройшов перевірку й тепер доступний публічно як версія {{version}}.",
+            "messageWithNote": "{{name}} пройшов перевірку й тепер доступний публічно як версія {{version}}. Примітка рецензента: {{note}}",
+            "messageNoPayout": "{{name}} пройшов перевірку й тепер доступний публічно як версія {{version}}. Ви ще не налаштували спосіб виплати, тож заробіток буде перенесено; додайте його в Центрі автора.",
+            "messageNoPayoutWithNote": "{{name}} пройшов перевірку й тепер доступний публічно як версія {{version}}. Ви ще не налаштували спосіб виплати, тож заробіток буде перенесено; додайте його в Центрі автора. Примітка рецензента: {{note}}"
+          },
+          "rejected": {
+            "title": "Ваш шаблон {{name}} повернуто на доопрацювання",
+            "message": "{{name}} не пройшов перевірку.",
+            "messageWithNote": "{{name}} не пройшов перевірку. Примітка рецензента: {{note}}"
+          }
+        },
+        "subject": "Сповіщення - {{brandName}}",
+        "title": "Сповіщення",
+        "buttonText": "Переглянути",
+        "import": {
+          "title": "Сповіщення про результат імпорту",
+          "table": {
+            "aborted": {
+              "message": "❌ Імпорт {{tableName}} перервано: {{errorMessage}} діапазон невдалих рядків: [{{range}}]. Будь ласка, перевірте дані цього діапазону та спробуйте знову."
+            },
+            "failed": {
+              "message": "❌ Імпорт {{tableName}} не вдався: {{errorMessage}}"
+            },
+            "planLimitExceeded": {
+              "message": "❌ Імпорт {{tableName}} не вдався: Досягнуто ліміт рядків, оновіть план для імпорту більшої кількості записів"
+            },
+            "noRecordsProcessed": {
+              "message": "❌ Імпорт {{tableName}} не вдався: Жоден запис не був оброблений"
+            },
+            "success": {
+              "message": "🎉 {{tableName}} успішно імпортовано.",
+              "inplace": "🎉 {{tableName}} успішно імпортовано на місці."
+            },
+            "partialSuccess": {
+              "message": "⚠️ {{tableName}} partially imported: {{successCount}} rows succeeded, {{failedCount}} rows failed. <a href=\"{{errorReportUrl}}\" target=\"_blank\" rel=\"noopener\" download=\"error_report.csv\" style=\"color:#2563eb;text-decoration:underline;\">📥 Download</a>",
+              "messageNoReport": "⚠️ {{tableName}} partially imported: {{successCount}} rows succeeded, {{failedCount}} rows failed."
+            },
+            "allFailed": {
+              "message": "❌ {{tableName}} import failed: all {{failedCount}} rows failed. <a href=\"{{errorReportUrl}}\" target=\"_blank\" rel=\"noopener\" download=\"error_report.csv\" style=\"color:#2563eb;text-decoration:underline;\">📥 Download</a>",
+              "messageNoReport": "❌ {{tableName}} import failed: all {{failedCount}} rows failed."
+            }
+          }
+        },
+        "recordComment": {
+          "title": "Сповіщення про коментар до запису",
+          "message": "{{fromUserName}} залишив коментар до {{recordName}} у {{tableName}} у {{baseName}}"
+        },
+        "collaboratorInvite": {
+          "space": "{{fromUserName}} запросив вас приєднатися до простору {{resourceName}}",
+          "base": "{{fromUserName}} запросив вас приєднатися до проєкту {{resourceName}}"
+        },
+        "automation": {
+          "title": "Сповіщення про автоматизацію",
+          "failed": {
+            "title": "Автоматизація {{name}} не вдалася",
+            "message": "Ваша автоматизація {{name}} не змогла виконатися. Натисніть кнопку нижче, щоб переглянути конкретні помилки з історії виконання."
+          },
+          "insufficientCredit": {
+            "title": "Автоматизація {{name}} не вдалася через недостатній кредит",
+            "message": "Ваша автоматизація {{name}} не змогла виконатися через недостатній кредит. Будь ласка, оновіть підписку або зверніться до підтримки."
+          },
+          "runQuotaExceeded": {
+            "title": "Автоматизація {{name}} досягла максимального місячного ліміту запусків",
+            "message": "Місячний ліміт запусків для автоматизації {{name}} вичерпано, тому зараз запуск недоступний. Оновіть підписку або придбайте додаткові запуски."
+          },
+          "failedSummary": {
+            "title": "Автоматизація {{name}} завершилася помилкою {{failCount}} разів",
+            "message": "Ваша автоматизація {{name}} накопичила {{failCount}} послідовних помилок. Відкрийте історію запусків, щоб переглянути деталі."
+          },
+          "connectorDisconnected": {
+            "title": "Автоматизація {{name}} перестала отримувати події конектора"
+          }
+        },
+        "routine": {
+          "failed": {
+            "title": "Помилка виконання рутини {{name}}",
+            "message": "Ваша рутина {{name}} завершилася з помилкою. Відкрийте історію запусків, щоб переглянути деталі."
+          },
+          "failedSummary": {
+            "title": "Рутина {{name}} зазнала невдачі {{failCount}} разів",
+            "message": "Ваша рутина {{name}} зазнала невдачі {{failCount}} разів поспіль. Відкрийте історію запусків, щоб переглянути деталі."
+          },
+          "insufficientCredit": {
+            "title": "Рутину {{name}} пропущено через нестачу AI-кредитів",
+            "message": "Ваша рутина {{name}} не була запущена через нестачу AI-кредитів. Поповніть кредити або оновіть тариф."
+          },
+          "autoDeactivated": {
+            "title": "Рутину {{name}} призупинено після {{failCount}} невдач поспіль",
+            "message": "Ваша рутина {{name}} зазнала невдачі {{failCount}} разів поспіль і була автоматично призупинена. Усуньте проблему та активуйте її знову."
+          },
+          "connectorDisconnected": {
+            "title": "Рутина {{name}} перестала отримувати події конектора"
+          }
+        },
+        "billing": {
+          "title": "Сповіщення про оплату",
+          "credit": {
+            "warning80": {
+              "title": "Простір {{spaceName}} кредити ШІ використано 80 %",
+              "message": "Простір {{spaceName}} використав 80 % кредитів ШІ. Розгляньте можливість оновлення або придбання додаткових кредитів."
+            },
+            "warning90": {
+              "title": "Простір {{spaceName}} кредити ШІ використано 90 %",
+              "message": "Простір {{spaceName}} використав 90 % кредитів ШІ. Оновіть план найближчим часом, щоб уникнути перебоїв."
+            },
+            "anomaly": {
+              "dailySpike": {
+                "title": "Простір {{spaceName}}: виявлено незвичний сплеск кредитів ШІ",
+                "message": "Простір {{spaceName}}: сьогоднішнє використання кредитів ШІ ({{todayValue}}) у {{multiplier}} разів перевищує середній денний показник ({{ewma}}). Це може вказувати на неочікувану активність. Будь ласка, перевірте використання. Основні учасники: {{topContributors}}"
+              },
+              "burst": {
+                "title": "Простір {{spaceName}}: виявлено сплеск кредитів ШІ",
+                "message": "Простір {{spaceName}}: {{recentValue}} кредитів ШІ використано за останні {{windowMinutes}} хвилин, що у {{multiplier}} разів перевищує історичний годинний P95 ({{hourlyP95}}). Це може вказувати на неочікувану активність. Основні учасники: {{topContributors}}"
+              }
+            }
+          },
+          "automationRun": {
+            "warning80": {
+              "title": "Простір {{spaceName}} запуски автоматизації використано 80 % квоти",
+              "message": "Простір {{spaceName}} використав {{usedRuns}} з {{totalLimit}} запусків автоматизації (80 %). Розгляньте можливість оновлення плану."
+            },
+            "warning90": {
+              "title": "Простір {{spaceName}} запуски автоматизації використано 90 % квоти",
+              "message": "Простір {{spaceName}} використав {{usedRuns}} з {{totalLimit}} запусків автоматизації (90 %). Оновіть план найближчим часом, щоб уникнути перебоїв."
+            },
+            "gracePeriod": {
+              "title": "Простір {{spaceName}} запуски автоматизації перевищено – пільговий період активний",
+              "message": "Простір {{spaceName}} перевищив квоту запусків автоматизації. Автоматизації припинять роботу та будуть вимкнені через {{remainingHours}} годин. Будь ласка, оновіть свій план."
+            },
+            "anomaly": {
+              "dailySpike": {
+                "title": "Простір {{spaceName}}: незвичний сплеск запусків автоматизації",
+                "message": "Простір {{spaceName}}: сьогоднішні запуски автоматизації ({{todayValue}}) у {{multiplier}} разів перевищують середній денний показник ({{ewma}}). Це може вказувати на некеровану автоматизацію. Будь ласка, перевірте свої робочі процеси. Основні учасники: {{topContributors}}"
+              },
+              "burst": {
+                "title": "Простір {{spaceName}}: виявлено сплеск запусків автоматизації",
+                "message": "Простір {{spaceName}}: {{recentValue}} запусків автоматизації виявлено за останні {{windowMinutes}} хвилин, що у {{multiplier}} разів перевищує історичний годинний P95 ({{hourlyP95}}). Це може вказувати на зациклення або помилку конфігурації. Основні учасники: {{topContributors}}"
+              }
+            }
+          },
+          "customDomain": {
+            "expired": {
+              "title": "План Бізнес для простору {{spaceName}} закінчився: користувацький домен буде вимкнено",
+              "message": "План Бізнес для простору {{spaceName}} закінчився, тому користувацькі домени більше не входять до вашого плану. Користувацький домен {{domains}} перестане працювати {{releaseDate}} (UTC). Поновіть план до цієї дати, щоб зберегти його активним."
+            },
+            "released": {
+              "title": "Користувацький домен простору {{spaceName}} вимкнено",
+              "message": "План Бізнес для простору {{spaceName}} не було поновлено, тому користувацький домен {{domains}} вимкнено та відв'язано від вашого застосунку. Перейдіть на Бізнес, щоб знову прив'язати користувацький домен."
+            }
+          }
+        },
+        "exportBase": {
+          "title": "Сповіщення про результат експорту проєкту",
+          "success": {
+            "message": "{{baseName}} успішно експортовано: <a href=\"{{previewUrl}}\" name=\"{{name}}\" class=\"hover:text-blue-500 underline\">🗂️ {{name}}</a>"
+          },
+          "failed": {
+            "message": "❌ Експорт {{baseName}} не вдався: {{errorMessage}}"
+          }
+        },
+        "task": {
+          "ai": {
+            "failed": {
+              "title": "Завдання ШІ не вдалося в таблиці {{tableName}}",
+              "message": "Завдання ШІ для поля {{fieldName}} в таблиці {{tableName}} (ID запису: {{recordId}}) не вдалося.\n\n{{errorMsg}}\n\nНатисніть кнопку нижче, щоб переглянути деталі."
+            },
+            "cancelled": {
+              "title": "Завдання ШІ скасовано",
+              "rateLimit": "Завдання ШІ для таблиці \"{{tableName}}\" було скасовано через обмеження частоти запитів (429). Будь ласка, спробуйте пізніше.",
+              "creditExhausted": "Завдання ШІ для таблиці \"{{tableName}}\" було скасовано, оскільки кредити вичерпано. Будь ласка, оновіть підписку або зачекайте на оновлення кредитів.",
+              "providerBilling": "Завдання ШІ для таблиці \"{{tableName}}\" скасовано: провайдер моделі відхилив запит через проблеми з оплатою. Перевірте баланс і стан оплати облікового запису, до якого належить API-ключ, налаштований для цієї моделі. Помилка: {{errorMessage}}",
+              "authFailed": "Завдання ШІ для таблиці \"{{tableName}}\" було скасовано через помилку автентифікації. Будь ласка, перевірте налаштування API-ключа.",
+              "serviceUnavailable": "Завдання ШІ для таблиці \"{{tableName}}\" було скасовано, оскільки сервіс ШІ тимчасово недоступний. Будь ласка, спробуйте пізніше.",
+              "unknown": "Завдання ШІ для таблиці \"{{tableName}}\" було скасовано. Помилка: {{errorMessage}}"
+            }
+          }
+        },
+        "rewardRejected": {
+          "title": "Заявку на винагороду відхилено",
+          "message": "Вашу заявку на винагороду для <a href=\"{{spaceUrl}}\">{{spaceName}}</a> було відхилено з наступних причин: {{errorMessages}}. Будь ласка, перевірте та надішліть повторно.",
+          "buttonText": "Переглянути Простір"
+        },
+        "rewardApproved": {
+          "title": "Заявку на винагороду схвалено",
+          "message": "Вітаємо! Вашу заявку на винагороду для <a href=\"{{spaceUrl}}\">{{spaceName}}</a> було схвалено. Додано {{amount}} кредитів, дійсних протягом {{expiredDays}} днів.",
+          "buttonText": "Переглянути Простір"
+        },
+        "connectorEvent": {
+          "disconnected": {
+            "grantRevoked": "Авторизацію облікового запису, яку використовує тригер події конектора {{name}}, відкликано. Підключіть обліковий запис знову, виберіть його в тригері ще раз і збережіть, щоб відновити.",
+            "connectionDeleted": "Підключений обліковий запис, який використовує тригер події конектора {{name}}, видалено. Підключіть обліковий запис знову, виберіть його в тригері ще раз і збережіть, щоб відновити.",
+            "providerDisabled": "Підписку на події {{name}} зупинив підключений застосунок (прострочені облікові дані або несправна підписка). Підключіть обліковий запис знову, виберіть його в тригері ще раз і збережіть, щоб відновити.",
+            "subscribeFailed": "Не вдалося створити підписку на події {{name}}. Перевірте параметри тригера і збережіть ще раз, щоб повторити спробу."
+          }
+        },
+        "userDataExport": {
+          "buttonText": "Завантажити мої дані",
+          "failed": "Вітаємо, {{name}}!<br><br>Не вдалося завершити пакування ваших даних:<br><em>{{errorMessage}}</em><br><br>Зверніться до адміністратора.",
+          "accountDeleted": {
+            "title": "Експорт ваших даних готовий",
+            "message": "Вітаємо, {{name}}!<br><br>Перед видаленням облікового запису Teable ви запросили копію своїх даних. Вона готова.<br><br>Посилання нижче дійсне протягом {{expiresInDays}} дн."
+          },
+          "accountExported": {
+            "title": "Експорт ваших даних готовий",
+            "message": "Вітаємо, {{name}}!<br><br>Ви запросили копію своїх даних Teable. Вона готова.<br><br>Посилання нижче дійсне протягом {{expiresInDays}} дн."
+          },
+          "deactivated": {
+            "title": "Ваш обліковий запис деактивовано",
+            "message": "Вітаємо, {{name}}!<br><br>Ваш обліковий запис Teable деактивовано, оскільки він порушив наші <a href=\"https://teable.ai/terms-of-service\" style=\"color:inherit;text-decoration:underline\">Умови використання</a>.<br>Ми запакували дані з просторів, власником яких ви були, щоб ви могли зберегти копію.<br><br>Посилання нижче дійсне протягом {{expiresInDays}} дн.<br>Якщо ви вважаєте, що це помилка, зверніться до свого адміністратора."
+          },
+          "deleted": {
+            "title": "Ваш обліковий запис видалено",
+            "message": "Вітаємо, {{name}}!<br><br>Ваш обліковий запис Teable видалено, оскільки він порушив наші <a href=\"https://teable.ai/terms-of-service\" style=\"color:inherit;text-decoration:underline\">Умови використання</a>.<br>Ми запакували дані з просторів, власником яких ви були, щоб ви могли зберегти копію.<br><br>Посилання нижче дійсне протягом {{expiresInDays}} дн.<br>Якщо ви вважаєте, що це помилка, зверніться до свого адміністратора."
+          },
+          "spaceDeleted": {
+            "title": "Експорт вашого простору готовий",
+            "message": "Вітаємо, {{name}}!<br><br>Перед остаточним видаленням простору {{spaceNames}} ви запросили його копію. Вона готова.<br><br>Посилання нижче дійсне протягом {{expiresInDays}} дн."
+          }
+        },
+        "chatUnread": {
+          "done": {
+            "title": "Ваше завдання виконано",
+            "message": "Вітаємо, {{name}}!<br><br>Завдання, яке ви запустили в Teable, виконано:<br><em>{{prompt}}</em><br><br>Результат готовий до перегляду.",
+            "messageWithoutPrompt": "Вітаємо, {{name}}!<br><br>Завдання, яке ви запустили в Teable, виконано.<br><br>Результат готовий до перегляду.",
+            "buttonText": "Переглянути результат"
+          },
+          "failed": {
+            "title": "Не вдалося виконати завдання",
+            "message": "Вітаємо, {{name}}!<br><br>Завдання, яке ви запустили в Teable, не було виконано:<br><em>{{prompt}}</em><br><br>Відкрийте його, щоб дізнатися причину та спробувати знову.",
+            "messageWithoutPrompt": "Вітаємо, {{name}}!<br><br>Завдання, яке ви запустили в Teable, не було виконано.<br><br>Відкрийте його, щоб дізнатися причину та спробувати знову.",
+            "buttonText": "Докладніше"
+          },
+          "creditExhausted": {
+            "title": "Завдання зупинено: закінчилися кредити ШІ",
+            "message": "Вітаємо, {{name}}!<br><br>Завдання, яке ви запустили в Teable, зупинено, бо закінчилися кредити ШІ:<br><em>{{prompt}}</em><br><br>Поповніть кредити або перейдіть на інший тариф, щоб продовжити з того місця, де воно зупинилося.",
+            "messageWithoutPrompt": "Вітаємо, {{name}}!<br><br>Завдання, яке ви запустили в Teable, зупинено, бо закінчилися кредити ШІ.<br><br>Поповніть кредити або перейдіть на інший тариф, щоб продовжити з того місця, де воно зупинилося.",
+            "buttonText": "Докладніше"
+          }
+        }
+      }
+    }
+  },
+  "waitlist": {
+    "title": "Черга",
+    "email": "Електронна пошта",
+    "joinTitle": "Ми швидко розширюємося, щоб задовольнити попит",
+    "joinDesc": "Приєднуйтесь до черги — ми повідомимо вас, як тільки будемо готові",
+    "emailPlaceholder": "Введіть вашу електронну пошту...",
+    "youAreOnTheList": "Ви вже в черзі!",
+    "thanksForJoining": "Дякуємо за реєстрацію в нашій черзі. Ми повідомимо вас, як тільки будемо готові.",
+    "back": "Назад",
+    "inviteCodePlaceholder": "Введіть код запрошення",
+    "join": "Приєднатися до черги",
+    "joining": "Приєднуємося...",
+    "invite": "Запросити",
+    "inviteTime": "Час запрошення",
+    "createdTime": "Час приєднання",
+    "yes": "Так",
+    "no": "Ні",
+    "generateCode": "Створити код запрошення",
+    "count": "Кількість",
+    "times": "Використання",
+    "generate": "Створити",
+    "code": "Код запрошення",
+    "inviteSuccess": "Запрошення успішно"
+  },
+  "noPermissionToCreateBase": "Немає дозволу створювати проєкт в жодному просторі",
+  "base": {
+    "deleteTip": "Ви впевнені, що хочете видалити \"{{name}}\" проєкт?",
+    "createResource": "Створити ресурс",
+    "noPermissionToCreateResource": "У вас немає дозволу створювати ресурс"
+  },
+  "credit": {
+    "title": "Кредит",
+    "leftAmount": "Залишок кредитів",
+    "winFreeCredits": "Поділитися досвідом",
+    "getCredits": "Отримати 1000 безкоштовних кредитів",
+    "winCredit": {
+      "title": "Поділіться позитивним відгуком та заробіть",
+      "freeCredits": "1000 безкоштовних кредитів",
+      "guidelinesTitle": "Контрольний список для публікації",
+      "tagTeableio": "Позначте <bold>@teableio</bold>",
+      "minCharacters": "Напишіть відгук з <bold>80+</bold> символів",
+      "minFollowers": "Майте <bold>10+</bold> підписників",
+      "limitPerWeek": "500 кредитів за пост, до 2 постів на тиждень (X + LinkedIn)",
+      "postOnX": "Опублікувати в X",
+      "postOnLinkedIn": "Опублікувати в LinkedIn",
+      "preFilledDraft": "🌟 Готовий чернетка вже підготовлена для вас!",
+      "claimTitle": "Вставте URL поста, щоб отримати кредити",
+      "userEmail": "Email користувача",
+      "postUrlLabel": "URL поста (X або LinkedIn)",
+      "postUrlPlaceholder": "Вставте посилання на ваш пост тут",
+      "invalidUrl": "Будь ласка, введіть коректний URL поста X або LinkedIn",
+      "claiming": "Запит...",
+      "claimCredits": "Отримати кредити",
+      "congratulations": "Вітаємо!",
+      "claimSuccess": "Ви отримали 500 кредитів!",
+      "verifying": "Перевірка вашого поста...",
+      "verifyingDescription": "Ми перевіряємо вміст вашого поста, це зазвичай займає кілька секунд",
+      "verifyFailed": "Перевірка не вдалася",
+      "tryAgain": "Спробувати знову"
+    },
+    "error": {
+      "verificationFailed": "Перевірка не вдалася"
+    }
+  },
+  "reward": {
+    "title": "Винагорода",
+    "rewardCredits": "Кредити винагороди",
+    "minCharCount": "Пост повинен містити щонайменше {{count}} символів",
+    "minFollowerCount": "Обліковий запис повинен мати щонайменше {{count}} підписників",
+    "mustMention": "Пост повинен згадувати {{mention}}",
+    "fetchSnapshotFailed": "Не вдалося отримати знімок поста",
+    "snapshotTimeout": "Минув час очікування знімка поста, спробуйте пізніше",
+    "alreadyClaimedThisWeek": "Ви вже отримали винагороду для цього облікового запису цього тижня",
+    "maxClaimsReached": "Ви досягли максимальної кількості запитів нагород (2) на цьому тижні",
+    "postTooOld": "Пост має бути опублікований протягом останніх {{hours}} год.",
+    "manage": {
+      "title": "Управління винагородами",
+      "description": "Переглядайте та керуйте записами винагород у всіх просторах",
+      "overview": "Огляд",
+      "records": "Записи",
+      "searchSpace": "Пошук простору...",
+      "searchRecords": "Пошук postUrl/userId...",
+      "dateRange": "Вибрати діапазон дат",
+      "from": "Від",
+      "to": "До",
+      "totalSpaces": "Всього: {{count}} просторів",
+      "totalRecords": "Всього: {{count}} записів",
+      "space": "Простір",
+      "allSpaces": "Усі простори",
+      "user": "Користувач",
+      "creator": "Створювач",
+      "sourceType": "Тип джерела",
+      "platform": "Платформа",
+      "allStatuses": "Усі статуси",
+      "allSourceTypes": "Усі типи джерел",
+      "allPlatforms": "Усі платформи",
+      "pendingCount": "Очікують",
+      "approvedCount": "Схвалених",
+      "rejectedCount": "Відхилених",
+      "approvedAmount": "Схвалена сума",
+      "consumedAmount": "Використана сума",
+      "availableAmount": "Доступна сума",
+      "expiringSoonAmount": "Скоро закінчується (7 днів)",
+      "amount": "Сума",
+      "remainingAmount": "Залишкова сума",
+      "createdTime": "Дата створення",
+      "rewardTime": "Дата винагороди",
+      "expiredTime": "Дата закінчення",
+      "lastModified": "Остання зміна",
+      "viewDetails": "Детальніше",
+      "details": "Деталі винагороди",
+      "basicInfo": "Основна інформація",
+      "amountInfo": "Інформація про суму",
+      "timeInfo": "Часова інформація",
+      "socialInfo": "Соціальна інформація",
+      "verifyResult": "Результат перевірки",
+      "uniqueKey": "Унікальний ключ",
+      "verify": "Перевірити",
+      "valid": "Дійсний",
+      "invalid": "Недійсний",
+      "errors": "Помилки",
+      "copied": "{{label}} скопійовано",
+      "openPost": "Відкрити пост",
+      "noData": "Немає даних",
+      "page": "Сторінка {{current}} з {{total}}",
+      "status": {
+        "label": "Статус",
+        "pending": "Очікування",
+        "approved": "Схвалено",
+        "rejected": "Відхилено"
+      }
+    }
+  },
+  "chat": {
+    "serverError": "Сталася помилка сервера",
+    "chatGone": "Цей чат більше не існує",
+    "chatGoneDescription": "Його видалили в іншій вкладці або на іншому пристрої, тому тут більше нічого не можна надіслати.",
+    "chatArchived": "Цей чат в архіві",
+    "chatArchivedDescription": "В архівований чат не можна надсилати повідомлення.",
+    "modelNotSupported": "Вибрана модель не підтримується в режимі агента. Для найкращого результату перемкніться на GPT-6 Astra.",
+    "byokModelNotSupported": "Ваша власна модель несумісна з режимом агента. Для найкращого результату перемкніться на GPT-6 Astra.",
+    "modelServiceUnavailable": "Сервіс моделі тимчасово недоступний. Повторіть спробу пізніше.",
+    "providerInsufficientBalance": "На рахунку постачальника моделі недостатньо коштів. Попросіть адміністратора перевірити обліковий запис, до якого прив'язано цей API-ключ.",
+    "imageProcessingFailed": "Не вдалося обробити зображення",
+    "imageProcessingFailedDescription": "Модель ШІ не змогла обробити зображення. Надішліть його знову або продовжте без нього.",
+    "sandboxActiveRunBusy": "Cuppy ще працює. Зачекайте, перш ніж надсилати знову.",
+    "sandboxCapacityFull": "Досягнуто ліміт одночасних розмов ({{max}}). Зачекайте, доки одна завершиться.",
+    "sandboxTransient": "Cuppy готується. Повторіть спробу за мить.",
+    "sandboxSnapshotNotFound": "Середовище Cuppy ще не налаштовано. Попросіть адміністратора створити знімок пісочниці.",
+    "sandboxProviderError": "Помилка середовища виконання пісочниці",
+    "sandboxProviderErrorDescription": "Виклик середовища виконання пісочниці не вдався. Повторіть спробу або попросіть адміністратора перевірити його.",
+    "sandboxUnavailable": "ШІ-агент тимчасово недоступний",
+    "sandboxUnavailableMaintenance": "Середовище виконання ШІ-агента на обслуговуванні. Спробуйте пізніше.",
+    "sandboxUnavailableNotConfigured": "Середовище виконання ШІ-агента не налаштовано на цьому екземплярі. Зверніться до адміністратора.",
+    "agentStartFailed": "Не вдалося запустити рушій ШІ. Повторіть спробу або почніть нову сесію.",
+    "agentSessionLost": "Щось пішло не так. Надішліть повідомлення ще раз.",
+    "idleTimeout": "Виконання команди перевищило ліміт часу ({{seconds}} с). Повторіть спробу.",
+    "danglingToolUse": "Попередню сесію було перервано й автоматично відновлено. Надішліть повідомлення ще раз.",
+    "versionSaveFailed": "Не вдалося зберегти версію",
+    "versionSaveFailedDescription": "Цю версію не збережено. Зміни залишаються в пісочниці й можуть бути втрачені після завершення терміну її дії.",
+    "versionPushTooLarge": "Зміни завеликі для збереження",
+    "versionPushTooLargeDescription": "Ці зміни перевищують допустимий розмір для збереження, тому їх не вдалося зберегти як нову версію.",
+    "versionPushTooLargeAction": "Надіслати ШІ",
+    "versionPushTooLargePrompt": "Не вдалося зберегти версію застосунку: Git push перевищив обмеження розміру. Спочатку перевір проєкт на наявність завеликих тестових артефактів, файлів налагодження або вкладень. З’ясуй причину, перш ніж видаляти непотрібний вміст, і збережи код застосунку та необхідні ресурси. Великі файли можуть уже міститися в історії ненадісланих комітів, тому їх видалення або додавання до .gitignore може бути недостатньо. Якщо потрібно очистити історію, змінюй лише коміти, які ще не було надіслано.\nВідомості про помилку: {{error}}",
+    "collapsedStatus": {
+      "open": "Відкрити AI-чат",
+      "working": "AI виконує завдання",
+      "completed": "AI-завдання виконано",
+      "failed": "Не вдалося виконати AI-завдання"
+    }
+  },
+  "modelTier": {
+    "title": "Модель",
+    "uses": "Використовує {{model}}",
+    "spaceModels": "Моделі простору",
+    "xl": {
+      "label": "Ultra",
+      "description": "Максимальні можливості для складних і відповідальних завдань."
+    },
+    "lg": {
+      "label": "Smart",
+      "description": "Потужне міркування для повсякденної роботи."
+    },
+    "md": {
+      "label": "Standard",
+      "description": "Швидка й економна модель для рутинних завдань."
+    },
+    "sm": {
+      "label": "Lite",
+      "description": "Легка модель для дешевих масових рутинних завдань."
+    },
+    "unavailable": {
+      "title": "Перемкнено на {{model}}",
+      "description": "Перелік доступних моделей змінився, і {{previous}} більше не пропонується. Далі відповідатиме {{model}}.",
+      "change": "Вибрати іншу модель",
+      "ok": "Зрозуміло"
+    }
+  },
+  "system": {
+    "notFound": {
+      "title": "Сторінку не знайдено",
+      "description": "Посилання, за яким ви перейшли, може бути недійсним, або сторінку переміщено."
+    },
+    "links": {
+      "backToHome": "Повернутися на головну"
+    },
+    "forbidden": {
+      "title": "Доступ обмежено",
+      "description": "Вам потрібен дозвіл для доступу до цього ресурсу.\nБудь ласка, зверніться до адміністратора."
+    },
+    "paymentRequired": {
+      "title": "Розблокувати преміум-функцію",
+      "description": "Ця функція доступна в розширених тарифах.\nОновіть план, щоб розширити можливості."
+    },
+    "error": {
+      "title": "Щось пішло не так",
+      "description": "Сталася неочікувана помилка. Будь ласка, спробуйте пізніше."
+    }
+  },
+  "import": {
+    "error": {
+      "dateOutOfRange": "{{fieldHint}}Помилка розбору дати, значення \"{{value}}\" виходить за допустимий діапазон",
+      "planRowLimit": "Досягнуто ліміт рядків: оновіть план для імпорту більшої кількості записів",
+      "notNullValidation": "{{fieldHint}}Обов'язкові поля не можуть бути порожніми",
+      "uniqueValidation": "{{fieldHint}}Дублікати значень в унікальних полях",
+      "requestTimeout": "Час очікування запиту вичерпано",
+      "chunkProcessingFailed": "Помилка пакетної обробки: {{reason}}",
+      "unknown": "{{fieldHint}}{{message}}"
+    },
+    "connectAnotherAccount": "Підключити інший обліковий запис",
+    "accountNeedsReauth": "Термін дії авторизації цього облікового запису минув, або її було відкликано. Авторизуйте його знову, щоб продовжити ним користуватися.",
+    "reauthorize": "Авторизувати знову"
+  },
+  "skills": {
+    "title": "Навички",
+    "tabs": {
+      "mySkills": "Мої навички"
+    },
+    "actions": {
+      "import": "Імпортувати навичку",
+      "sync": "Синхронізувати",
+      "delete": "Видалити",
+      "enable": "Увімкнути",
+      "disable": "Вимкнути",
+      "edit": "Редагувати",
+      "tryInChat": "Спробувати в чаті",
+      "replace": "Замінити",
+      "download": "Завантажити",
+      "uninstall": "Видалити",
+      "copyToBase": "Копіювати в проєкт",
+      "copyToSpace": "Копіювати в простір",
+      "copyToPersonal": "Копіювати в особисті",
+      "copyToApp": "Копіювати в застосунок",
+      "copyToRoutine": "Копіювати в рутину"
+    },
+    "import": {
+      "title": "Імпортувати навичку",
+      "description": "Імпортуйте навичку з репозиторію GitHub або ZIP-файлу",
+      "githubTab": "URL GitHub",
+      "fileTab": "ZIP-файл",
+      "githubTitle": "Імпортувати навичку з GitHub",
+      "githubPlaceholder": "https://github.com/owner/repo/tree/main/skills/my-skill",
+      "fileHint": "Завантажте ZIP-файл, що містить SKILL.md",
+      "or": "або",
+      "selectFile": "Вибрати файл",
+      "replaceWarning": "Якщо в цій області вже існує навичка з такою самою назвою, імпорт замінить її.",
+      "importing": "Імпорт...",
+      "submit": "Імпортувати",
+      "success": "Навичку успішно імпортовано",
+      "error": "Не вдалося імпортувати навичку"
+    },
+    "detail": {
+      "slug": "Slug",
+      "type": "Тип",
+      "description": "Опис",
+      "source": "Джерело",
+      "addedBy": "Додав",
+      "skillLabel": "Навичка",
+      "syncStatus": "Стан синхронізації",
+      "preview": "Попередній перегляд SKILL.md"
+    },
+    "scope": {
+      "label": "Область дії",
+      "system": "Система",
+      "builtin": "Вбудовані",
+      "base": "Проєкт",
+      "user": "Особистий",
+      "userDescription": "Доступно лише вам",
+      "baseDescription": "Доступно співавторам цього проєкту",
+      "space": "Простір",
+      "spaceDescription": "Доступно всім учасникам цього простору",
+      "app": "App",
+      "appDescription": "Доступно лише для цього застосунку",
+      "cuppyclaw": "Бот",
+      "cuppyclawDescription": "Доступно лише для цього бота",
+      "routine": "Рутина",
+      "routineDescription": "Доступно лише для цієї рутини"
+    },
+    "source": {
+      "github": "GitHub",
+      "file": "Завантаження файлу",
+      "manual": "Вручну"
+    },
+    "status": {
+      "enabled": "Увімкнено",
+      "disabled": "Вимкнено",
+      "synced": "Синхронізовано",
+      "failed": "Помилка синхронізації"
+    },
+    "confirm": {
+      "deleteTitle": "Видалити навичку",
+      "deleteDescription": "Ви впевнені, що хочете видалити цю навичку? Цю дію не можна скасувати.",
+      "copyTitle": "Копіювати навичку",
+      "copyDescription": "Файли навички буде скопійовано в цільову область. Початкова навичка не зміниться.",
+      "copyOverwriteWarning": "Якщо в цільовій області вже є навичка з такою назвою, її буде замінено."
+    },
+    "toast": {
+      "syncing": "Синхронізація навички...",
+      "syncSuccess": "Навичку успішно синхронізовано",
+      "syncError": "Не вдалося синхронізувати навичку",
+      "deleting": "Видалення навички...",
+      "deleteSuccess": "Навичку успішно видалено",
+      "deleteError": "Не вдалося видалити навичку",
+      "updateSuccess": "Навичку успішно оновлено",
+      "copying": "Копіювання...",
+      "copySuccess": "Скопійовано",
+      "copyError": "Не вдалося скопіювати"
+    }
+  },
+  "resourceDescription": {
+    "addDescription": "Додати опис",
+    "nodeDescription": "Опис вузла",
+    "descriptionSaving": "Збереження...",
+    "descriptionSaveFailed": "Не вдалося зберегти опис, спробуйте ще раз",
+    "descriptionPlaceholder": "Додайте опис для цього вузла"
+  },
+  "announcement": {
+    "viewDetail": "Детальніше",
+    "close": "Закрити оголошення",
+    "acknowledge": "Зрозуміло",
+    "collapse": "Згорнути",
+    "more_one": "ще {{count}} оголошення",
+    "more_few": "ще {{count}} оголошення",
+    "more_many": "ще {{count}} оголошень",
+    "more_other": "ще {{count}} оголошень"
+  },
+  "mobileEmbed": {
+    "pickFromDirectory": "Виберіть щось із каталогу",
+    "pickFromDirectoryHint": "Відкрийте таблицю, дашборд або автоматизацію з каталогу — вона з'явиться тут.",
+    "limitReachedTitle": "Досягнуто ліміт тарифу",
+    "limitReachedDescription": "Цей простір досяг ліміту свого поточного тарифу.",
+    "creditsExhaustedTitle": "Кредити ШІ вичерпано",
+    "creditsExhaustedDescription": "Цей простір використав усі кредити ШІ, включені до поточного тарифу.",
+    "seatLimitTitle": "Вільних місць немає",
+    "seatLimitDescription": "У цьому просторі не залишилося місць для нових учасників.",
+    "ownerManagesPlan": "Керувати тарифом цього простору може лише його власник. Зверніться до нього, щоб вирішити питання.",
+    "featureUnavailableTitle": "Недоступно на цьому тарифі",
+    "billingUnavailable": "Керування тарифом і оплатою недоступне в застосунку.",
+    "featureUnavailableDescription": "Ця функція недоступна на поточному тарифі цього простору.",
+    "importRowLimitReached": "Досягнуто ліміт рядків поточного тарифу; решту записів не імпортовано.",
+    "userCapTitle": "Досягнуто ліміт користувачів",
+    "userCapDescription": "Цей екземпляр досяг кількості користувачів, дозволеної ліцензією. Зверніться до адміністратора."
+  },
+  "push": {
+    "gate": {
+      "askUserQuestion": "У Cuppy є запитання.",
+      "permission": "Cuppy чекає на підтвердження, щоб продовжити.",
+      "connectIntegration": "Cuppy потрібно, щоб ви підключили застосунок.",
+      "pickGoogleSheet": "Cuppy потрібно, щоб ви обрали таблицю.",
+      "presentTemplates": "Cuppy знайшов готовий шаблон і чекає на ваше рішення.",
+      "requestCredential": "Cuppy потрібен доступ, щоб продовжити."
+    },
+    "result": {
+      "done": "Готово.",
+      "failed": "Запуск завершився помилкою.",
+      "creditExhausted": "Зупинено: закінчилися AI-кредити.",
+      "skippedNoCredit": "Пропущено: закінчилися AI-кредити.",
+      "autoDeactivated": "Вимкнено після п'яти невдалих запусків поспіль.",
+      "summaryTitle": "Teable",
+      "summary": "Нові результати в {{count}} чатах."
+    }
+  },
+  "cookieConsent": {
+    "title": "Згода на використання cookie",
+    "body": "Ми використовуємо cookie та подібні технології, щоб розуміти, як використовується Teable, покращувати ваш досвід і вимірювати ефективність маркетингу.",
+    "accept": "Прийняти все",
+    "reject": "Відхилити все",
+    "policy": "Політика cookie",
+    "settings": "Налаштування cookie",
+    "customize": "Налаштувати",
+    "customBody": "Виберіть, які cookie може використовувати Teable. Змінити вибір можна будь-коли в налаштуваннях cookie.",
+    "save": "Зберегти вибір",
+    "alwaysOn": "Завжди ввімкнені",
+    "categories": {
+      "necessary": {
+        "title": "Суворо необхідні",
+        "description": "Забезпечують безпеку сервісу та потрібні для входу, сесій, вибору мови, збереження вашого вибору cookie і застосування реферальних пропозицій."
+      },
+      "analytics": {
+        "title": "Аналітика",
+        "description": "Допомагають нам зрозуміти, як використовується продукт, і покращити ваш досвід."
+      },
+      "marketing": {
+        "title": "Маркетинг",
+        "description": "Допомагають нам оцінювати ефективність реклами та акцій."
+      }
+    }
+  }
+}

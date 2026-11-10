@@ -1,0 +1,143 @@
+/* eslint-disable @typescript-eslint/naming-convention */
+import { createHash } from 'node:crypto';
+import { getPublicFullStorageUrl as getPublicFullStorageUrlOpenApi } from '@teable/openapi';
+import type { IAttachmentPreviewCache } from '../../../cache/types';
+import { baseConfig } from '../../../configs/base.config';
+import { storageConfig } from '../../../configs/storage';
+import StorageAdapter from './adapter';
+import type { ThumbnailSize } from './types';
+
+const OCTET_STREAM = 'application/octet-stream';
+const JSON_PREFIX = 'application/json';
+
+/**
+ * Check if a content type would be intercepted by Express body parser (e.g. application/json).
+ * When uploading internally via localhost, these types cause the stream to be consumed
+ * before reaching the upload handler, so we need to fall back to application/octet-stream.
+ * This only applies to local storage where the upload goes through the same Express server.
+ */
+export const getSafeUploadContentType = (contentType: string): string => {
+  const { provider } = storageConfig();
+  if (provider === 'local' && contentType && contentType.startsWith(JSON_PREFIX)) {
+    return OCTET_STREAM;
+  }
+  return contentType;
+};
+
+/**
+ * Check if a mimetype mismatch is caused by the body parser fallback.
+ * Returns true if the request used octet-stream as a substitute for a JSON content type.
+ */
+export const isBodyParserFallback = (mimetype: string, expectedType: string): boolean => {
+  const { provider } = storageConfig();
+  if (provider === 'local' && mimetype === OCTET_STREAM && expectedType.startsWith(JSON_PREFIX)) {
+    return true;
+  }
+  return false;
+};
+
+/**
+ * public bucket storage url path
+ */
+export const getPublicFullStorageUrl = (path: string) => {
+  const { storagePrefix } = baseConfig();
+  const { provider, publicUrl, publicBucket } = storageConfig();
+
+  return getPublicFullStorageUrlOpenApi(
+    { publicUrl, prefix: storagePrefix, provider, publicBucket },
+    path
+  );
+};
+
+export const getPreviewCacheKey = (token: string) => `attachment:preview:${token}` as const;
+
+let previewUrlConfigSigCache: { input: string; sig: string } | undefined;
+
+/**
+ * Per-provider bump for when the shape of generated preview URLs changes in
+ * code (not config), so entries cached by an older build are treated as stale
+ * on deploy. Only providers listed here get a bump; the others keep the
+ * fingerprint they had before, so their caches survive the deploy untouched.
+ * aliyun v2: presign no longer carries response-content-type (OSS 400).
+ * local v2: read tokens are sealed and bound to the object path; tokens of
+ * the previous shape no longer verify, so cached urls must be re-minted.
+ * s3/minio v2: only inline-safe types keep an inline disposition; urls cached
+ * before that would still open html/svg inline on the bucket origin.
+ */
+const PREVIEW_URL_SHAPE_VERSIONS: Partial<Record<string, number>> = {
+  aliyun: 2,
+  local: 2,
+  s3: 2,
+  minio: 2,
+};
+
+/**
+ * Fingerprint of every storage setting that shapes generated preview URLs.
+ * Cached entries carry it, and readers treat a mismatch as a cache miss, so
+ * any storage reconfiguration (endpoint, addressing style, credentials,
+ * bucket layout...) self-invalidates cached URLs without manual flushes or
+ * per-setting handling. The key itself stays stable per token, so rename
+ * invalidation always deletes the one and only entry.
+ */
+export const getPreviewUrlConfigSig = () => {
+  const { provider, publicUrl, publicBucket, privateBucket, privateBucketEndpoint, s3, minio } =
+    storageConfig();
+  // Secrets participate as digests so rotating only the secret key still
+  // changes the fingerprint, without keeping raw key material in the memo.
+  const digest = (value?: string) =>
+    value ? createHash('sha256').update(value).digest('hex') : value;
+  const shapeVersion = PREVIEW_URL_SHAPE_VERSIONS[provider];
+  const input = JSON.stringify([
+    provider,
+    publicUrl,
+    publicBucket,
+    privateBucket,
+    privateBucketEndpoint,
+    s3.endpoint,
+    s3.region,
+    s3.accessKey,
+    digest(s3.secretKey),
+    s3.forcePathStyle,
+    minio.endPoint,
+    minio.port,
+    minio.useSSL,
+    minio.accessKey,
+    digest(minio.secretKey),
+    StorageAdapter.PRIVATE_PREVIEW_CACHE_CONTROL,
+    // Appended last and only when bumped, so unlisted providers hash exactly
+    // the same input as before this field existed.
+    ...(shapeVersion ? [shapeVersion] : []),
+  ]);
+  if (previewUrlConfigSigCache?.input !== input) {
+    previewUrlConfigSigCache = {
+      input,
+      sig: createHash('sha1').update(input).digest('hex').slice(0, 12),
+    };
+  }
+  return previewUrlConfigSigCache.sig;
+};
+
+/**
+ * Returns the cached preview URL only when it was generated under the current
+ * storage configuration; entries written before the config change (or before
+ * this field existed) are treated as misses.
+ */
+export const getFreshPreviewCacheUrl = (value?: IAttachmentPreviewCache) =>
+  value && value.configSig === getPreviewUrlConfigSig() ? value.url : undefined;
+
+export const generateCropImagePath = (path: string, size: ThumbnailSize) => {
+  return `${path}_${size}`;
+};
+
+/**
+ * resolve storage url to full url
+ */
+export const resolveStorageUrl = (url: string) => {
+  const { storagePrefix } = baseConfig();
+  const { provider } = storageConfig();
+  if (provider === 'local' && storagePrefix) {
+    return new URL(url, storagePrefix).toString();
+  }
+
+  return url;
+};

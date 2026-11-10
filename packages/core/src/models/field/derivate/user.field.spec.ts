@@ -1,9 +1,10 @@
+/* eslint-disable sonarjs/no-duplicate-string */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { plainToInstance } from 'class-transformer';
 import { CellValueType, DbFieldType, FieldType } from '../constant';
 import { FieldCore } from '../field';
 import { convertFieldRoSchema } from '../field.schema';
-import type { IUserCellValue } from './user.field';
+import type { IUserCellValue } from './abstract/user.field.abstract';
 import { UserFieldCore } from './user.field';
 
 describe('UserFieldCore', () => {
@@ -62,6 +63,7 @@ describe('UserFieldCore', () => {
     const cellValue: IUserCellValue = {
       id: 'usrxxxxxxxxx',
       title: 'anonymous',
+      email: 'anonymous@teable.ai',
     };
 
     expect(field.cellValue2String(null as any)).toBe('');
@@ -87,7 +89,7 @@ describe('UserFieldCore', () => {
         {
           id: 'usr1234567',
           name: 'anonymous',
-          email: 'anonymous@teable.io',
+          email: 'anonymous@teable.ai',
         },
       ],
     };
@@ -95,18 +97,24 @@ describe('UserFieldCore', () => {
     expect(field.convertStringToCellValue('anonymous', ctx)).toEqual({
       id: 'usr1234567',
       title: 'anonymous',
+      email: 'anonymous@teable.ai',
     });
-    expect(field.convertStringToCellValue('anonymous@teable.io', ctx)).toEqual({
+    expect(field.convertStringToCellValue('anonymous@teable.ai', ctx)).toEqual({
       id: 'usr1234567',
       title: 'anonymous',
+      email: 'anonymous@teable.ai',
     });
 
     ctx.userSets.push({
       id: 'usrA2',
       name: 'anonymous',
-      email: 'a2@teable.io',
+      email: 'a2@teable.ai',
     });
-    expect(field.convertStringToCellValue('anonymous', ctx)).toBeNull();
+    expect(field.convertStringToCellValue('anonymous', ctx)).toEqual({
+      id: 'usr1234567',
+      title: 'anonymous',
+      email: 'anonymous@teable.ai',
+    });
     expect(field.convertStringToCellValue('name', ctx)).toBeNull();
   });
 
@@ -120,12 +128,16 @@ describe('UserFieldCore', () => {
     const cellValue: IUserCellValue = {
       id: 'usr',
       title: 'anonymous',
+      email: 'anonymous@teable.ai',
     };
     expect(field.repair(cellValue)).toEqual(cellValue);
+    expect(field.repair([cellValue])).toEqual(cellValue);
     expect(field.repair([{ id: 'usr' }])).toEqual(null);
 
     expect(multipleField.repair([cellValue])).toEqual([cellValue]);
-    expect(multipleField.repair(cellValue)).toEqual(null);
+    expect(multipleField.repair(cellValue)).toEqual([cellValue]);
+    expect(multipleField.repair([cellValue, cellValue])).toEqual([cellValue, cellValue]);
+    expect(multipleField.repair([{ id: 'usr' }])).toEqual(null);
 
     expect(lookupField.repair(cellValue)).toEqual(null);
     expect(lookupField.repair({ id: 'usr' })).toEqual(null);
@@ -138,12 +150,14 @@ describe('UserFieldCore', () => {
     const cellValue: IUserCellValue = {
       id: 'usr',
       title: 'anonymous',
+      email: 'anonymous@teable.ai',
     };
 
     expect(field.validateCellValue(null as any).success).toBe(true);
     expect(field.validateCellValue(cellValue).success).toBe(true);
-    expect(field.validateCellValue({ id: 'usrxxxxxx ' }).success).toBe(true);
-    expect(field.validateCellValue({ id: 'xxxxxxxxxxx ' }).success).toBe(false);
+    expect(
+      field.validateCellValue({ id: 'usrxxxxxx ', title: '', email: 'anonymous@teable.ai' }).success
+    ).toBe(true);
     expect(field.validateCellValue([cellValue]).success).toBe(false);
   });
 

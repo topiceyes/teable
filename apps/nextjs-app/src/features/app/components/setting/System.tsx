@@ -1,110 +1,78 @@
-import { ThemeKey, useTheme } from '@teable/sdk';
-import { Label, RadioGroup, RadioGroupItem, Separator } from '@teable/ui-lib/shadcn';
+import { Moon, Sun } from '@teable/icons';
+import { useTheme } from '@teable/ui-lib';
+import { Tabs, TabsList, TabsTrigger } from '@teable/ui-lib/shadcn';
+import { Contrast } from 'lucide-react';
 import { useTranslation } from 'next-i18next';
+import { useMemo } from 'react';
+import { LanguagePicker } from '../LanguagePicker';
+import { InteractionSelect } from './InteractionSelect';
+import { Notifications } from './Notifications';
+import { SettingGroup, SettingRow } from './SettingGroup';
+import { SettingTabShell } from './SettingTabShell';
+
+// One width for every select on the page, so they line up down the right edge
+const SELECT_CLASS_NAME = 'w-full sm:w-48';
 
 export const System: React.FC = () => {
   const { t } = useTranslation('common');
-  const { theme, isAutoTheme, setTheme } = useTheme();
-  const value = isAutoTheme ? 'system' : theme;
+  const { theme, setTheme } = useTheme();
+
+  const isSupportsMultiplePointers = useMemo(() => {
+    const touchSupported: boolean =
+      'ontouchstart' in window ||
+      navigator.maxTouchPoints > 0 ||
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (navigator as any).msMaxTouchPoints > 0;
+    const mouseSupported: boolean =
+      window.matchMedia('(pointer: fine)').matches || window.matchMedia('(hover: hover)').matches;
+    return touchSupported && mouseSupported;
+  }, []);
+
+  const themes = [
+    { value: 'light', label: t('settings.setting.light'), Icon: Sun },
+    { value: 'dark', label: t('settings.setting.dark'), Icon: Moon },
+    { value: 'system', label: t('settings.setting.system'), Icon: Contrast },
+  ];
+
   return (
-    <div className="space-y-6">
-      <div>
-        <h3 className="text-lg font-medium">{t('settings.setting.title')}</h3>
+    <SettingTabShell title={t('settings.setting.title')}>
+      <div className="flex max-w-3xl flex-col gap-8">
+        <SettingGroup title={t('settings.setting.interfaceTitle')}>
+          <SettingRow
+            label={t('settings.setting.theme')}
+            action={
+              // Manual activation: a tab only switches on click or Enter. Selecting on focus would
+              // switch again right after the click, and arrowing across would repaint each theme
+              <Tabs
+                size="sm"
+                activationMode="manual"
+                value={theme ?? 'system'}
+                onValueChange={setTheme}
+              >
+                <TabsList>
+                  {themes.map(({ value, label, Icon }) => (
+                    <TabsTrigger key={value} value={value} className="gap-1.5">
+                      <Icon className="size-3.5 shrink-0" />
+                      {label}
+                    </TabsTrigger>
+                  ))}
+                </TabsList>
+              </Tabs>
+            }
+          />
+          <SettingRow
+            label={t('settings.setting.language')}
+            action={<LanguagePicker className={SELECT_CLASS_NAME} />}
+          />
+          {isSupportsMultiplePointers && (
+            <SettingRow
+              label={t('settings.setting.interactionMode')}
+              action={<InteractionSelect className={SELECT_CLASS_NAME} />}
+            />
+          )}
+        </SettingGroup>
+        <Notifications />
       </div>
-      <Separator />
-      <div className="space-y-1">
-        <div>
-          <Label>{t('settings.setting.theme')}</Label>
-          <div className="text-sm text-muted-foreground">{t('settings.setting.themeDesc')}</div>
-        </div>
-        <RadioGroup
-          className="grid max-w-screen-md grid-cols-3 gap-8 pt-2"
-          defaultValue={value}
-          onValueChange={(value) => {
-            setTheme(value === 'system' ? null : (value as ThemeKey));
-          }}
-        >
-          <div>
-            <RadioGroupItem value={ThemeKey.Light} id={ThemeKey.Light} className="peer sr-only" />
-            <Label
-              htmlFor={ThemeKey.Light}
-              className="flex flex-col rounded-md border-2 border-muted bg-popover peer-data-[state=checked]:border-primary hover:bg-accent hover:text-accent-foreground [&:has([data-state=checked])]:border-primary"
-            >
-              <div className="items-center rounded-md border-2 border-muted p-1 hover:border-accent">
-                <div className="space-y-2 rounded-sm bg-[#ecedef] p-2">
-                  <div className="space-y-2 rounded-md bg-white p-2 shadow-sm">
-                    <div className="h-2 w-[80px] rounded-lg bg-[#ecedef]" />
-                    <div className="h-2 w-[100px] rounded-lg bg-[#ecedef]" />
-                  </div>
-                  <div className="flex items-center space-x-2 rounded-md bg-white p-2 shadow-sm">
-                    <div className="size-4 rounded-full bg-[#ecedef]" />
-                    <div className="h-2 w-[100px] rounded-lg bg-[#ecedef]" />
-                  </div>
-                  <div className="flex items-center space-x-2 rounded-md bg-white p-2 shadow-sm">
-                    <div className="size-4 rounded-full bg-[#ecedef]" />
-                    <div className="h-2 w-[100px] rounded-lg bg-[#ecedef]" />
-                  </div>
-                </div>
-              </div>
-            </Label>
-            <span className="block w-full p-2 text-center font-normal">
-              {t('settings.setting.light')}
-            </span>
-          </div>
-          <div>
-            <RadioGroupItem value={ThemeKey.Dark} id={ThemeKey.Dark} className="peer sr-only" />
-            <Label
-              htmlFor={ThemeKey.Dark}
-              className="flex flex-col rounded-md border-2 border-muted bg-popover peer-data-[state=checked]:border-primary hover:bg-accent hover:text-accent-foreground [&:has([data-state=checked])]:border-primary"
-            >
-              <div className="items-center rounded-md border-2 border-muted bg-popover p-1 hover:bg-accent hover:text-accent-foreground">
-                <div className="space-y-2 rounded-sm bg-slate-950 p-2">
-                  <div className="space-y-2 rounded-md bg-slate-800 p-2 shadow-sm">
-                    <div className="h-2 w-[80px] rounded-lg bg-slate-400" />
-                    <div className="h-2 w-[100px] rounded-lg bg-slate-400" />
-                  </div>
-                  <div className="flex items-center space-x-2 rounded-md bg-slate-800 p-2 shadow-sm">
-                    <div className="size-4 rounded-full bg-slate-400" />
-                    <div className="h-2 w-[100px] rounded-lg bg-slate-400" />
-                  </div>
-                  <div className="flex items-center space-x-2 rounded-md bg-slate-800 p-2 shadow-sm">
-                    <div className="size-4 rounded-full bg-slate-400" />
-                    <div className="h-2 w-[100px] rounded-lg bg-slate-400" />
-                  </div>
-                </div>
-              </div>
-            </Label>
-            <span className="block w-full p-2 text-center font-normal">
-              {t('settings.setting.dark')}
-            </span>
-          </div>
-          <div>
-            <RadioGroupItem value="system" id="system" className="peer sr-only" />
-            <Label
-              htmlFor="system"
-              className="flex flex-col rounded-md border-2 border-muted bg-popover peer-data-[state=checked]:border-primary hover:bg-accent hover:text-accent-foreground [&:has([data-state=checked])]:border-primary"
-            >
-              <div className="items-center rounded-md border-2 border-muted p-1 hover:border-accent">
-                <div className="space-y-2 rounded-sm bg-[#ecedef] p-2">
-                  <div className="space-y-2 rounded-md bg-white p-2 shadow-sm">
-                    <div className="h-2 w-[80px] rounded-lg bg-[#ecedef]" />
-                    <div className="h-2 w-[100px] rounded-lg bg-[#ecedef]" />
-                    <div className="h-2 w-[100px] rounded-lg bg-[#ecedef]" />
-                  </div>
-                  <div className="space-y-2 rounded-md bg-slate-800 p-2 shadow-sm">
-                    <div className="h-2 w-[80px] rounded-lg bg-slate-400" />
-                    <div className="h-2 w-[100px] rounded-lg bg-slate-400" />
-                    <div className="h-2 w-[100px] rounded-lg bg-slate-400" />
-                  </div>
-                </div>
-              </div>
-            </Label>
-            <span className="block w-full p-2 text-center font-normal">
-              {t('settings.setting.system')}
-            </span>
-          </div>
-        </RadioGroup>
-      </div>
-    </div>
+    </SettingTabShell>
   );
 };

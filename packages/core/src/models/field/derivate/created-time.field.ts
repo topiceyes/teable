@@ -1,31 +1,30 @@
 import { extend } from 'dayjs';
 import timezone from 'dayjs/plugin/timezone';
-import { z } from 'zod';
 import type { FieldType, CellValueType } from '../constant';
-import { datetimeFormattingSchema, defaultDatetimeFormatting } from '../formatting';
+import type { IFieldVisitor } from '../field-visitor.interface';
+import { defaultDatetimeFormatting } from '../formatting';
 import { FormulaAbstractCore } from './abstract/formula.field.abstract';
+import {
+  createdTimeFieldOptionsRoSchema,
+  type ICreatedTimeFieldOptions,
+  type ICreatedTimeFieldOptionsRo,
+} from './created-time-option.schema';
+import type { IFormulaFieldMeta } from './formula-option.schema';
 
 extend(timezone);
-
-export const createdTimeFieldOptionsSchema = z.object({
-  expression: z.literal('CREATED_TIME()'),
-  formatting: datetimeFormattingSchema,
-});
-
-export type ICreatedTimeFieldOptions = z.infer<typeof createdTimeFieldOptionsSchema>;
-
-export const createdTimeFieldOptionsRoSchema = createdTimeFieldOptionsSchema.omit({
-  expression: true,
-});
-
-export type ICreatedTimeFieldOptionsRo = z.infer<typeof createdTimeFieldOptionsRoSchema>;
 
 export class CreatedTimeFieldCore extends FormulaAbstractCore {
   type!: FieldType.CreatedTime;
 
   declare options: ICreatedTimeFieldOptions;
 
+  declare meta?: IFormulaFieldMeta;
+
   declare cellValueType: CellValueType.DateTime;
+
+  getExpression() {
+    return this.options.expression;
+  }
 
   static defaultOptions(): ICreatedTimeFieldOptionsRo {
     return {
@@ -33,7 +32,15 @@ export class CreatedTimeFieldCore extends FormulaAbstractCore {
     };
   }
 
+  getDatetimeFormatting() {
+    return this.options?.formatting ?? defaultDatetimeFormatting;
+  }
+
   validateOptions() {
     return createdTimeFieldOptionsRoSchema.safeParse(this.options);
+  }
+
+  accept<T>(visitor: IFieldVisitor<T>): T {
+    return visitor.visitCreatedTimeField(this);
   }
 }

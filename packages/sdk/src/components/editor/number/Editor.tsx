@@ -1,24 +1,38 @@
-import { formatNumberToString, parseStringToNumber } from '@teable/core';
-import type { INumberFieldOptions } from '@teable/core';
+import type { INumberFormatting } from '@teable/core';
+import { NumberFormattingType, parseStringToNumber } from '@teable/core';
 import { Input, cn } from '@teable/ui-lib';
+import { isNumber } from 'lodash';
 import type { ForwardRefRenderFunction } from 'react';
 import { forwardRef, useImperativeHandle, useRef, useState } from 'react';
 import type { ICellEditor, IEditorRef } from '../type';
 
-interface INumberEditor extends ICellEditor<number | null> {
-  options: INumberFieldOptions;
-}
+const toDisplayStr = (value: number | null | undefined, isPercent: boolean): string => {
+  if (!isNumber(value)) return '';
+  return isPercent ? Number.parseFloat((value * 100).toPrecision(15)).toString() : value.toString();
+};
 
-export const NumberEditorBase: ForwardRefRenderFunction<IEditorRef<number>, INumberEditor> = (
-  props,
-  ref
-) => {
-  const { value, options, onChange, className, readonly, style } = props;
-  const { formatting } = options;
+export const NumberEditorBase: ForwardRefRenderFunction<
+  IEditorRef<number>,
+  ICellEditor<number | null> & {
+    placeholder?: string;
+    saveOnChange?: boolean;
+    formatting?: INumberFormatting;
+  }
+> = (props, ref) => {
+  const {
+    value,
+    onChange,
+    className,
+    readonly,
+    style,
+    saveOnBlur = true,
+    saveOnChange = false,
+    placeholder,
+    formatting,
+  } = props;
+  const isPercent = formatting?.type === NumberFormattingType.Percent;
   const inputRef = useRef<HTMLInputElement | null>(null);
-  const [formatStr, setFormatStr] = useState<string | null>(
-    formatNumberToString(value as number, formatting)
-  );
+  const [str, setStr] = useState<string | null>(toDisplayStr(value, isPercent));
 
   useImperativeHandle(ref, () => ({
     focus: () => inputRef.current?.focus(),
@@ -27,28 +41,29 @@ export const NumberEditorBase: ForwardRefRenderFunction<IEditorRef<number>, INum
   }));
 
   const setValue = (value?: number) => {
-    setFormatStr(formatNumberToString(value, formatting));
+    setStr(typeof value === 'number' ? toDisplayStr(value, isPercent) : '');
   };
 
   const saveValue = () => {
-    const currentValue = parseStringToNumber(formatStr, formatting);
-    onChange?.(currentValue);
-    setFormatStr(formatNumberToString(currentValue as number, formatting));
+    onChange?.(parseStringToNumber(str, formatting));
   };
 
-  const onChangeInner = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setFormatStr(e.target.value);
+  const onChangeHandler = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const newValue = e.target.value;
+    setStr(newValue);
+    saveOnChange && onChange?.(parseStringToNumber(newValue, formatting));
   };
 
   return (
     <Input
       ref={inputRef}
       style={style}
-      className={cn('h-10 sm:h-8', className)}
-      value={formatStr || ''}
-      onChange={onChangeInner}
-      onBlur={saveValue}
-      disabled={readonly}
+      className={cn('h-8', className)}
+      value={str || ''}
+      onChange={onChangeHandler}
+      onBlur={() => saveOnBlur && !saveOnChange && saveValue()}
+      readOnly={readonly}
+      placeholder={placeholder}
     />
   );
 };

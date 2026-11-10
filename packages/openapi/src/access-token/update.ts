@@ -1,18 +1,24 @@
 import { axios } from '../axios';
 import { registerRoute, urlBuilder } from '../utils';
 import { z } from '../zod';
+import { accessTokenScopesSchema } from './scopes';
 
 export const UPDATE_ACCESS_TOKEN = '/access-token/{id}';
 
 export const updateAccessTokenRoSchema = z.object({
   name: z.string(),
   description: z.string().optional(),
-  scopes: z.array(z.string()),
+  scopes: accessTokenScopesSchema,
   spaceIds: z.array(z.string()).nullable().optional(),
   baseIds: z.array(z.string()).nullable().optional(),
+  hasFullAccess: z.boolean().optional(),
 });
 
-export type UpdateAccessTokenRo = z.infer<typeof updateAccessTokenRoSchema>;
+type UpdateAccessTokenRoSchema = z.infer<typeof updateAccessTokenRoSchema>;
+
+export type UpdateAccessTokenRo = Omit<UpdateAccessTokenRoSchema, 'scopes'> & {
+  scopes: string[];
+};
 
 export const updateAccessTokenVoSchema = z.object({
   id: z.string(),
@@ -21,6 +27,7 @@ export const updateAccessTokenVoSchema = z.object({
   scopes: z.array(z.string()),
   spaceIds: z.array(z.string()).optional(),
   baseIds: z.array(z.string()).optional(),
+  hasFullAccess: z.boolean().optional(),
 });
 
 export type UpdateAccessTokenVo = z.infer<typeof updateAccessTokenVoSchema>;

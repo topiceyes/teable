@@ -1,0 +1,129 @@
+import { sdkErrorI18nKeys } from '@teable/i18n-keys';
+import { err, ok } from 'neverthrow';
+import type { Result } from 'neverthrow';
+
+import z from 'zod';
+import { domainError, type DomainError } from '../../../../shared/DomainError';
+import type { Field } from '../../../fields/Field';
+import {
+  FieldCellValueSchemaVisitor,
+  type FieldCellValueSchema,
+} from '../../../fields/visitors/FieldCellValueSchemaVisitor';
+import { SetFieldValueSpecFactoryVisitor } from '../../../fields/visitors/SetFieldValueSpecFactoryVisitor';
+import { ClearFieldValueSpec } from './ClearFieldValueSpec';
+import type { ICellValueSpec } from './ICellValueSpecVisitor';
+
+/**
+ * Factory for creating SetValueSpec instances.
+ *
+ * This factory:
+ * 1. Validates the input value using FieldCellValueSchemaVisitor
+ * 2. Creates the appropriate SetValueSpec using SetFieldValueSpecFactoryVisitor
+ *
+ * Usage:
+ * ```typescript
+ * const result = SetFieldValueSpecFactory.create(field, rawValue);
+ * // result is Result<ICellValueSpec, DomainError>
+ * ```
+ */
+export class SetFieldValueSpecFactory {
+  /**
+   * Create a SetValueSpec for the given field and value.
+   *
+   * @param field - The field to create the spec for
+   * @param value - The raw value to validate and wrap
+   * @returns A Result containing either the spec or a validation error
+   */
+  static create(
+    field: Field,
+    value: unknown,
+    schema?: FieldCellValueSchema
+  ): Result<ICellValueSpec, DomainError> {
+    const cleared = (): Result<ICellValueSpec, DomainError> => {
+      // Null values use ClearFieldValueSpec for optimized SQL generation, but a schema may
+      // normalize an emptied cell (e.g. an empty link list) to null after this guard, so the
+      // not-null rule must be applied to that normalized value too.
+      if (field.notNull().toBoolean()) {
+        return err(
+          domainError.validation({
+            code: 'validation.field.not_null',
+            message: `Cannot set null: field "${field.name().toString()}" violates not-null constraint`,
+            details: {
+              fieldId: field.id().toString(),
+              fieldName: field.name().toString(),
+              fieldType: field.type().toString(),
+            },
+            localization: {
+              i18nKey: sdkErrorI18nKeys.custom.recordFieldValueNotNull,
+              context: { fieldName: field.name().toString() },
+            },
+          })
+        );
+      }
+      return ok(ClearFieldValueSpec.create(field));
+    };
+
+    // Null values use ClearFieldValueSpec for optimized SQL generation
+    if (value === null || value === undefined) {
+      return cleared();
+    }
+    const schemaResult = schema ? ok(schema) : field.accept(FieldCellValueSchemaVisitor.create());
+    return schemaResult.andThen((schema) => {
+      // Step 2: Validate the value against the schema
+      const parseResult = schema.safeParse(value);
+      if (!parseResult.success) {
+        const errorMessage = z.prettifyError(parseResult.error);
+        return err(
+          domainError.validation({
+            code: 'validation.field.invalid_value',
+            message: `Invalid value for field "${field.name().toString()}": ${errorMessage}`,
+            localization: {
+              i18nKey: 'httpErrors.record.fieldValueInvalid',
+              context: { fieldName: field.name().toString() },
+            },
+            details: {
+              fieldId: field.id().toString(),
+              fieldName: field.name().toString(),
+              fieldType: field.type().toString(),
+              providedValue: value,
+              zodError: parseResult.error.issues,
+            },
+          })
+        );
+      }
+
+      // Step 3: Create the SetValueSpec with the validated value
+      // Schemas may normalize an emptied cell (e.g. an empty link list or a cleared string)
+      // to null; use the same guarded clear the raw null input takes instead of a typed set.
+      if (parseResult.data === null) {
+        return cleared();
+      }
+      const factoryVisitor = new SetFieldValueSpecFactoryVisitor(parseResult.data, {
+        // Strict (non-typecast) writes are API input, so bare `{ id }` user
+        // references must resolve within the table's collaborators (v1 scope).
+        requireUserCollaborator: true,
+      });
+      return field.accept(factoryVisitor);
+    });
+  }
+
+  /**
+   * Create a SetValueSpec without validation.
+   * Use this when the value is already validated.
+   *
+   * @param field - The field to create the spec for
+   * @param validatedValue - The pre-validated value
+   * @returns A Result containing either the spec or an error (for computed fields)
+   */
+  static createFromValidated(
+    field: Field,
+    validatedValue: unknown
+  ): Result<ICellValueSpec, DomainError> {
+    // Null values use ClearFieldValueSpec for optimized SQL generation
+    if (validatedValue === null || validatedValue === undefined) {
+      return ok(ClearFieldValueSpec.create(field));
+    }
+    const factoryVisitor = new SetFieldValueSpecFactoryVisitor(validatedValue);
+    return field.accept(factoryVisitor);
+  }
+}

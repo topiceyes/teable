@@ -1,90 +1,161 @@
 /* eslint-disable sonarjs/no-duplicate-string */
-import { Body, Controller, Delete, Get, Param, Post, Put, Query } from '@nestjs/common';
-import type { ITableFullVo, ITableListVo, ITableVo } from '@teable/core';
 import {
-  getTableQuerySchema,
-  IGetTableQuery,
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Param,
+  Patch,
+  Post,
+  Put,
+  Query,
+  UseGuards,
+  UseInterceptors,
+} from '@nestjs/common';
+import type {
+  IDuplicateFieldCheckVo,
+  IDuplicateTableCheckVo,
+  IDuplicateTableVo,
+  IGetAbnormalVo,
+  ITableDeleteReferencesVo,
+  ITableFullVo,
+  ITableListVo,
+  ITableQueryIndexPolicyRo,
+  ITableQueryIndexPolicyVo,
+  ITableSearchIndexPolicyRo,
+  ITableSearchIndexPolicyVo,
+  ITableSearchVectorStatusVo,
+  ITableVo,
+} from '@teable/openapi';
+import {
   tableRoSchema,
   ICreateTableWithDefault,
-} from '@teable/core';
-import {
   dbTableNameRoSchema,
-  getGraphRoSchema,
   IDbTableNameRo,
-  IGetGraphRo,
-  ISqlQuerySchema,
   ITableDescriptionRo,
   ITableIconRo,
   ITableNameRo,
   IUpdateOrderRo,
-  sqlQuerySchema,
   tableDescriptionRoSchema,
   tableIconRoSchema,
   tableNameRoSchema,
   updateOrderRoSchema,
+  IToggleIndexRo,
+  toggleIndexRoSchema,
+  tableQueryIndexPolicyRoSchema,
+  tableSearchIndexPolicyRoSchema,
+  TableIndex,
+  duplicateTableRoSchema,
+  IDuplicateTableRo,
 } from '@teable/openapi';
+import { ClsService } from 'nestjs-cls';
+import type { IClsStore } from '../../../types/cls';
 import { ZodValidationPipe } from '../../../zod.validation.pipe';
+import { AllowAnonymous } from '../../auth/decorators/allow-anonymous.decorator';
 import { Permissions } from '../../auth/decorators/permissions.decorator';
+import { UseV2Feature } from '../../canary/decorators/use-v2-feature.decorator';
+import { V2FeatureGuard } from '../../canary/guards/v2-feature.guard';
+import { V2IndicatorInterceptor } from '../../canary/interceptors/v2-indicator.interceptor';
+import { TableBaseScopeGuard } from '../guard/table-base-scope.guard';
+import { TableDuplicateService } from '../table-duplicate.service';
+import { TableIndexService } from '../table-index.service';
+import { TablePermissionService } from '../table-permission.service';
 import { TableService } from '../table.service';
+import { TableOpenApiV2Service } from './table-open-api-v2.service';
 import { TableOpenApiService } from './table-open-api.service';
 import { TablePipe } from './table.pipe';
 
+@UseGuards(V2FeatureGuard, TableBaseScopeGuard)
+@UseInterceptors(V2IndicatorInterceptor)
 @Controller('api/base/:baseId/table')
+@AllowAnonymous()
 export class TableController {
   constructor(
     private readonly tableService: TableService,
-    private readonly tableOpenApiService: TableOpenApiService
+    private readonly tableOpenApiService: TableOpenApiService,
+    private readonly tableIndexService: TableIndexService,
+    private readonly tablePermissionService: TablePermissionService,
+    private readonly tableOpenApiV2Service: TableOpenApiV2Service,
+    private readonly tableDuplicateService: TableDuplicateService,
+    private readonly cls: ClsService<IClsStore>
   ) {}
 
   @Permissions('table|read')
+  @UseV2Feature('getDefaultViewId')
   @Get(':tableId/default-view-id')
   async getDefaultViewId(@Param('tableId') tableId: string): Promise<{ id: string }> {
+    if (this.cls.get('useV2')) {
+      return await this.tableOpenApiV2Service.getDefaultViewId(tableId);
+    }
     return await this.tableService.getDefaultViewId(tableId);
   }
 
   @Permissions('table|read')
+  @UseV2Feature('getTable')
   @Get(':tableId')
   async getTable(
     @Param('baseId') baseId: string,
-    @Param('tableId') tableId: string,
-    @Query(new ZodValidationPipe(getTableQuerySchema)) query: IGetTableQuery
+    @Param('tableId') tableId: string
   ): Promise<ITableVo> {
-    return await this.tableOpenApiService.getTable(baseId, tableId, query);
+    if (this.cls.get('useV2')) {
+      return await this.tableOpenApiV2Service.getTable(baseId, tableId);
+    }
+    return await this.tableOpenApiService.getTable(baseId, tableId);
   }
 
   @Permissions('table|read')
+  @UseV2Feature('getTable')
   @Get()
   async getTables(@Param('baseId') baseId: string): Promise<ITableListVo> {
+    if (this.cls.get('useV2')) {
+      return await this.tableOpenApiV2Service.getTables(baseId);
+    }
     return await this.tableOpenApiService.getTables(baseId);
   }
 
   @Permissions('table|update')
+  @UseV2Feature('updateTable')
   @Put(':tableId/name')
   async updateName(
     @Param('baseId') baseId: string,
     @Param('tableId') tableId: string,
     @Body(new ZodValidationPipe(tableNameRoSchema)) tableNameRo: ITableNameRo
   ) {
+    if (this.cls.get('useV2')) {
+      return await this.tableOpenApiV2Service.updateName(baseId, tableId, tableNameRo.name);
+    }
     return await this.tableOpenApiService.updateName(baseId, tableId, tableNameRo.name);
   }
 
   @Permissions('table|update')
+  @UseV2Feature('updateTable')
   @Put(':tableId/icon')
   async updateIcon(
     @Param('baseId') baseId: string,
     @Param('tableId') tableId: string,
     @Body(new ZodValidationPipe(tableIconRoSchema)) tableIconRo: ITableIconRo
   ) {
+    if (this.cls.get('useV2')) {
+      return await this.tableOpenApiV2Service.updateIcon(baseId, tableId, tableIconRo.icon);
+    }
     return await this.tableOpenApiService.updateIcon(baseId, tableId, tableIconRo.icon);
   }
 
   @Permissions('table|update')
+  @UseV2Feature('updateTable')
   @Put(':tableId/description')
   async updateDescription(
     @Param('baseId') baseId: string,
     @Param('tableId') tableId: string,
     @Body(new ZodValidationPipe(tableDescriptionRoSchema)) tableDescriptionRo: ITableDescriptionRo
   ) {
+    if (this.cls.get('useV2')) {
+      return await this.tableOpenApiV2Service.updateDescription(
+        baseId,
+        tableId,
+        tableDescriptionRo.description
+      );
+    }
     return await this.tableOpenApiService.updateDescription(
       baseId,
       tableId,
@@ -117,41 +188,196 @@ export class TableController {
   }
 
   @Post()
+  @UseV2Feature('createTable')
   @Permissions('table|create')
   async createTable(
     @Param('baseId') baseId: string,
     @Body(new ZodValidationPipe(tableRoSchema), TablePipe) createTableRo: ICreateTableWithDefault
   ): Promise<ITableFullVo> {
+    if (this.cls.get('useV2')) {
+      return await this.tableOpenApiV2Service.createTable(baseId, createTableRo);
+    }
     return await this.tableOpenApiService.createTable(baseId, createTableRo);
   }
 
+  @UseV2Feature('duplicateTable')
+  @Permissions('table|create')
+  @Permissions('table|read')
+  @Post(':tableId/duplicate')
+  async duplicateTable(
+    @Param('baseId') baseId: string,
+    @Param('tableId') tableId: string,
+    @Body(new ZodValidationPipe(duplicateTableRoSchema), TablePipe)
+    duplicateTableRo: IDuplicateTableRo
+  ): Promise<IDuplicateTableVo> {
+    if (this.cls.get('useV2')) {
+      return await this.tableOpenApiV2Service.duplicateTable(baseId, tableId, duplicateTableRo);
+    }
+    return await this.tableOpenApiService.duplicateTable(baseId, tableId, duplicateTableRo);
+  }
+
+  @Permissions('table|read')
+  @Get(':tableId/delete-references')
+  async getDeleteTableReferences(
+    @Param('tableId') tableId: string
+  ): Promise<ITableDeleteReferencesVo> {
+    return await this.tableOpenApiService.getDeleteTableReferences(tableId);
+  }
+
+  @Permissions('table|read')
+  @Get(':tableId/duplicate-check')
+  async duplicateTableCheck(@Param('tableId') tableId: string): Promise<IDuplicateTableCheckVo> {
+    const affectedFields =
+      await this.tableDuplicateService.previewCrossSpaceAffectedFields(tableId);
+    return { affectedFields };
+  }
+
+  @Permissions('field|create')
+  @Get(':tableId/field/:fieldId/duplicate-check')
+  async duplicateFieldCheck(
+    @Param('tableId') tableId: string,
+    @Param('fieldId') fieldId: string
+  ): Promise<IDuplicateFieldCheckVo> {
+    const affectedFields = await this.tableDuplicateService.previewFieldDuplicateCrossSpace(
+      tableId,
+      fieldId
+    );
+    return { affectedFields };
+  }
+
+  @UseV2Feature('deleteTable')
   @Delete(':tableId')
   @Permissions('table|delete')
   async archiveTable(@Param('baseId') baseId: string, @Param('tableId') tableId: string) {
+    if (this.cls.get('useV2')) {
+      await this.tableOpenApiV2Service.deleteTable(baseId, tableId);
+      return;
+    }
     return await this.tableOpenApiService.deleteTable(baseId, tableId);
   }
 
-  @Delete('arbitrary/:tableId')
+  @UseV2Feature('deleteTable')
+  @Delete(':tableId/permanent')
   @Permissions('table|delete')
-  deleteTableArbitrary(@Param('baseId') baseId: string, @Param('tableId') tableId: string) {
-    return this.tableOpenApiService.deleteTable(baseId, tableId, true);
+  async permanentDeleteTable(@Param('baseId') baseId: string, @Param('tableId') tableId: string) {
+    if (this.cls.get('useV2')) {
+      await this.tableOpenApiV2Service.deleteTable(baseId, tableId, 'permanent');
+      return;
+    }
+    return this.tableOpenApiService.permanentDeleteTables(baseId, [tableId]);
   }
 
   @Permissions('table|read')
-  @Post(':tableId/graph')
-  async getCellGraph(
-    @Param('tableId') tableId: string,
-    @Body(new ZodValidationPipe(getGraphRoSchema)) { cell }: IGetGraphRo
-  ) {
-    return await this.tableOpenApiService.getGraph(tableId, cell);
+  @Get(':tableId/permission')
+  async getPermission(@Param('baseId') baseId: string, @Param('tableId') tableId: string) {
+    return await this.tableOpenApiService.getPermission(baseId, tableId);
   }
 
   @Permissions('table|read')
-  @Post(':tableId/sql-query')
-  async sqlQuery(
+  @UseV2Feature('getTable')
+  @Get('/socket/snapshot-bulk')
+  async getSnapshotBulk(@Param('baseId') baseId: string, @Query('ids') ids: string[]) {
+    const permissionMap = await this.tablePermissionService.getTablePermissionMapByBaseId(
+      baseId,
+      ids
+    );
+    const snapshotBulk = this.cls.get('useV2')
+      ? await this.tableOpenApiV2Service.getSnapshotBulk(baseId, ids)
+      : await this.tableService.getSnapshotBulk(baseId, ids);
+    return snapshotBulk.map((snapshot) => {
+      return {
+        ...snapshot,
+        data: {
+          ...snapshot.data,
+          permission: permissionMap[snapshot.id],
+        },
+      };
+    });
+  }
+
+  @Permissions('table|read')
+  @UseV2Feature('getTable')
+  @Get('/socket/doc-ids')
+  async getDocIds(@Param('baseId') baseId: string) {
+    if (this.cls.get('useV2')) {
+      return this.tableOpenApiV2Service.getDocIds(baseId);
+    }
+    return this.tableService.getDocIdsByQuery(baseId);
+  }
+
+  @Post(':tableId/index')
+  @Permissions('table|update')
+  async toggleIndex(
+    @Param('baseId') baseId: string,
     @Param('tableId') tableId: string,
-    @Query(new ZodValidationPipe(sqlQuerySchema)) query: ISqlQuerySchema
+    @Body(new ZodValidationPipe(toggleIndexRoSchema)) searchIndexRo: IToggleIndexRo
   ) {
-    return await this.tableOpenApiService.sqlQuery(tableId, query.viewId, query.sql);
+    return this.tableIndexService.toggleIndex(tableId, searchIndexRo);
+  }
+
+  @Get(':tableId/index/policy')
+  @Permissions('table|read')
+  async getSearchIndexPolicy(
+    @Param('tableId') tableId: string
+  ): Promise<ITableSearchIndexPolicyVo> {
+    return this.tableIndexService.getSearchIndexPolicy(tableId);
+  }
+
+  @Put(':tableId/index/policy')
+  @Permissions('table|update')
+  async updateSearchIndexPolicy(
+    @Param('tableId') tableId: string,
+    @Body(new ZodValidationPipe(tableSearchIndexPolicyRoSchema))
+    policy: ITableSearchIndexPolicyRo
+  ): Promise<ITableSearchIndexPolicyVo> {
+    return this.tableIndexService.updateSearchIndexPolicy(tableId, policy);
+  }
+
+  @Get(':tableId/index/query-policy')
+  @Permissions('table|read')
+  async getQueryIndexPolicy(@Param('tableId') tableId: string): Promise<ITableQueryIndexPolicyVo> {
+    return this.tableIndexService.getQueryIndexPolicy(tableId);
+  }
+
+  @Put(':tableId/index/query-policy')
+  @Permissions('table|update')
+  async updateQueryIndexPolicy(
+    @Param('tableId') tableId: string,
+    @Body(new ZodValidationPipe(tableQueryIndexPolicyRoSchema))
+    policy: ITableQueryIndexPolicyRo
+  ): Promise<ITableQueryIndexPolicyVo> {
+    return this.tableIndexService.updateQueryIndexPolicy(tableId, policy);
+  }
+
+  @Get(':tableId/activated-index')
+  @Permissions('table|read')
+  async getTableIndex(@Param('tableId') tableId: string): Promise<string[]> {
+    return this.tableIndexService.getActivatedTableIndexes(tableId);
+  }
+
+  @Get(':tableId/search-vector-status')
+  @Permissions('table|read')
+  async getSearchVectorStatus(
+    @Param('tableId') tableId: string
+  ): Promise<ITableSearchVectorStatusVo> {
+    return this.tableIndexService.getSearchVectorStatus(tableId);
+  }
+
+  @Get(':tableId/abnormal-index')
+  @Permissions('table|read')
+  async getAbnormalTableIndex(
+    @Param('tableId') tableId: string,
+    @Query('type') tableIndexType: TableIndex
+  ): Promise<IGetAbnormalVo> {
+    return this.tableIndexService.getAbnormalTableIndex(tableId, tableIndexType);
+  }
+
+  @Patch(':tableId/index/repair')
+  @Permissions('table|update')
+  async repairIndex(
+    @Param('tableId') tableId: string,
+    @Query('type') tableIndexType: TableIndex
+  ): Promise<void> {
+    return this.tableIndexService.repairIndex(tableId, tableIndexType);
   }
 }

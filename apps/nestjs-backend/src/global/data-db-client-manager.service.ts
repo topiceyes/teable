@@ -1,0 +1,1922 @@
+import { Inject, Injectable, Optional } from '@nestjs/common';
+import { HttpErrorCode } from '@teable/core';
+import {
+  DataPrismaService,
+  createScopedDataPrismaClient,
+  getMetaDatabaseUrl,
+} from '@teable/db-data-prisma';
+import { PgPoolRegistry, PrismaService } from '@teable/db-main-prisma';
+import {
+  parseTracePropagationCarrier,
+  resolveComputedWorkerLane,
+} from '@teable/v2-adapter-table-repository-postgres';
+import { generatePrefixedId, type TracePropagationCarrier } from '@teable/v2-core';
+import createKnex, { Knex } from 'knex';
+import { InjectModel } from 'nest-knexjs';
+import { ClsService } from 'nestjs-cls';
+import type { PoolClient } from 'pg';
+import {
+  normalizeBasePendingCapacityQueryLimit,
+  normalizeBasePendingCapacityThreshold,
+} from '../configs/computed-outbox-trigger.config';
+import { CustomHttpException } from '../custom.exception';
+import { withDataDbInternalSchemaParam } from '../features/space/data-db-internal-schema';
+import { DataDbMigrationService } from '../features/space/data-db-migration.service';
+import { decryptDataDbUrl } from '../features/space/data-db-url-secret';
+import type { IClsStore } from '../types/cls';
+import { getBaseCached, getTableMetaWithBaseCached } from '../utils/meta-ancestry-cache';
+import { resolveByodbDataDbPoolSettings } from './byodb-data-db-pool-budget';
+import {
+  assembleComputedOutboxBasePendingCapacityPage,
+  buildComputedOutboxAnomalyListQuery,
+  buildComputedOutboxBasePendingCapacityQuery,
+  buildComputedOutboxDeadLetterBatchSelectionQuery,
+  buildComputedOutboxLineageRunChainQuery,
+  buildComputedOutboxLineageTaskLookupQuery,
+  buildComputedOutboxMaintenanceSnapshotQuery,
+  buildComputedOutboxRecoveryPlanHash,
+  buildComputedOutboxOrphanedDeferralRestoreQuery,
+  buildComputedOutboxRunHistoryExistsQuery,
+  buildComputedOutboxStaleRecoverySelectQuery,
+  buildComputedOutboxTaskStatesQuery,
+  buildComputedOutboxWakeupCandidatesQuery,
+  type ComputedOutboxBasePendingCapacityPageRequest,
+  type ComputedOutboxDeadLetterBatchSelection,
+  type ComputedOutboxWakeupCandidateQueryOptions,
+  type ComputedOutboxWakeupCandidateQueryTarget,
+} from './computed-outbox-maintenance-query';
+import {
+  DATA_DB_PRISMA_CACHE_NAMESPACE,
+  DataDbRuntimeCacheService,
+} from './data-db-runtime-cache.service';
+import { DATA_KNEX } from './knex';
+
+export interface IResolvedDataDatabase {
+  cacheKey: string;
+  url: string;
+  /** Raw connection URL without Teable's internal-schema startup parameters. */
+  connectionUrl?: string;
+  isMetaFallback: boolean;
+  connectionId?: string;
+  internalSchema?: string;
+}
+
+export type IComputedOutboxMaintenanceTarget = IResolvedDataDatabase & {
+  storage: 'default' | 'byodb';
+  /** Meta-DB routing needed to evaluate space pause scopes in a BYODB data database. */
+  baseSpaceMapping?: ReadonlyArray<{ baseId: string; spaceId: string }>;
+};
+
+export type IComputedOutboxMaintenanceSnapshot = {
+  duePending: number;
+  scheduledPending: number;
+  /** Pending tasks blocked by an active table/base/space pause scope. */
+  pausedPending: number;
+  activeProcessing: number;
+  staleProcessing: number;
+  dead: number;
+  /** Problem groups (same key as the admin anomaly list), not raw task rows. */
+  anomalyGroups: number;
+  oldestDueAgeMs: number;
+  oldestPausedAgeMs: number;
+  activePauseScopeCount: number;
+};
+
+/**
+ * One keyset page of the per-base pending capacity probe (T8159).
+ *
+ * `afterBaseId`/`scannedThroughBaseId` describe the base-id interval this page
+ * proves was scanned: `(afterBaseId, scannedThroughBaseId]`, extended to the
+ * end of the id range when `scannedToEnd` is true. Callers may only treat an
+ * absent base as recovered when it falls inside that proven interval.
+ */
+export type IComputedOutboxBasePendingCapacityPage = {
+  threshold: number;
+  /** Resolved page size actually used by SQL and the slice below. */
+  limit: number;
+  afterBaseId?: string;
+  scannedThroughBaseId?: string;
+  scannedToEnd: boolean;
+  bases: ReadonlyArray<{ baseId: string; pending: number }>;
+  /** Present iff `truncated`: continue strictly after this base id. */
+  nextBaseId?: string;
+  truncated: boolean;
+};
+
+export type IComputedOutboxLockConvoy = {
+  lockWaiters: number;
+  idleTransactions: number;
+  oldestIdleTransactionMs: number;
+  sampleQuery: string | null;
+};
+
+export type IComputedOutboxMaintenanceAnomaly = {
+  kind: 'dead' | 'stale';
+  taskId: string;
+  baseId: string;
+  seedTableId: string;
+  attempts: number;
+  maxAttempts: number;
+  lastError: string | null;
+  failedSql: string | null;
+  failureKind: string | null;
+  failurePhase: string | null;
+  affectedTableName: string | null;
+  occurredAt: Date;
+};
+
+export type IComputedOutboxMaintenanceAnomalySnapshot = {
+  total: number;
+  items: IComputedOutboxMaintenanceAnomaly[];
+};
+
+export type IComputedOutboxMaintenanceRecovery =
+  | { status: 'recovered'; baseId: string }
+  | { status: 'not_found' | 'conflict' };
+
+export type IComputedOutboxMaintenanceDeadLetterBatchRecovery = {
+  tasks: Array<{ taskId: string; baseId: string }>;
+  inserted: number;
+  alreadyPending: number;
+};
+
+export type IComputedOutboxWakeupCandidate = {
+  taskId: string;
+  baseId: string;
+  availableAt: Date;
+  revision: string;
+};
+
+export interface IDataDbPreviewBinding {
+  spaceId: string;
+  connectionId: string;
+  encryptedUrl: string;
+  internalSchema: string;
+  urlFingerprint?: string | null;
+  displayHost?: string | null;
+  displayDatabase?: string | null;
+}
+
+/** Minimal server-loaded routing projection. Never accept this from a client request. */
+export interface IDataDbRoutingBinding {
+  readonly mode: string;
+  readonly state: string;
+  readonly dataDbConnection: {
+    readonly id: string;
+    readonly status: string;
+    readonly encryptedUrl: string;
+    readonly internalSchema: string;
+    readonly urlFingerprint: string | null;
+    readonly displayHost: string | null;
+    readonly displayDatabase: string | null;
+    readonly schemaVersion?: string | null;
+  } | null;
+}
+
+export interface IDataDbRoutingSnapshot {
+  readonly spaceId: string;
+  readonly binding: IDataDbRoutingBinding | null;
+}
+
+export interface IDataDbRoutingOptions {
+  useTransaction?: boolean;
+  previewBinding?: IDataDbPreviewBinding;
+  sourceConnectionId?: string | null;
+}
+
+type IMetaRoutingClient = PrismaService | NonNullable<IClsStore['tx']['client']>;
+
+/**
+ * Missing row and `mode: 'default'` both mean the platform meta DB — unbinding
+ * rewrites `mode` rather than deleting the row. `state` is not consulted.
+ */
+const isBoundToDataDb = <T extends { mode: string }>(binding: T | null): binding is T =>
+  binding !== null && binding.mode !== 'default';
+
+export class DataDbBaseNotFoundError extends Error {
+  constructor(readonly baseId: string) {
+    super(`Base ${baseId} not found`);
+    this.name = 'DataDbBaseNotFoundError';
+  }
+}
+
+export class DataDbBindingNotReadyError extends CustomHttpException {
+  readonly spaceId: string;
+
+  constructor(spaceId: string) {
+    super(
+      `Data database binding for space ${spaceId} is not ready`,
+      HttpErrorCode.DATABASE_CONNECTION_UNAVAILABLE,
+      { spaceId }
+    );
+    this.name = 'DataDbBindingNotReadyError';
+    this.spaceId = spaceId;
+  }
+}
+
+type IResolvedSpaceDataDbRoute =
+  | { isMetaFallback: true }
+  | { connectionId: string; internalSchema: string; isMetaFallback: false; url: string };
+
+const COMPUTED_OUTBOX_REDRIVE_LOCK_KEY = 'v2:computed-outbox:global-redrive:v1';
+const COMPUTED_OUTBOX_MAINTENANCE_CONNECT_TIMEOUT_MS = 5000;
+const COMPUTED_OUTBOX_MAINTENANCE_QUERY_TIMEOUT_MS = 10_000;
+const COMPUTED_OUTBOX_RECOVERY_INSERT_CHUNK_SIZE = 500;
+
+type IComputedOutboxSchemaTarget = Pick<ComputedOutboxWakeupCandidateQueryTarget, 'internalSchema'>;
+
+const createComputedOutboxMaintenanceKnex = (target: IComputedOutboxMaintenanceTarget) =>
+  createKnex({
+    client: 'pg',
+    connection: {
+      // Never rely on URL `options=-c search_path=...`: pgbouncer/CNPG ignore it.
+      // Pair this raw URL with schema-qualified SQL / knex.withSchema().
+      connectionString: target.connectionUrl ?? target.url,
+      connectionTimeoutMillis: COMPUTED_OUTBOX_MAINTENANCE_CONNECT_TIMEOUT_MS,
+    },
+    acquireConnectionTimeout: COMPUTED_OUTBOX_MAINTENANCE_CONNECT_TIMEOUT_MS,
+    pool: { min: 0, max: 1 },
+  });
+
+const computedOutboxKnexTable = (
+  db: Knex | Knex.Transaction,
+  target: IComputedOutboxSchemaTarget,
+  table: string
+) => (target.internalSchema ? db(table).withSchema(target.internalSchema) : db(table));
+
+const completeComputedOutboxArchiveDeletion = async (
+  trx: Knex.Transaction,
+  target: IComputedOutboxSchemaTarget,
+  intent: 'restore' | 'discard',
+  taskIds: ReadonlyArray<string>
+): Promise<number> => {
+  if (taskIds.length === 0) return 0;
+  const schema = `"${(target.internalSchema ?? 'public').replaceAll('"', '""')}"`;
+  const functionName =
+    intent === 'restore' ? 'computed_outbox_complete_restore' : 'computed_outbox_discard';
+  const result = await trx.raw<{ rows: Array<{ deleted: string | number }> }>(
+    `select ${schema}."${functionName}"(?::text[]) as deleted`,
+    [taskIds]
+  );
+  return Number(result.rows[0]?.deleted ?? 0);
+};
+
+/** Normalized lineage row over outbox / dead-letter / run-history (T6908). */
+export type IComputedOutboxLineageRow = {
+  source: 'live' | 'dead' | 'history';
+  taskId: string;
+  baseId: string;
+  seedTableId: string;
+  changeType: string;
+  runId: string;
+  originRunIds: string[] | null;
+  status: 'pending' | 'processing' | 'dead' | 'succeeded';
+  stageDepth: number | string;
+  predecessorTaskId: string | null;
+  attempts: number | string;
+  estimatedComplexity: number | string;
+  runTotalSteps: number | string;
+  runCompletedStepsBefore: number | string;
+  syncMaxLevel: number | string | null;
+  sourceFieldIds: string[] | null;
+  seedRecordCount: number | string | null;
+  affectedTableIds: string[] | null;
+  affectedFieldIds: string[] | null;
+  sourceChangedAt: Date | string | null;
+  enqueuedAt: Date | string;
+  startedAt: Date | string | null;
+  completedAt: Date | string | null;
+  failedAt: Date | string | null;
+  durationMs: number | string | null;
+  lastError: string | null;
+  steps: unknown;
+  edges: unknown;
+};
+
+export type IComputedOutboxLineageLookup = {
+  task: IComputedOutboxLineageRow;
+  chain: IComputedOutboxLineageRow[];
+};
+
+export type IComputedOutboxDeadLetterRow = {
+  taskId: string;
+  workerLane: string;
+  baseId: string;
+  seedTableId: string;
+  seedRecordIds: unknown;
+  changeType: string;
+  steps: unknown;
+  edges: unknown;
+  maxAttempts: number | string;
+  estimatedComplexity: number | string | null;
+  planHash: string | null;
+  dirtyStats: unknown;
+  runId: string | null;
+  originRunIds: string[] | null;
+  runTotalSteps: number | string | null;
+  runCompletedStepsBefore: number | string | null;
+  affectedTableIds: string[] | null;
+  affectedFieldIds: string[] | null;
+  syncMaxLevel: number | string | null;
+  sourceChangedAt: Date | string | null;
+  stageDepth?: number | string | null;
+  predecessorTaskId?: string | null;
+  createdAt: Date | string;
+};
+
+const COMPUTED_OUTBOX_DEAD_LETTER_COLUMNS = {
+  taskId: 'id',
+  workerLane: 'worker_lane',
+  baseId: 'base_id',
+  seedTableId: 'seed_table_id',
+  seedRecordIds: 'seed_record_ids',
+  changeType: 'change_type',
+  steps: 'steps',
+  edges: 'edges',
+  maxAttempts: 'max_attempts',
+  estimatedComplexity: 'estimated_complexity',
+  planHash: 'plan_hash',
+  dirtyStats: 'dirty_stats',
+  runId: 'run_id',
+  originRunIds: 'origin_run_ids',
+  runTotalSteps: 'run_total_steps',
+  runCompletedStepsBefore: 'run_completed_steps_before',
+  affectedTableIds: 'affected_table_ids',
+  affectedFieldIds: 'affected_field_ids',
+  syncMaxLevel: 'sync_max_level',
+  sourceChangedAt: 'source_changed_at',
+  stageDepth: 'stage_depth',
+  predecessorTaskId: 'predecessor_task_id',
+  createdAt: 'created_at',
+} as const;
+
+type ComputedRecoverySeedGroup = { tableId: string; recordIds: string[] };
+type PreparedComputedTaskRerun = {
+  taskId: string;
+  row: Record<string, unknown>;
+  seedGroups: ComputedRecoverySeedGroup[];
+  archivedSeedCount?: string;
+};
+
+const COMPUTED_OUTBOX_RECOVERY_SEED_INSERT_CHUNK_SIZE = 1000;
+
+const parseRecoveryJson = (value: unknown): unknown => {
+  if (typeof value !== 'string') return value;
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return value;
+  }
+};
+
+const rejectMalformedComputedRerun = (dead: IComputedOutboxDeadLetterRow): never => {
+  throw new CustomHttpException(
+    `Computed dead-letter task ${dead.taskId} cannot be rerun because its archived task payload is malformed`,
+    HttpErrorCode.VALIDATION_ERROR
+  );
+};
+
+const parseRecoverySeedGroups = (
+  dead: IComputedOutboxDeadLetterRow
+): ComputedRecoverySeedGroup[] => {
+  const value = parseRecoveryJson(dead.seedRecordIds);
+  if (value == null) return [];
+  if (!Array.isArray(value)) return rejectMalformedComputedRerun(dead);
+  if (value.every((recordId) => typeof recordId === 'string')) {
+    return [{ tableId: dead.seedTableId, recordIds: value as string[] }];
+  }
+
+  const groups: ComputedRecoverySeedGroup[] = [];
+  for (const candidate of value) {
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+      return rejectMalformedComputedRerun(dead);
+    }
+    const { tableId, recordIds } = candidate as { tableId?: unknown; recordIds?: unknown };
+    if (
+      typeof tableId !== 'string' ||
+      !Array.isArray(recordIds) ||
+      !recordIds.every((recordId) => typeof recordId === 'string')
+    ) {
+      return rejectMalformedComputedRerun(dead);
+    }
+    groups.push({ tableId, recordIds: recordIds as string[] });
+  }
+  return groups;
+};
+
+const parseRecoveryPlanArray = (dead: IComputedOutboxDeadLetterRow, value: unknown): unknown[] => {
+  const parsed = parseRecoveryJson(value);
+  return Array.isArray(parsed) ? parsed : rejectMalformedComputedRerun(dead);
+};
+
+type PreparedRerunPlan = Record<string, unknown>;
+
+const prepareSeedRerun = (
+  dead: IComputedOutboxDeadLetterRow,
+  archived: Record<string, unknown>,
+  traceCarrier: TracePropagationCarrier | undefined,
+  seedCount: number
+): PreparedRerunPlan => {
+  const originalChangeType = archived.changeType;
+  if (!['insert', 'update', 'delete'].includes(String(originalChangeType))) {
+    return rejectMalformedComputedRerun(dead);
+  }
+  return {
+    steps: JSON.stringify([]),
+    edges: JSON.stringify([]),
+    dirty_stats: JSON.stringify({
+      changeType: originalChangeType,
+      ...(archived.impact !== undefined ? { impact: archived.impact } : {}),
+      ...(archived.beforeImageRecords !== undefined
+        ? { beforeImageRecords: archived.beforeImageRecords }
+        : {}),
+      ...(archived.cyclePolicy !== undefined ? { cyclePolicy: archived.cyclePolicy } : {}),
+      ...(archived.orchestration !== undefined ? { orchestration: archived.orchestration } : {}),
+      ...(traceCarrier ?? {}),
+    }),
+    estimated_complexity: seedCount,
+    run_total_steps: 0,
+    affected_table_ids: [dead.seedTableId],
+    affected_field_ids: dead.affectedFieldIds ?? [],
+    sync_max_level: 0,
+  };
+};
+
+const prepareBackfillRerun = (
+  dead: IComputedOutboxDeadLetterRow,
+  traceCarrier: TracePropagationCarrier | undefined
+): PreparedRerunPlan => ({
+  steps: JSON.stringify([]),
+  edges: JSON.stringify([]),
+  // A backfill rerun starts the archived field scope from the beginning; never
+  // restore its failed cursor as though prior batches were a resumable checkpoint.
+  dirty_stats: JSON.stringify({ ...(traceCarrier ?? {}) }),
+  estimated_complexity: dead.estimatedComplexity,
+  run_total_steps: 1,
+  affected_table_ids: [dead.seedTableId],
+  affected_field_ids: dead.affectedFieldIds ?? [],
+  sync_max_level: 0,
+});
+
+const validatePlannedRerunInputs = (
+  dead: IComputedOutboxDeadLetterRow,
+  archived: Record<string, unknown>
+): void => {
+  const legacySeedTables = new Set(
+    parseRecoverySeedGroups(dead)
+      .filter((group) => group.recordIds.length > 0)
+      .map((group) => group.tableId)
+  );
+  const manifest = archived.rerunInputs;
+  const completeManifest =
+    manifest &&
+    typeof manifest === 'object' &&
+    'version' in manifest &&
+    manifest.version === 1 &&
+    'complete' in manifest &&
+    manifest.complete === true;
+  if ('rerunInputs' in archived && !completeManifest) {
+    throw new CustomHttpException(
+      'Archived computed rerun inputs are unavailable or incomplete; the dead letter is preserved',
+      HttpErrorCode.VALIDATION_ERROR
+    );
+  }
+  if (
+    !manifest &&
+    (legacySeedTables.size === 0 ||
+      archived.ledgerScopeId ||
+      archived.partialStageBudget ||
+      archived.seedAllCursors ||
+      dead.predecessorTaskId ||
+      Number(dead.stageDepth ?? 0) > 0)
+  ) {
+    throw new CustomHttpException(
+      'Historical computed archive has no complete durable rerun inputs; the dead letter is preserved',
+      HttpErrorCode.VALIDATION_ERROR
+    );
+  }
+};
+
+const preparePlannedRerun = (
+  dead: IComputedOutboxDeadLetterRow,
+  archived: Record<string, unknown>,
+  traceCarrier: TracePropagationCarrier | undefined
+): PreparedRerunPlan => {
+  const steps = parseRecoveryPlanArray(dead, dead.steps);
+  // An upstream scalar may already have committed while its downstream edge did
+  // not. "Unchanged in this rerun" is not evidence that the archived edge is safe
+  // to prune. Remove only its delta-pruning provenance; preserve the logical edge
+  // and use the existing conservative no-provenance execution path for this rerun.
+  const edges = parseRecoveryPlanArray(dead, dead.edges).map((entry) => {
+    if (
+      !entry ||
+      typeof entry !== 'object' ||
+      Array.isArray(entry) ||
+      !('propagationSourceFieldIds' in entry)
+    )
+      return entry;
+    const { propagationSourceFieldIds: _deltaEvidence, ...edge } = entry;
+    return edge;
+  });
+  validatePlannedRerunInputs(dead, archived);
+  return {
+    steps: JSON.stringify(steps),
+    edges: JSON.stringify(edges),
+    // Re-run the archived current-stage plan from its durable seeds. Preserve plan
+    // inputs, but intentionally discard ledger scopes, cursors, budgets, exclusions,
+    // terminal errors and prior run progress.
+    dirty_stats: JSON.stringify({
+      plannedRerun: true,
+      ...(archived.dirtyStats !== undefined ? { dirtyStats: archived.dirtyStats } : {}),
+      ...(archived.beforeImageRecords !== undefined
+        ? { beforeImageRecords: archived.beforeImageRecords }
+        : {}),
+      ...(archived.orchestration !== undefined ? { orchestration: archived.orchestration } : {}),
+      ...(archived.sameTableBatches !== undefined
+        ? { sameTableBatches: archived.sameTableBatches }
+        : {}),
+      ...(archived.sourceFieldIds !== undefined ? { sourceFieldIds: archived.sourceFieldIds } : {}),
+      ...(archived.seedAllTableIds !== undefined
+        ? { seedAllTableIds: archived.seedAllTableIds }
+        : {}),
+      ...(traceCarrier ?? {}),
+    }),
+    estimated_complexity: dead.estimatedComplexity,
+    run_total_steps: steps.length,
+    affected_table_ids: dead.affectedTableIds ?? [],
+    affected_field_ids: dead.affectedFieldIds ?? [],
+    sync_max_level: Number(dead.syncMaxLevel ?? 0),
+  };
+};
+
+const prepareComputedTaskRerun = (
+  dead: IComputedOutboxDeadLetterRow,
+  planHash: string,
+  now: Date
+): PreparedComputedTaskRerun => {
+  const parsedDirtyStats = parseRecoveryJson(dead.dirtyStats);
+  const archived =
+    parsedDirtyStats && typeof parsedDirtyStats === 'object' && !Array.isArray(parsedDirtyStats)
+      ? (parsedDirtyStats as Record<string, unknown>)
+      : {};
+  const traceCarrier = parseTracePropagationCarrier(archived);
+  const seedGroups = dead.changeType === 'field-backfill' ? [] : parseRecoverySeedGroups(dead);
+  const seedCount = seedGroups.reduce((count, group) => count + group.recordIds.length, 0);
+
+  const plan =
+    dead.changeType === 'seed'
+      ? prepareSeedRerun(dead, archived, traceCarrier, seedCount)
+      : dead.changeType === 'field-backfill'
+        ? prepareBackfillRerun(dead, traceCarrier)
+        : ['insert', 'update', 'delete'].includes(dead.changeType)
+          ? preparePlannedRerun(dead, archived, traceCarrier)
+          : rejectMalformedComputedRerun(dead);
+
+  const runId = generatePrefixedId('cur', 16);
+  const manifest = archived.rerunInputs;
+  let archivedSeedCount: string | undefined;
+  if (
+    manifest &&
+    typeof manifest === 'object' &&
+    'complete' in manifest &&
+    manifest.complete === true
+  ) {
+    if (
+      !('seedCount' in manifest) ||
+      typeof manifest.seedCount !== 'string' ||
+      !/^\d+$/.test(manifest.seedCount)
+    ) {
+      return rejectMalformedComputedRerun(dead);
+    }
+    archivedSeedCount = manifest.seedCount;
+  }
+  return {
+    taskId: dead.taskId,
+    seedGroups,
+    archivedSeedCount,
+    row: {
+      id: dead.taskId,
+      worker_lane: dead.workerLane,
+      base_id: dead.baseId,
+      seed_table_id: dead.seedTableId,
+      // Recovered seeds always spill to normalized child rows so the live payload
+      // stays bounded regardless of archive size.
+      seed_record_ids: null,
+      change_type: dead.changeType,
+      ...plan,
+      status: 'pending',
+      attempts: 0,
+      max_attempts: dead.maxAttempts,
+      next_run_at: now,
+      locked_at: null,
+      locked_by: null,
+      last_error: null,
+      plan_hash: planHash,
+      run_id: runId,
+      dead_letter_restore_version: 1,
+      origin_run_ids: [runId],
+      run_completed_steps_before: 0,
+      source_changed_at: dead.sourceChangedAt,
+      stage_depth: 0,
+      predecessor_task_id: null,
+      created_at: now,
+      updated_at: now,
+    },
+  };
+};
+
+const insertArchivedRerunSeedRows = async (
+  trx: Knex.Transaction,
+  prepared: ReadonlyArray<PreparedComputedTaskRerun>,
+  insertedTaskIds: ReadonlySet<string>,
+  target: IComputedOutboxSchemaTarget
+): Promise<void> => {
+  for (const task of prepared) {
+    if (!insertedTaskIds.has(task.taskId) || task.archivedSeedCount === undefined) continue;
+    const seeds = computedOutboxKnexTable(trx, target, 'computed_update_dead_letter_seed');
+    const count = await seeds.clone().where('task_id', task.taskId).count({ count: '*' }).first();
+    if (String(count?.count ?? '0') !== task.archivedSeedCount) {
+      throw new CustomHttpException(
+        'Archived computed rerun seed membership is incomplete; the dead letter is preserved',
+        HttpErrorCode.VALIDATION_ERROR
+      );
+    }
+    if (task.archivedSeedCount === '0') continue;
+    const source = seeds
+      .clone()
+      .where('task_id', task.taskId)
+      .select({
+        id: trx.raw("'cus' || substr(md5(task_id || ':' || table_id || ':' || record_id), 1, 16)"),
+        task_id: 'task_id',
+        table_id: 'table_id',
+        record_id: 'record_id',
+      });
+    await computedOutboxKnexTable(trx, target, 'computed_update_outbox_seed')
+      .insert(source)
+      .onConflict(['task_id', 'table_id', 'record_id'])
+      .ignore();
+  }
+};
+
+const insertRecoveredSeedRows = async (
+  trx: Knex.Transaction,
+  prepared: ReadonlyArray<PreparedComputedTaskRerun>,
+  insertedTaskIds: ReadonlySet<string>,
+  target: IComputedOutboxSchemaTarget
+): Promise<void> => {
+  let chunk: Array<Record<'id' | 'task_id' | 'table_id' | 'record_id', string>> = [];
+  const flush = async () => {
+    if (chunk.length === 0) return;
+    await computedOutboxKnexTable(trx, target, 'computed_update_outbox_seed')
+      .insert(chunk)
+      .onConflict(['task_id', 'table_id', 'record_id'])
+      .ignore();
+    chunk = [];
+  };
+
+  for (const task of prepared) {
+    if (!insertedTaskIds.has(task.taskId)) continue;
+    for (const group of task.seedGroups) {
+      for (const recordId of group.recordIds) {
+        chunk.push({
+          id: generatePrefixedId('cus', 16),
+          task_id: task.taskId,
+          table_id: group.tableId,
+          record_id: recordId,
+        });
+        if (chunk.length >= COMPUTED_OUTBOX_RECOVERY_SEED_INSERT_CHUNK_SIZE) await flush();
+      }
+    }
+  }
+  await flush();
+  await insertArchivedRerunSeedRows(trx, prepared, insertedTaskIds, target);
+};
+
+const restoreComputedOutboxDeadLetter = async (
+  trx: Knex.Transaction,
+  dead: IComputedOutboxDeadLetterRow,
+  target: IComputedOutboxSchemaTarget = {}
+): Promise<boolean> => {
+  const prepared = prepareComputedTaskRerun(
+    dead,
+    buildComputedOutboxRecoveryPlanHash(dead.planHash ?? dead.taskId, dead.taskId),
+    new Date()
+  );
+  const inserted = (await computedOutboxKnexTable(trx, target, 'computed_update_outbox')
+    .insert(prepared.row)
+    .onConflict('id')
+    .ignore()
+    .returning('id')) as Array<{ id: string }>;
+  const insertedTaskIds = new Set(inserted.map((row) => String(row.id)));
+  await insertRecoveredSeedRows(trx, [prepared], insertedTaskIds, target);
+  if (insertedTaskIds.size > 0) {
+    await completeComputedOutboxArchiveDeletion(trx, target, 'restore', [prepared.taskId]);
+  }
+  return insertedTaskIds.size > 0;
+};
+
+export const restoreComputedOutboxDeadLetterRows = async (
+  trx: Knex.Transaction,
+  rows: ReadonlyArray<IComputedOutboxDeadLetterRow>,
+  target: IComputedOutboxSchemaTarget = {}
+): Promise<IComputedOutboxMaintenanceDeadLetterBatchRecovery> => {
+  // This pre-check is load-bearing, not an optimization: a task id already durable in the
+  // outbox may hold the identical replay plan hash from an earlier recovery.
+  const alreadyPendingTaskIds = new Set<string>();
+  for (let offset = 0; offset < rows.length; offset += COMPUTED_OUTBOX_RECOVERY_INSERT_CHUNK_SIZE) {
+    const taskIds = rows
+      .slice(offset, offset + COMPUTED_OUTBOX_RECOVERY_INSERT_CHUNK_SIZE)
+      .map((dead) => dead.taskId);
+    if (taskIds.length === 0) continue;
+    const existing = (await computedOutboxKnexTable(trx, target, 'computed_update_outbox')
+      .whereIn('id', taskIds)
+      .pluck('id')) as string[];
+    for (const taskId of existing) alreadyPendingTaskIds.add(String(taskId));
+  }
+
+  const rowsToInsert = rows.filter((dead) => !alreadyPendingTaskIds.has(dead.taskId));
+  const insertedTaskIds = new Set<string>();
+
+  for (
+    let offset = 0;
+    offset < rowsToInsert.length;
+    offset += COMPUTED_OUTBOX_RECOVERY_INSERT_CHUNK_SIZE
+  ) {
+    const chunk = rowsToInsert.slice(offset, offset + COMPUTED_OUTBOX_RECOVERY_INSERT_CHUNK_SIZE);
+    const now = new Date();
+    const prepared = chunk.map((dead) =>
+      prepareComputedTaskRerun(
+        dead,
+        buildComputedOutboxRecoveryPlanHash(dead.planHash ?? dead.taskId, dead.taskId),
+        now
+      )
+    );
+    const inserted = (await computedOutboxKnexTable(trx, target, 'computed_update_outbox')
+      .insert(prepared.map(({ row }) => row))
+      .onConflict('id')
+      .ignore()
+      .returning('id')) as Array<{ id: string }>;
+    const chunkInsertedTaskIds = new Set(inserted.map((row) => String(row.id)));
+    for (const taskId of chunkInsertedTaskIds) insertedTaskIds.add(taskId);
+    await insertRecoveredSeedRows(trx, prepared, chunkInsertedTaskIds, target);
+  }
+
+  const insertedIds = [...insertedTaskIds];
+  for (
+    let offset = 0;
+    offset < insertedIds.length;
+    offset += COMPUTED_OUTBOX_RECOVERY_INSERT_CHUNK_SIZE
+  ) {
+    await completeComputedOutboxArchiveDeletion(
+      trx,
+      target,
+      'restore',
+      insertedIds.slice(offset, offset + COMPUTED_OUTBOX_RECOVERY_INSERT_CHUNK_SIZE)
+    );
+  }
+
+  return {
+    tasks: rows.map((dead) => ({ taskId: dead.taskId, baseId: dead.baseId })),
+    inserted: insertedTaskIds.size,
+    alreadyPending: rows.length - insertedTaskIds.size,
+  };
+};
+
+@Injectable()
+export class DataDbClientManager {
+  private readonly byodbPoolSettings = resolveByodbDataDbPoolSettings();
+
+  constructor(
+    private readonly prismaService: PrismaService,
+    private readonly metaFallbackDataPrismaService: DataPrismaService,
+    @InjectModel(DATA_KNEX) private readonly metaFallbackDataKnex: Knex,
+    private readonly runtimeCache: DataDbRuntimeCacheService,
+    private readonly pgPoolRegistry: PgPoolRegistry,
+    @Optional()
+    private readonly dataDbMigrationService?: DataDbMigrationService,
+    @Optional()
+    @Inject(ClsService)
+    private readonly cls?: ClsService<IClsStore>
+  ) {}
+
+  private getMetaRoutingClient(options?: IDataDbRoutingOptions): IMetaRoutingClient {
+    return options?.useTransaction ? this.prismaService.txClient() : this.prismaService;
+  }
+
+  /**
+   * Request-scoped dedupe for routing lookups. Guards, container resolution and
+   * query paths each re-resolve the same table/space routing inside one request;
+   * the mapping is stable, so cache it for the request. Transactional lookups
+   * bypass the cache — they may observe uncommitted meta rows.
+   */
+  private async withRoutingCache<T>(
+    key: string,
+    options: IDataDbRoutingOptions | undefined,
+    load: () => Promise<T>
+  ): Promise<T> {
+    if (options?.useTransaction || !this.cls?.isActive() || typeof this.cls.get !== 'function') {
+      return load();
+    }
+    let cache = this.cls.get('dataDbRoutingCache');
+    if (!cache) {
+      cache = new Map<string, unknown>();
+      this.cls.set('dataDbRoutingCache', cache);
+    }
+    if (cache.has(key)) {
+      return cache.get(key) as T;
+    }
+    const value = await load();
+    cache.set(key, value);
+    return value;
+  }
+
+  /**
+   * base → spaceId for every base-scoped entry point. Outside a transaction the
+   * row comes from the request-scoped ancestry cache the guards already
+   * populated, so routing, permission checks and authz share one meta-db read
+   * per request. Transactional lookups read through the transaction client
+   * uncached — they may need to observe uncommitted meta rows.
+   */
+  private async findSpaceIdByBaseId(baseId: string, options?: IDataDbRoutingOptions) {
+    if (options?.useTransaction) {
+      const base = await this.prismaService.txClient().base.findUnique({
+        where: { id: baseId },
+        select: { spaceId: true },
+      });
+      return base?.spaceId;
+    }
+    const base = await getBaseCached(this.cls, this.prismaService, baseId);
+    return base?.spaceId;
+  }
+
+  /** table → spaceId, sharing the same request-scoped ancestry cache. */
+  private async findSpaceIdByTableId(tableId: string, options?: IDataDbRoutingOptions) {
+    if (options?.useTransaction) {
+      const table = await this.prismaService.txClient().tableMeta.findUnique({
+        where: { id: tableId },
+        select: { base: { select: { spaceId: true } } },
+      });
+      return table?.base.spaceId;
+    }
+    const table = await getTableMetaWithBaseCached(this.cls, this.prismaService, tableId);
+    return table?.base.spaceId;
+  }
+
+  async getDataDatabaseForSpace(
+    spaceId: string,
+    options?: IDataDbRoutingOptions
+  ): Promise<IResolvedDataDatabase> {
+    return this.withRoutingCache(`space:${spaceId}`, options, () =>
+      this.getDataDatabaseForSpaceUncached(spaceId, options)
+    );
+  }
+
+  /** Resolve a fresh, trusted metadata projection without rereading or using an older route cache. */
+  async getDataDatabaseFromRoutingSnapshot(
+    snapshot: IDataDbRoutingSnapshot
+  ): Promise<IResolvedDataDatabase> {
+    const resolved: IResolvedSpaceDataDbRoute = isBoundToDataDb(snapshot.binding)
+      ? await this.resolveBoundSpaceDataDb(snapshot.spaceId, snapshot.binding)
+      : { isMetaFallback: true };
+    return this.toResolvedDataDatabase(resolved);
+  }
+
+  private async getDataDatabaseForSpaceUncached(
+    spaceId: string,
+    options?: IDataDbRoutingOptions
+  ): Promise<IResolvedDataDatabase> {
+    const resolved = await this.resolveSpaceDataDb(spaceId, options);
+    return this.toResolvedDataDatabase(resolved);
+  }
+
+  private toResolvedDataDatabase(resolved: IResolvedSpaceDataDbRoute): IResolvedDataDatabase {
+    if (resolved.isMetaFallback) {
+      return {
+        cacheKey: 'meta-fallback',
+        url: getMetaDatabaseUrl(),
+        connectionUrl: getMetaDatabaseUrl(),
+        isMetaFallback: true,
+      };
+    }
+
+    return {
+      cacheKey: resolved.connectionId,
+      connectionId: resolved.connectionId,
+      internalSchema: resolved.internalSchema,
+      url: withDataDbInternalSchemaParam(resolved.url, resolved.internalSchema),
+      connectionUrl: resolved.url,
+      isMetaFallback: false,
+    };
+  }
+
+  async getDataDatabaseUrlForSpace(spaceId: string, options?: IDataDbRoutingOptions) {
+    return (await this.getDataDatabaseForSpace(spaceId, options)).url;
+  }
+
+  async getDataDatabaseForBase(baseId: string, options?: IDataDbRoutingOptions) {
+    const spaceId = await this.findSpaceIdByBaseId(baseId, options);
+    if (!spaceId) {
+      throw new DataDbBaseNotFoundError(baseId);
+    }
+    return await this.getDataDatabaseForSpace(spaceId, options);
+  }
+
+  async getDataDatabaseUrlForBase(baseId: string, options?: IDataDbRoutingOptions) {
+    return (await this.getDataDatabaseForBase(baseId, options)).url;
+  }
+
+  async getDataDatabaseForTable(tableId: string, options?: IDataDbRoutingOptions) {
+    const spaceId = await this.findSpaceIdByTableId(tableId, options);
+    if (!spaceId) {
+      throw new Error(`Table ${tableId} not found`);
+    }
+    return await this.getDataDatabaseForSpace(spaceId, options);
+  }
+
+  /**
+   * Stops at the binding row: `resolveSpaceDataDb` would migrate the bound
+   * database first, which throws once that database is gone — exactly when a
+   * failed cleanup needs this answer.
+   */
+  async isMetaFallbackForBase(baseId: string, options?: IDataDbRoutingOptions) {
+    const spaceId = await this.findSpaceIdByBaseId(baseId, options);
+    if (!spaceId) {
+      throw new Error(`Project ${baseId} not found`);
+    }
+    return !isBoundToDataDb(await this.findSpaceDataDbBinding(spaceId, options));
+  }
+
+  private async findSpaceDataDbBinding(spaceId: string, options?: IDataDbRoutingOptions) {
+    // Every base/table-scoped routing call ends here. The binding is stable for
+    // the duration of a request, and `getDataDatabaseForSpace` already caches
+    // the resolved database over the same window, so dedupe the read too.
+    return await this.withRoutingCache(`binding:${spaceId}`, options, () =>
+      this.getMetaRoutingClient(options).spaceDataDbBinding.findUnique({
+        where: { spaceId },
+        include: { dataDbConnection: true },
+      })
+    );
+  }
+
+  async listComputedOutboxMaintenanceTargets(): Promise<
+    ReadonlyArray<IComputedOutboxMaintenanceTarget>
+  > {
+    const connections = await this.prismaService.dataDbConnection.findMany({
+      where: {
+        status: 'ready',
+        spaceBindings: {
+          some: {
+            mode: 'byodb',
+            state: 'ready',
+          },
+        },
+      },
+      select: {
+        id: true,
+        encryptedUrl: true,
+        internalSchema: true,
+        spaceBindings: {
+          where: { mode: 'byodb', state: 'ready' },
+          select: { spaceId: true },
+        },
+      },
+    });
+    const spaceIds = [
+      ...new Set(
+        connections.flatMap((connection) => connection.spaceBindings.map((b) => b.spaceId))
+      ),
+    ];
+    const bases =
+      spaceIds.length > 0
+        ? await this.prismaService.base.findMany({
+            where: { spaceId: { in: spaceIds } },
+            select: { id: true, spaceId: true },
+          })
+        : [];
+    const basesBySpace = new Map<string, Array<{ baseId: string; spaceId: string }>>();
+    for (const base of bases) {
+      const mapping = basesBySpace.get(base.spaceId) ?? [];
+      mapping.push({ baseId: base.id, spaceId: base.spaceId });
+      basesBySpace.set(base.spaceId, mapping);
+    }
+
+    return [
+      {
+        cacheKey: 'meta-fallback',
+        url: getMetaDatabaseUrl(),
+        connectionUrl: getMetaDatabaseUrl(),
+        isMetaFallback: true,
+        storage: 'default',
+      },
+      ...connections.map((connection) => ({
+        cacheKey: connection.id,
+        connectionId: connection.id,
+        internalSchema: connection.internalSchema,
+        connectionUrl: decryptDataDbUrl(connection.encryptedUrl),
+        url: withDataDbInternalSchemaParam(
+          decryptDataDbUrl(connection.encryptedUrl),
+          connection.internalSchema
+        ),
+        isMetaFallback: false as const,
+        storage: 'byodb' as const,
+        baseSpaceMapping: connection.spaceBindings.flatMap(
+          (binding) => basesBySpace.get(binding.spaceId) ?? []
+        ),
+      })),
+    ];
+  }
+
+  async peekDueDomainEventWork(target: IComputedOutboxMaintenanceTarget): Promise<boolean> {
+    const knex = createComputedOutboxMaintenanceKnex(target);
+    try {
+      const unpublished = await computedOutboxKnexTable(knex, target, 'domain_event_outbox')
+        .select(knex.raw('1'))
+        .where('unpublished', true)
+        .limit(1);
+      if (unpublished.length > 0) {
+        return true;
+      }
+      const due = await computedOutboxKnexTable(knex, target, 'domain_event_delivery')
+        .select(knex.raw('1'))
+        .whereIn('status', ['pending', 'processing'])
+        .andWhere('next_attempt_at', '<=', knex.fn.now())
+        .limit(1);
+      return due.length > 0;
+    } finally {
+      await knex.destroy().catch(() => undefined);
+    }
+  }
+  /**
+   * Bases whose space currently has a BYODB binding, including bindings whose
+   * connection is disabled/unready and therefore absent from the queryable
+   * maintenance inventory. Used to hide leftover default-storage anomalies
+   * that must not be recovered onto the meta database. Complements
+   * buildComputedOutboxRoutedFilter, which also treats deleted BYODB-bound
+   * bases as routed away so the admin badge matches the list.
+   */
+  async listByodbBoundBaseIds(): Promise<string[]> {
+    const bases = await this.prismaService.base.findMany({
+      where: {
+        deletedTime: null,
+        space: {
+          dataDbBinding: {
+            is: { mode: 'byodb' },
+          },
+        },
+      },
+      select: { id: true },
+    });
+    return bases.map((base) => base.id);
+  }
+
+  /**
+   * Reconcile pause-deferral orphans: pending rows future-dated beyond every
+   * legitimate schedule with no active pause scope covering them (see
+   * buildComputedOutboxOrphanedDeferralRestoreQuery). Returns restored rows.
+   */
+  async restoreOrphanedComputedOutboxDeferrals(
+    target: IComputedOutboxMaintenanceTarget,
+    orphanedDeferralThresholdMs: number
+  ): Promise<number> {
+    const client = createComputedOutboxMaintenanceKnex(target);
+    try {
+      const restoreQuery = buildComputedOutboxOrphanedDeferralRestoreQuery(
+        { ...target, workerLane: resolveComputedWorkerLane() },
+        orphanedDeferralThresholdMs
+      );
+      const result = await client
+        .raw<{ rowCount: number }>(restoreQuery.sql, restoreQuery.bindings)
+        .timeout(COMPUTED_OUTBOX_MAINTENANCE_QUERY_TIMEOUT_MS, { cancel: true });
+      return Number((result as { rowCount?: number }).rowCount ?? 0);
+    } finally {
+      await client.destroy().catch(() => undefined);
+    }
+  }
+
+  async *iterateComputedOutboxWakeupCandidates(
+    target: IComputedOutboxMaintenanceTarget,
+    processingLeaseMs: number,
+    batchSize = 500,
+    options: ComputedOutboxWakeupCandidateQueryOptions = {}
+  ): AsyncGenerator<ReadonlyArray<IComputedOutboxWakeupCandidate>> {
+    const client = createComputedOutboxMaintenanceKnex(target);
+    let afterId: string | undefined;
+    const normalizedBatchSize = Math.max(1, Math.trunc(batchSize));
+
+    try {
+      while (true) {
+        const candidateQuery = buildComputedOutboxWakeupCandidatesQuery(
+          { ...target, workerLane: resolveComputedWorkerLane() },
+          processingLeaseMs,
+          normalizedBatchSize,
+          afterId,
+          options
+        );
+        const result = await client
+          .raw<{
+            rows: Array<{
+              taskId: string;
+              baseId: string;
+              status: 'pending' | 'processing';
+              nextRunAt: Date | string;
+              lockedAt: Date | string | null;
+              attempts: number;
+              updatedAt: Date | string;
+            }>;
+          }>(candidateQuery.sql, candidateQuery.bindings)
+          .timeout(COMPUTED_OUTBOX_MAINTENANCE_QUERY_TIMEOUT_MS, { cancel: true });
+        const rows = result.rows as Array<{
+          taskId: string;
+          baseId: string;
+          status: 'pending' | 'processing';
+          nextRunAt: Date | string;
+          lockedAt: Date | string | null;
+          attempts: number;
+          updatedAt: Date | string;
+        }>;
+        if (rows.length === 0) return;
+
+        yield rows.map((row) => {
+          const dueAt =
+            row.status === 'processing' && row.lockedAt
+              ? new Date(row.lockedAt).getTime() + processingLeaseMs
+              : new Date(row.nextRunAt).getTime();
+          return {
+            taskId: String(row.taskId),
+            baseId: String(row.baseId),
+            availableAt: new Date(dueAt),
+            revision: [
+              new Date(row.updatedAt).getTime(),
+              row.attempts,
+              new Date(row.nextRunAt).getTime(),
+              row.lockedAt ? new Date(row.lockedAt).getTime() : 0,
+            ].join('-'),
+          };
+        });
+
+        afterId = String(rows[rows.length - 1]?.taskId);
+        if (rows.length < normalizedBatchSize) return;
+      }
+    } finally {
+      await client.destroy();
+    }
+  }
+
+  async withComputedOutboxRedriveLease(run: () => Promise<void>): Promise<boolean> {
+    const client = createKnex({
+      client: 'pg',
+      connection: {
+        connectionString: getMetaDatabaseUrl(),
+        connectionTimeoutMillis: COMPUTED_OUTBOX_MAINTENANCE_CONNECT_TIMEOUT_MS,
+      },
+      acquireConnectionTimeout: COMPUTED_OUTBOX_MAINTENANCE_CONNECT_TIMEOUT_MS,
+      pool: { min: 0, max: 1 },
+    });
+    let connection: unknown;
+    try {
+      connection = await client.client.acquireConnection();
+      const lockResult = await client
+        .raw<{
+          rows: Array<{ acquired: boolean }>;
+        }>('select pg_try_advisory_lock(hashtext(?)) as acquired', [
+          COMPUTED_OUTBOX_REDRIVE_LOCK_KEY,
+        ])
+        .connection(connection)
+        .timeout(COMPUTED_OUTBOX_MAINTENANCE_QUERY_TIMEOUT_MS, { cancel: true });
+      if (!lockResult.rows[0]?.acquired) return false;
+
+      try {
+        await run();
+        return true;
+      } finally {
+        await client
+          .raw('select pg_advisory_unlock(hashtext(?))', [COMPUTED_OUTBOX_REDRIVE_LOCK_KEY])
+          .connection(connection)
+          .timeout(COMPUTED_OUTBOX_MAINTENANCE_QUERY_TIMEOUT_MS, { cancel: true })
+          .catch(() => undefined);
+      }
+    } finally {
+      if (connection) await client.client.releaseConnection(connection);
+      await client.destroy();
+    }
+  }
+
+  async inspectComputedOutboxMaintenanceTarget(
+    target: IComputedOutboxMaintenanceTarget,
+    processingLeaseMs: number
+  ): Promise<IComputedOutboxMaintenanceSnapshot> {
+    const client = createComputedOutboxMaintenanceKnex(target);
+    const query = buildComputedOutboxMaintenanceSnapshotQuery(target, processingLeaseMs);
+    try {
+      const result = await client
+        .raw<{
+          rows: Array<Record<string, string | number | null>>;
+        }>(query.sql, query.bindings)
+        .timeout(COMPUTED_OUTBOX_MAINTENANCE_QUERY_TIMEOUT_MS, { cancel: true });
+      const row = result.rows[0] ?? {};
+      return {
+        duePending: Number(row.due_pending ?? 0),
+        scheduledPending: Number(row.scheduled_pending ?? 0),
+        pausedPending: Number(row.paused_pending ?? 0),
+        activeProcessing: Number(row.active_processing ?? 0),
+        staleProcessing: Number(row.stale_processing ?? 0),
+        dead: Number(row.dead ?? 0),
+        anomalyGroups: Number(row.dead_groups ?? 0) + Number(row.stale_groups ?? 0),
+        oldestDueAgeMs: Number(row.oldest_due_age_ms ?? 0),
+        oldestPausedAgeMs: Number(row.oldest_paused_age_ms ?? 0),
+        activePauseScopeCount: Number(row.active_pause_scope_count ?? 0),
+      };
+    } finally {
+      await client.destroy();
+    }
+  }
+
+  async inspectComputedOutboxBasePendingCapacity(
+    target: IComputedOutboxMaintenanceTarget,
+    request: ComputedOutboxBasePendingCapacityPageRequest
+  ): Promise<IComputedOutboxBasePendingCapacityPage> {
+    const threshold = normalizeBasePendingCapacityThreshold(request.threshold);
+    const limit = normalizeBasePendingCapacityQueryLimit(request.limit);
+    const page = buildComputedOutboxBasePendingCapacityQuery(target, {
+      threshold,
+      limit,
+      afterBaseId: request.afterBaseId,
+    });
+    const client = createComputedOutboxMaintenanceKnex(target);
+    try {
+      const result = await client
+        .raw<{
+          rows: Array<{ baseId: string; pending: string | number | null }>;
+        }>(page.sql, page.bindings)
+        .timeout(COMPUTED_OUTBOX_MAINTENANCE_QUERY_TIMEOUT_MS, { cancel: true });
+      const rows = result.rows.map((row) => ({
+        baseId: row.baseId,
+        pending: Number(row.pending ?? 0),
+      }));
+      return assembleComputedOutboxBasePendingCapacityPage(rows, {
+        threshold,
+        limit,
+        afterBaseId: request.afterBaseId,
+      });
+    } finally {
+      await client.destroy();
+    }
+  }
+
+  async inspectComputedOutboxLockConvoy(
+    target: IComputedOutboxMaintenanceTarget,
+    idleMs: number
+  ): Promise<IComputedOutboxLockConvoy> {
+    const client = createComputedOutboxMaintenanceKnex(target);
+    try {
+      const result = await client
+        .raw<{
+          rows: Array<
+            Record<
+              'lock_waiters' | 'idle_transactions' | 'oldest_idle_ms',
+              string | number | null
+            > &
+              Record<'sample_query', string | null>
+          >;
+        }>(
+          `select
+            count(*) filter (where wait_event_type = 'Lock')::int as lock_waiters,
+            count(*) filter (
+              where state = 'idle in transaction'
+                and xact_start <= now() - (? * interval '1 millisecond')
+            )::int as idle_transactions,
+            coalesce(
+              extract(epoch from max(now() - xact_start) filter (
+                where state = 'idle in transaction'
+              )) * 1000,
+              0
+            ) as oldest_idle_ms,
+            (
+              select left(regexp_replace(query, E'[\\n\\r]+', ' ', 'g'), 180)
+              from pg_stat_activity
+              where datname = current_database()
+                and pid <> pg_backend_pid()
+                and state = 'idle in transaction'
+                and xact_start <= now() - (? * interval '1 millisecond')
+              order by xact_start
+              limit 1
+            ) as sample_query
+          from pg_stat_activity
+          where datname = current_database()
+            and pid <> pg_backend_pid()`,
+          [idleMs, idleMs]
+        )
+        .timeout(COMPUTED_OUTBOX_MAINTENANCE_QUERY_TIMEOUT_MS, { cancel: true });
+      const row = result.rows[0] ?? {};
+      return {
+        lockWaiters: Number(row.lock_waiters ?? 0),
+        idleTransactions: Number(row.idle_transactions ?? 0),
+        oldestIdleTransactionMs: Number(row.oldest_idle_ms ?? 0),
+        sampleQuery: row.sample_query ?? null,
+      };
+    } finally {
+      await client.destroy();
+    }
+  }
+
+  async listComputedOutboxMaintenanceAnomalies(
+    target: IComputedOutboxMaintenanceTarget,
+    processingLeaseMs: number,
+    limit: number
+  ): Promise<IComputedOutboxMaintenanceAnomalySnapshot> {
+    const client = createComputedOutboxMaintenanceKnex(target);
+    const query = buildComputedOutboxAnomalyListQuery(target, processingLeaseMs, limit);
+
+    try {
+      const result = await client
+        .raw<{
+          rows: Array<{
+            kind: 'dead' | 'stale';
+            taskId: string;
+            baseId: string;
+            seedTableId: string;
+            attempts: number | string;
+            maxAttempts: number | string;
+            lastError: string | null;
+            failedSql: string | null;
+            failureKind: string | null;
+            failurePhase: string | null;
+            affectedTableName: string | null;
+            occurredAt: Date | string;
+            total: number | string;
+          }>;
+        }>(query.sql, query.bindings)
+        .timeout(COMPUTED_OUTBOX_MAINTENANCE_QUERY_TIMEOUT_MS, { cancel: true });
+
+      return {
+        total: Number(result.rows[0]?.total ?? 0),
+        items: result.rows.map((row) => ({
+          kind: row.kind,
+          taskId: String(row.taskId),
+          baseId: String(row.baseId),
+          seedTableId: String(row.seedTableId),
+          attempts: Number(row.attempts),
+          maxAttempts: Number(row.maxAttempts),
+          lastError: row.lastError,
+          failedSql: row.failedSql,
+          failureKind: row.failureKind,
+          failurePhase: row.failurePhase,
+          affectedTableName: row.affectedTableName,
+          occurredAt: new Date(row.occurredAt),
+        })),
+      };
+    } finally {
+      await client.destroy();
+    }
+  }
+
+  /** Read an anomaly's base id without mutating it, so recovery can validate routing first. */
+  async peekComputedOutboxMaintenanceAnomalyBase(
+    target: IComputedOutboxMaintenanceTarget,
+    taskId: string,
+    kind: 'dead' | 'stale'
+  ): Promise<string | null> {
+    const client = createComputedOutboxMaintenanceKnex(target);
+    try {
+      const table = kind === 'dead' ? 'computed_update_dead_letter' : 'computed_update_outbox';
+      const row = await computedOutboxKnexTable(client, target, table)
+        .select('base_id')
+        .where({ id: taskId })
+        .first<Record<'base_id', string> | undefined>()
+        .timeout(COMPUTED_OUTBOX_MAINTENANCE_QUERY_TIMEOUT_MS, { cancel: true });
+      return row ? String(row.base_id) : null;
+    } finally {
+      await client.destroy();
+    }
+  }
+
+  /**
+   * Batch-resolve where the given durable tasks currently stand in one storage
+   * target's ledger. Tasks absent from the result are not in this target at all.
+   */
+  async lookupComputedOutboxMaintenanceTaskStates(
+    target: IComputedOutboxMaintenanceTarget,
+    taskIds: ReadonlyArray<string>
+  ): Promise<Map<string, 'pending' | 'processing' | 'dead'>> {
+    if (!taskIds.length) return new Map();
+    const client = createComputedOutboxMaintenanceKnex(target);
+    const query = buildComputedOutboxTaskStatesQuery(target, taskIds);
+    try {
+      const result = await client
+        .raw<{
+          rows: Array<{ taskId: string; state: 'pending' | 'processing' | 'dead' }>;
+        }>(query.sql, query.bindings)
+        .timeout(COMPUTED_OUTBOX_MAINTENANCE_QUERY_TIMEOUT_MS, { cancel: true });
+      const states = new Map<string, 'pending' | 'processing' | 'dead'>();
+      for (const row of result.rows) {
+        // A task can transiently appear in both tables mid-recovery; dead wins
+        // so the UI always points at the actionable anomaly entry.
+        const existing = states.get(row.taskId);
+        if (existing === 'dead') continue;
+        states.set(row.taskId, row.state);
+      }
+      return states;
+    } finally {
+      await client.destroy();
+    }
+  }
+
+  /**
+   * Resolve one task's lineage on a single storage target: the task itself
+   * (live outbox / dead letter / run history) plus every ledger entry sharing
+   * its run lineage. Returns null when the task is unknown to this target.
+   * The run-history arm is included only when the ledger table exists, so
+   * targets whose data-db migration has not landed still answer.
+   */
+  async lookupComputedOutboxLineage(
+    target: IComputedOutboxMaintenanceTarget,
+    taskId: string,
+    options: { chainLimit?: number } = {}
+  ): Promise<IComputedOutboxLineageLookup | null> {
+    const client = createComputedOutboxMaintenanceKnex(target);
+    try {
+      const existsQuery = buildComputedOutboxRunHistoryExistsQuery(target);
+      const existsResult = await client
+        .raw<{ rows: Array<{ exists: boolean }> }>(existsQuery.sql, existsQuery.bindings)
+        .timeout(COMPUTED_OUTBOX_MAINTENANCE_QUERY_TIMEOUT_MS, { cancel: true });
+      const includeHistory = Boolean(existsResult.rows[0]?.exists);
+
+      const lookupQuery = buildComputedOutboxLineageTaskLookupQuery(target, taskId, includeHistory);
+      const lookupResult = await client
+        .raw<{ rows: IComputedOutboxLineageRow[] }>(lookupQuery.sql, lookupQuery.bindings)
+        .timeout(COMPUTED_OUTBOX_MAINTENANCE_QUERY_TIMEOUT_MS, { cancel: true });
+      // A task can transiently sit in more than one ledger mid-recovery; the
+      // live row reflects current state, then dead, then history.
+      const priority: Record<IComputedOutboxLineageRow['source'], number> = {
+        live: 0,
+        dead: 1,
+        history: 2,
+      };
+      const task = [...lookupResult.rows].sort(
+        (a, b) => priority[a.source] - priority[b.source]
+      )[0];
+      if (!task) return null;
+
+      const runIds = [
+        ...new Set([String(task.runId), ...(task.originRunIds ?? []).map(String)]),
+      ].filter((id) => id.length > 0);
+      if (!runIds.length) return { task, chain: [task] };
+
+      const chainQuery = buildComputedOutboxLineageRunChainQuery(
+        target,
+        runIds,
+        includeHistory,
+        options.chainLimit ?? 200
+      );
+      const chainResult = await client
+        .raw<{ rows: IComputedOutboxLineageRow[] }>(chainQuery.sql, chainQuery.bindings)
+        .timeout(COMPUTED_OUTBOX_MAINTENANCE_QUERY_TIMEOUT_MS, { cancel: true });
+      // Dedupe by taskId with the same source priority the lookup used.
+      const byTaskId = new Map<string, IComputedOutboxLineageRow>();
+      for (const row of chainResult.rows) {
+        const existing = byTaskId.get(String(row.taskId));
+        if (!existing || priority[row.source] < priority[existing.source]) {
+          byTaskId.set(String(row.taskId), row);
+        }
+      }
+      if (!byTaskId.has(String(task.taskId))) byTaskId.set(String(task.taskId), task);
+      return { task, chain: [...byTaskId.values()] };
+    } finally {
+      await client.destroy();
+    }
+  }
+
+  async recoverComputedOutboxMaintenanceAnomaly(
+    target: IComputedOutboxMaintenanceTarget,
+    taskId: string,
+    kind: 'dead' | 'stale',
+    processingLeaseMs: number
+  ): Promise<IComputedOutboxMaintenanceRecovery> {
+    const client = createComputedOutboxMaintenanceKnex(target);
+
+    try {
+      if (kind === 'stale') {
+        const query = buildComputedOutboxStaleRecoverySelectQuery(
+          { ...target, workerLane: resolveComputedWorkerLane() },
+          taskId,
+          processingLeaseMs
+        );
+        const result = await client
+          .raw<{ rows: Array<{ baseId: string }> }>(query.sql, query.bindings)
+          .timeout(COMPUTED_OUTBOX_MAINTENANCE_QUERY_TIMEOUT_MS, { cancel: true });
+        const row = result.rows[0];
+        return row ? { status: 'recovered', baseId: String(row.baseId) } : { status: 'not_found' };
+      }
+
+      return await client.transaction(async (trx) => {
+        const dead = (await computedOutboxKnexTable(trx, target, 'computed_update_dead_letter')
+          .select(COMPUTED_OUTBOX_DEAD_LETTER_COLUMNS)
+          .where({ id: taskId })
+          .where('worker_lane', resolveComputedWorkerLane())
+          .forUpdate()
+          .first()) as IComputedOutboxDeadLetterRow | undefined;
+        if (!dead) return { status: 'not_found' } as const;
+
+        const inserted = await restoreComputedOutboxDeadLetter(trx, dead, target);
+        if (!inserted) return { status: 'conflict' } as const;
+
+        return { status: 'recovered', baseId: dead.baseId } as const;
+      });
+    } finally {
+      await client.destroy();
+    }
+  }
+
+  async recoverComputedOutboxMaintenanceDeadLetterBatch(
+    target: IComputedOutboxMaintenanceTarget,
+    selection: ComputedOutboxDeadLetterBatchSelection
+  ): Promise<IComputedOutboxMaintenanceDeadLetterBatchRecovery> {
+    const client = createComputedOutboxMaintenanceKnex(target);
+    const query = buildComputedOutboxDeadLetterBatchSelectionQuery(
+      { ...target, workerLane: resolveComputedWorkerLane() },
+      selection
+    );
+
+    try {
+      return await client.transaction(async (trx) => {
+        const selected = await trx
+          .raw<{ rows: Array<{ taskId: string }> }>(query.sql, query.bindings)
+          .timeout(COMPUTED_OUTBOX_MAINTENANCE_QUERY_TIMEOUT_MS, { cancel: true });
+        const taskIds = selected.rows.map((row) => String(row.taskId));
+
+        const tasks: Array<{ taskId: string; baseId: string }> = [];
+        let inserted = 0;
+        let alreadyPending = 0;
+        for (
+          let offset = 0;
+          offset < taskIds.length;
+          offset += COMPUTED_OUTBOX_RECOVERY_INSERT_CHUNK_SIZE
+        ) {
+          const chunkIds = taskIds.slice(
+            offset,
+            offset + COMPUTED_OUTBOX_RECOVERY_INSERT_CHUNK_SIZE
+          );
+          const fetched = (await computedOutboxKnexTable(trx, target, 'computed_update_dead_letter')
+            .select(COMPUTED_OUTBOX_DEAD_LETTER_COLUMNS)
+            .whereIn('id', chunkIds)) as IComputedOutboxDeadLetterRow[];
+          const byTaskId = new Map(fetched.map((row) => [row.taskId, row]));
+          const rows = chunkIds.flatMap((id) => byTaskId.get(id) ?? []);
+          const recovery = await restoreComputedOutboxDeadLetterRows(trx, rows, target);
+          tasks.push(...recovery.tasks);
+          inserted += recovery.inserted;
+          alreadyPending += recovery.alreadyPending;
+        }
+        return { tasks, inserted, alreadyPending };
+      });
+    } finally {
+      await client.destroy();
+    }
+  }
+
+  /**
+   * Permanently drop one root-cause group of dead letters without replaying
+   * it. The selection is keyed exactly like batch recovery, so an admin can
+   * only discard the same population the anomaly page shows. No routing guard:
+   * the primary use case is a group whose base no longer exists anywhere.
+   */
+  async discardComputedOutboxMaintenanceDeadLetterBatch(
+    target: IComputedOutboxMaintenanceTarget,
+    selection: ComputedOutboxDeadLetterBatchSelection
+  ): Promise<{ discarded: number }> {
+    const client = createComputedOutboxMaintenanceKnex(target);
+    const query = buildComputedOutboxDeadLetterBatchSelectionQuery(target, selection);
+
+    try {
+      return await client.transaction(async (trx) => {
+        const selected = await trx
+          .raw<{ rows: Array<{ taskId: string }> }>(query.sql, query.bindings)
+          .timeout(COMPUTED_OUTBOX_MAINTENANCE_QUERY_TIMEOUT_MS, { cancel: true });
+        const taskIds = selected.rows.map((row) => String(row.taskId));
+        if (!taskIds.length) return { discarded: 0 };
+        const discarded = await completeComputedOutboxArchiveDeletion(
+          trx,
+          target,
+          'discard',
+          taskIds
+        );
+        return { discarded };
+      });
+    } finally {
+      await client.destroy();
+    }
+  }
+
+  async getDataDatabaseUrlForTable(tableId: string, options?: IDataDbRoutingOptions) {
+    return (await this.getDataDatabaseForTable(tableId, options)).url;
+  }
+
+  /** Returns a compiler-only Knex handle. Execute queries through withDataKnexConnectionForSpace. */
+  async dataKnexForSpace(spaceId: string, options?: IDataDbRoutingOptions) {
+    await this.resolveSpaceDataDb(spaceId, options);
+    return this.metaFallbackDataKnex;
+  }
+
+  async withDataKnexConnectionForSpace<T>(
+    spaceId: string,
+    fn: (knex: Knex, connection: PoolClient) => Promise<T>,
+    options?: IDataDbRoutingOptions
+  ): Promise<T> {
+    const resolved = await this.resolveSpaceDataDb(spaceId, options);
+    const connectionString = resolved.isMetaFallback ? getMetaDatabaseUrl() : resolved.url;
+    const poolLease = this.pgPoolRegistry.acquire(
+      connectionString,
+      resolved.isMetaFallback ? undefined : this.byodbPoolSettings
+    );
+    let connection: PoolClient | undefined;
+    try {
+      connection = await poolLease.pool.connect();
+      return await fn(this.metaFallbackDataKnex, connection);
+    } finally {
+      connection?.release();
+      await poolLease.release();
+    }
+  }
+
+  async dataPrismaForSpace(spaceId: string, options?: IDataDbRoutingOptions) {
+    const resolved = await this.resolveSpaceDataDb(spaceId, options);
+
+    if (resolved.isMetaFallback) {
+      return this.metaFallbackDataPrismaService;
+    }
+
+    return await this.runtimeCache.getOrCreate(
+      DATA_DB_PRISMA_CACHE_NAMESPACE,
+      resolved.connectionId,
+      async () => {
+        const poolLease = this.pgPoolRegistry.acquire(resolved.url, this.byodbPoolSettings);
+        try {
+          return createScopedDataPrismaClient(poolLease, resolved.internalSchema);
+        } catch (error) {
+          await poolLease.release();
+          throw error;
+        }
+      },
+      (client) => client.$disconnect()
+    );
+  }
+
+  /** Returns a compiler-only Knex handle. Execute queries through withDataKnexConnectionForBase. */
+  async dataKnexForBase(baseId: string, options?: IDataDbRoutingOptions) {
+    const spaceId = await this.findSpaceIdByBaseId(baseId, options);
+    if (!spaceId) {
+      throw new Error(`Project ${baseId} not found`);
+    }
+    return await this.dataKnexForSpace(spaceId, options);
+  }
+
+  async withDataKnexConnectionForBase<T>(
+    baseId: string,
+    fn: (knex: Knex, connection: PoolClient) => Promise<T>,
+    options?: IDataDbRoutingOptions
+  ): Promise<T> {
+    const spaceId = await this.findSpaceIdByBaseId(baseId, options);
+    if (!spaceId) {
+      throw new Error(`Project ${baseId} not found`);
+    }
+    return this.withDataKnexConnectionForSpace(spaceId, fn, options);
+  }
+
+  /** Returns a compiler-only Knex handle. Execute queries through withDataKnexConnectionForTable. */
+  async dataKnexForTable(tableId: string, options?: IDataDbRoutingOptions) {
+    const spaceId = await this.findSpaceIdByTableId(tableId, options);
+    if (!spaceId) {
+      throw new Error(`Table ${tableId} not found`);
+    }
+    return await this.dataKnexForSpace(spaceId, options);
+  }
+
+  async withDataKnexConnectionForTable<T>(
+    tableId: string,
+    fn: (knex: Knex, connection: PoolClient) => Promise<T>,
+    options?: IDataDbRoutingOptions
+  ): Promise<T> {
+    const spaceId = await this.findSpaceIdByTableId(tableId, options);
+    if (!spaceId) {
+      throw new Error(`Table ${tableId} not found`);
+    }
+    return this.withDataKnexConnectionForSpace(spaceId, fn, options);
+  }
+
+  async dataPrismaForTable(tableId: string, options?: IDataDbRoutingOptions) {
+    const spaceId = await this.findSpaceIdByTableId(tableId, options);
+    if (!spaceId) {
+      throw new Error(`Table ${tableId} not found`);
+    }
+    return await this.dataPrismaForSpace(spaceId, options);
+  }
+
+  async dataPrismaForBase(baseId: string, options?: IDataDbRoutingOptions) {
+    const spaceId = await this.findSpaceIdByBaseId(baseId, options);
+    if (!spaceId) {
+      throw new Error(`Project ${baseId} not found`);
+    }
+    return await this.dataPrismaForSpace(spaceId, options);
+  }
+
+  /** Resolve only metadata-proven ready routes; never run migration-on-acquire. */
+  async getDataDatabaseForSpacePreviewReadOnly(
+    spaceId: string
+  ): Promise<IResolvedDataDatabase | null> {
+    const binding = await this.findSpaceDataDbBinding(spaceId);
+    if (!isBoundToDataDb(binding)) return this.toResolvedDataDatabase({ isMetaFallback: true });
+
+    const connection = binding.dataDbConnection;
+    if (binding.state !== 'ready' || connection?.status !== 'ready' || !connection.encryptedUrl) {
+      return null;
+    }
+    const latestSchemaVersion = this.dataDbMigrationService?.getLatestSchemaVersion();
+    if (latestSchemaVersion && connection.schemaVersion !== latestSchemaVersion) return null;
+    return this.toResolvedDataDatabase({
+      connectionId: connection.id,
+      internalSchema: connection.internalSchema,
+      isMetaFallback: false,
+      url: decryptDataDbUrl(connection.encryptedUrl),
+    });
+  }
+
+  async getDataDatabaseForBasePreviewReadOnly(
+    baseId: string
+  ): Promise<IResolvedDataDatabase | null> {
+    const spaceId = await this.findSpaceIdByBaseId(baseId);
+    return spaceId ? this.getDataDatabaseForSpacePreviewReadOnly(spaceId) : null;
+  }
+
+  async getDataDatabaseForTablePreviewReadOnly(
+    tableId: string
+  ): Promise<IResolvedDataDatabase | null> {
+    const spaceId = await this.findSpaceIdByTableId(tableId);
+    return spaceId ? this.getDataDatabaseForSpacePreviewReadOnly(spaceId) : null;
+  }
+  /** Returns a query client without invoking data-DB migration. */
+  async dataPrismaForBasePreviewReadOnly(baseId: string) {
+    const route = await this.getDataDatabaseForBasePreviewReadOnly(baseId);
+    if (!route) return null;
+    if (route.isMetaFallback) return this.metaFallbackDataPrismaService;
+    const { connectionId, connectionUrl, internalSchema } = route;
+    if (!connectionId || !connectionUrl || !internalSchema) return null;
+
+    return await this.runtimeCache.getOrCreate(
+      DATA_DB_PRISMA_CACHE_NAMESPACE,
+      connectionId,
+      async () => {
+        const poolLease = this.pgPoolRegistry.acquire(connectionUrl, this.byodbPoolSettings);
+        try {
+          return createScopedDataPrismaClient(poolLease, internalSchema);
+        } catch (error) {
+          await poolLease.release();
+          throw error;
+        }
+      },
+      (client) => client.$disconnect()
+    );
+  }
+
+  async invalidateConnection(connectionId: string) {
+    await this.runtimeCache.deleteByKey(connectionId);
+  }
+
+  private async resolveSpaceDataDb(
+    spaceId: string,
+    options?: IDataDbRoutingOptions
+  ): Promise<IResolvedSpaceDataDbRoute> {
+    if ('sourceConnectionId' in (options ?? {})) {
+      return await this.resolveSourceSpaceDataDb(options);
+    }
+
+    if (options?.previewBinding?.spaceId === spaceId) {
+      return this.resolvePreviewSpaceDataDb(spaceId, options.previewBinding);
+    }
+
+    const binding = await this.findSpaceDataDbBinding(spaceId, options);
+
+    if (!isBoundToDataDb(binding)) {
+      // A bound space must never silently fall back to the meta database:
+      // DDL or writes landing there materialize into the orphaned source
+      // schema as "ghost" tables (meta alive, physical relation missing in
+      // the real data db). The transaction-scoped client can observe state
+      // that diverges from the primary, so re-check before accepting the
+      // fallback; the non-transactional path already read from the primary.
+      if (options?.useTransaction) {
+        const primaryBinding = await this.prismaService.spaceDataDbBinding.findUnique({
+          where: { spaceId },
+          select: { mode: true },
+        });
+        if (primaryBinding && primaryBinding.mode !== 'default') {
+          throw new Error(
+            `Data database routing for space ${spaceId} resolved to the meta fallback while a '${primaryBinding.mode}' binding exists`
+          );
+        }
+      }
+      return { isMetaFallback: true };
+    }
+    return this.resolveBoundSpaceDataDb(spaceId, binding);
+  }
+
+  private async resolveBoundSpaceDataDb(
+    spaceId: string,
+    binding: IDataDbRoutingBinding
+  ): Promise<IResolvedSpaceDataDbRoute> {
+    const connection = binding.dataDbConnection;
+    if (!connection) {
+      throw new Error(`Data database connection for space ${spaceId} was not found`);
+    }
+
+    const migratableStates = this.dataDbMigrationService
+      ? ['ready', 'migrating', 'error']
+      : ['ready'];
+
+    if (!migratableStates.includes(binding.state)) {
+      throw new DataDbBindingNotReadyError(spaceId);
+    }
+
+    if (!migratableStates.includes(connection.status)) {
+      throw new DataDbBindingNotReadyError(spaceId);
+    }
+
+    if (!connection.encryptedUrl) {
+      throw new Error(`Data database connection for space ${spaceId} has no encrypted URL`);
+    }
+
+    if (this.cls?.isActive()) {
+      this.cls.set('dataDb', {
+        mode: 'byodb',
+        spaceId,
+        connectionId: connection.id,
+        urlFingerprint: connection.urlFingerprint,
+        displayHost: connection.displayHost,
+        displayDatabase: connection.displayDatabase,
+        internalSchema: connection.internalSchema,
+      });
+    }
+
+    const url = decryptDataDbUrl(connection.encryptedUrl);
+    await this.dataDbMigrationService?.ensureConnectionMigrated({
+      connectionId: connection.id,
+      internalSchema: connection.internalSchema,
+      url,
+    });
+
+    return {
+      connectionId: connection.id,
+      internalSchema: connection.internalSchema,
+      isMetaFallback: false,
+      url,
+    };
+  }
+
+  private resolvePreviewSpaceDataDb(
+    spaceId: string,
+    preview: IDataDbPreviewBinding
+  ): IResolvedSpaceDataDbRoute {
+    if (this.cls?.isActive()) {
+      this.cls.set('dataDb', {
+        mode: 'byodb',
+        spaceId,
+        connectionId: preview.connectionId,
+        urlFingerprint: preview.urlFingerprint ?? null,
+        displayHost: preview.displayHost ?? null,
+        displayDatabase: preview.displayDatabase ?? null,
+        internalSchema: preview.internalSchema,
+      });
+    }
+
+    return {
+      connectionId: preview.connectionId,
+      internalSchema: preview.internalSchema,
+      isMetaFallback: false,
+      url: decryptDataDbUrl(preview.encryptedUrl),
+    };
+  }
+
+  private async resolveSourceSpaceDataDb(
+    options?: IDataDbRoutingOptions
+  ): Promise<IResolvedSpaceDataDbRoute> {
+    const sourceConnectionId = options?.sourceConnectionId ?? null;
+    if (!sourceConnectionId) {
+      return { isMetaFallback: true };
+    }
+
+    const connection = await this.getMetaRoutingClient(options).dataDbConnection.findUnique({
+      where: { id: sourceConnectionId },
+    });
+    if (!connection?.encryptedUrl) {
+      throw new Error(`Data database source connection ${sourceConnectionId} was not found`);
+    }
+
+    return {
+      connectionId: connection.id,
+      internalSchema: connection.internalSchema,
+      isMetaFallback: false,
+      url: decryptDataDbUrl(connection.encryptedUrl),
+    };
+  }
+
+  async onModuleDestroy() {
+    await this.runtimeCache.deleteByNamespace(DATA_DB_PRISMA_CACHE_NAMESPACE);
+  }
+}

@@ -1,136 +1,185 @@
+/* eslint-disable sonarjs/cognitive-complexity */
 /* eslint-disable @typescript-eslint/naming-convention */
 import { Injectable } from '@nestjs/common';
-import type { IOtOperation } from '@teable/core';
-import { FieldType, RecordOpBuilder } from '@teable/core';
+import type { LastModifiedByFieldCore, LastModifiedTimeFieldCore } from '@teable/core';
+import { FieldKeyType, TableDomain, FieldType } from '@teable/core';
 import { PrismaService } from '@teable/db-main-prisma';
 import { Knex } from 'knex';
 import { InjectModel } from 'nest-knexjs';
 import { ClsService } from 'nestjs-cls';
+import { DatabaseRouter } from '../../global/database-router.service';
+import { DATA_KNEX } from '../../global/knex/knex.module';
 import type { IClsStore } from '../../types/cls';
-import type { IOpsMap } from './reference.service';
+import { Timing } from '../../utils/timing';
+import { UserFieldDto } from '../field/model/field-dto/user-field.dto';
 
 @Injectable()
 export class SystemFieldService {
   constructor(
     private readonly cls: ClsService<IClsStore>,
     private readonly prismaService: PrismaService,
-    @InjectModel('CUSTOM_KNEX') private readonly knex: Knex
+    private readonly databaseRouter: DatabaseRouter,
+    @InjectModel(DATA_KNEX) private readonly knex: Knex
   ) {}
 
-  private async getTableId2DbTableNameMap(tableIds: string[]) {
-    const tableMeta = await this.prismaService.txClient().tableMeta.findMany({
-      where: { id: { in: tableIds } },
-      select: { id: true, dbTableName: true },
-    });
+  private async updateSystemField(
+    tableId: string,
+    dbTableName: string,
+    recordIds: string[],
+    userId: string,
+    timeStr: string
+  ) {
+    if (!recordIds.length) return;
 
-    return tableMeta.reduce<{ [tableId: string]: string }>((pre, t) => {
-      pre[t.id] = t.dbTableName;
-      return pre;
-    }, {});
-  }
-
-  private async getRecordId2ModifiedDataMap(dbTableName: string, recordIds: string[]) {
     const nativeQuery = this.knex(dbTableName)
-      .select('__id', '__last_modified_time', '__last_modified_by')
+      .update({
+        __last_modified_time: timeStr,
+        __last_modified_by: userId,
+      })
       .whereIn('__id', recordIds)
       .toQuery();
 
-    const result = await this.prismaService
-      .txClient()
-      .$queryRawUnsafe<
-        { __id: string; __last_modified_time: Date; __last_modified_by: string }[]
-      >(nativeQuery);
-
-    return result.reduce<{
-      [recordId: string]: { lastModifiedTime: string; lastModifiedBy: string };
-    }>((pre, r) => {
-      pre[r.__id] = {
-        lastModifiedTime: r.__last_modified_time?.toISOString(),
-        lastModifiedBy: r.__last_modified_by,
-      };
-      return pre;
-    }, {});
+    await this.databaseRouter.executeDataPrismaForTable(tableId, nativeQuery);
   }
 
-  private buildOpsByFields({
-    fields,
-    modifiedData,
-    userId,
-    timeStr,
-  }: {
-    fields: { id: string; type: FieldType }[];
-    modifiedData: { lastModifiedTime: string; lastModifiedBy: string };
-    userId: string;
-    timeStr: string;
-  }) {
-    return fields
-      .map(({ id: fieldId, type }) => {
-        const { lastModifiedTime, lastModifiedBy } = modifiedData;
-
-        if (type === FieldType.LastModifiedTime) {
-          return RecordOpBuilder.editor.setRecord.build({
-            fieldId,
-            oldCellValue: lastModifiedTime,
-            newCellValue: timeStr,
-          });
-        }
-
-        if (type === FieldType.LastModifiedBy && lastModifiedBy !== userId) {
-          return RecordOpBuilder.editor.setRecord.build({
-            fieldId,
-            oldCellValue: lastModifiedBy,
-            newCellValue: userId,
-          });
-        }
-      })
-      .filter(Boolean) as IOtOperation[];
-  }
-
-  async getOpsMapBySystemField(opsMaps: IOpsMap) {
-    const opsMap: IOpsMap = {};
-    const tableIds = Object.keys(opsMaps);
-
-    const userId = this.cls.get('user.id');
+  @Timing()
+  async getModifiedSystemOpsMap(
+    table: TableDomain,
+    fieldKeyType: FieldKeyType,
+    records: {
+      fields: Record<string, unknown>;
+      id: string;
+    }[]
+  ): Promise<
+    {
+      fields: Record<string, unknown>;
+      id: string;
+    }[]
+  > {
+    const user = this.cls.get('user');
     const timeStr = this.cls.get('tx.timeStr') ?? new Date().toISOString();
-
-    const tableId2DbTableName = await this.getTableId2DbTableNameMap(tableIds);
-
-    for (const tableId in opsMaps) {
-      const tableOpsMap = opsMaps[tableId];
-      const recordIds = Object.keys(tableOpsMap);
-
-      const tinyFields = await this.prismaService.txClient().field.findMany({
-        select: { id: true, type: true },
-        where: {
-          tableId,
-          deletedTime: null,
-          type: { in: [FieldType.LastModifiedTime, FieldType.LastModifiedBy] },
-        },
+    const auditUserValue =
+      user &&
+      UserFieldDto.fullAvatarUrl({
+        id: user.id,
+        title: user.name,
+        email: user.email,
       });
+    const cloneAuditUserValue = () => (auditUserValue ? { ...auditUserValue } : null);
+    const sanitizeAuditUserValue = () => {
+      const cloned = cloneAuditUserValue();
+      if (cloned && typeof cloned === 'object' && 'avatarUrl' in cloned) {
+        delete (cloned as { avatarUrl?: string }).avatarUrl;
+      }
+      return cloned;
+    };
 
-      if (!tinyFields.length) continue;
+    const dbTableName = table.dbTableName;
+    const trackedLastModifiedColumnUpdates: Record<string, string[]> = {};
+    const trackedLastModifiedByColumnUpdates: Record<string, string[]> = {};
 
-      const recordId2ModifiedDataMap = await this.getRecordId2ModifiedDataMap(
-        tableId2DbTableName[tableId],
-        recordIds
+    await this.updateSystemField(
+      table.id,
+      dbTableName,
+      records.map((r) => r.id),
+      user.id,
+      timeStr
+    );
+
+    const lastModifiedFields = table.getLastModifiedFields();
+
+    if (!lastModifiedFields.length) return records;
+
+    const fieldsMap = table.getFieldsMap(fieldKeyType);
+
+    const updatedRecords = records.map((record) => {
+      const changedFieldIds = new Set<string>();
+      for (const key of Object.keys(record.fields ?? {})) {
+        const changedField = fieldsMap.get(key);
+        if (changedField) changedFieldIds.add(changedField.id);
+      }
+
+      const systemRecordFields = lastModifiedFields.reduce<{ [fieldId: string]: unknown }>(
+        (pre, field) => {
+          const type = field.type;
+          if (type === FieldType.LastModifiedTime) {
+            const lmtField = field as LastModifiedTimeFieldCore;
+            const trackedIds = lmtField.getTrackedFieldIds();
+            const validTrackedIds = trackedIds.filter((id) => table.hasField(id));
+            const configTrackAll = lmtField.isTrackAll();
+            const effectiveTrackAll = configTrackAll || validTrackedIds.length === 0;
+            const shouldUpdate =
+              effectiveTrackAll || validTrackedIds.some((id) => changedFieldIds.has(id));
+            if (shouldUpdate) {
+              pre[field[fieldKeyType]] = timeStr;
+              // Persist column when not using generated/system value
+              if (!configTrackAll) {
+                const ids = trackedLastModifiedColumnUpdates[field.dbFieldName] || [];
+                ids.push(record.id);
+                trackedLastModifiedColumnUpdates[field.dbFieldName] = ids;
+              }
+            }
+          }
+
+          if (type === FieldType.LastModifiedBy) {
+            const lmbField = field as LastModifiedByFieldCore;
+            const trackedIds = lmbField.getTrackedFieldIds();
+            const validTrackedIds = trackedIds.filter((id) => table.hasField(id));
+            const configTrackAll = lmbField.isTrackAll();
+            const effectiveTrackAll = configTrackAll || validTrackedIds.length === 0;
+            const shouldUpdate =
+              effectiveTrackAll || validTrackedIds.some((id) => changedFieldIds.has(id));
+            if (shouldUpdate) {
+              const value = sanitizeAuditUserValue();
+              pre[field[fieldKeyType]] = value;
+              // Persist column when not using system column
+              if (!configTrackAll) {
+                const ids = trackedLastModifiedByColumnUpdates[field.dbFieldName] || [];
+                ids.push(record.id);
+                trackedLastModifiedByColumnUpdates[field.dbFieldName] = ids;
+              }
+            }
+          }
+          return pre;
+        },
+        {}
       );
 
-      if (!opsMap[tableId]) opsMap[tableId] = {};
+      return {
+        ...record,
+        fields: {
+          ...record.fields,
+          ...systemRecordFields,
+        },
+      };
+    });
 
-      for (const recordId in tableOpsMap) {
-        if (!tableOpsMap[recordId]) continue;
+    // Persist tracked Last Modified Time columns that are not generated
+    for (const [columnName, recordIds] of Object.entries(trackedLastModifiedColumnUpdates)) {
+      const nativeQuery = this.knex(dbTableName)
+        .update({
+          [columnName]: timeStr,
+        })
+        .whereIn('__id', recordIds)
+        .toQuery();
+      await this.databaseRouter.executeDataPrismaForTable(table.id, nativeQuery);
+    }
 
-        const ops = this.buildOpsByFields({
-          fields: tinyFields as { id: string; type: FieldType }[],
-          modifiedData: recordId2ModifiedDataMap[recordId],
-          userId,
-          timeStr,
-        });
-
-        opsMap[tableId][recordId] = ops;
+    // Persist tracked Last Modified By columns that are not generated from the system column
+    if (Object.keys(trackedLastModifiedByColumnUpdates).length) {
+      const persistedUserValue = sanitizeAuditUserValue();
+      const serializedUserValue = persistedUserValue ? JSON.stringify(persistedUserValue) : null;
+      for (const [columnName, recordIds] of Object.entries(trackedLastModifiedByColumnUpdates)) {
+        const nativeQuery = this.knex(dbTableName)
+          .update({
+            [columnName]: serializedUserValue,
+          })
+          .whereIn('__id', recordIds)
+          .toQuery();
+        await this.databaseRouter.executeDataPrismaForTable(table.id, nativeQuery);
       }
     }
 
-    return opsMap;
+    return updatedRecords;
   }
 }

@@ -1,9 +1,11 @@
 import type { RouteConfig } from '@asteasolutions/zod-to-openapi';
-import type { IImportOptionRo, ITableFullVo } from '@teable/core';
-import { tableVoSchema, importOptionRoSchema } from '@teable/core';
 import { axios } from '../axios';
+import type { ITableFullVo } from '../table';
+import { tableVoSchema } from '../table';
 import { registerRoute, urlBuilder } from '../utils';
 import { z } from '../zod';
+import type { IImportOptionRo } from './types';
+import { importOptionRoSchema } from './types';
 
 export const IMPORT_TABLE = '/import/{baseId}';
 
@@ -24,7 +26,7 @@ export const ImportTableFromFileRoute: RouteConfig = registerRoute({
     },
   },
   responses: {
-    200: {
+    201: {
       description: 'Returns data about a table without records',
       content: {
         'application/json': {

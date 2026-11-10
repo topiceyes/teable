@@ -1,67 +1,23 @@
-import { Gauge, PackageCheck } from '@teable/icons';
-import { cn } from '@teable/ui-lib/shadcn';
-import { Button } from '@teable/ui-lib/shadcn/ui/button';
-import Link from 'next/link';
-import { useRouter } from 'next/router';
-import { useTranslation } from 'next-i18next';
-import { tableConfig } from '@/features/i18n/table.config';
-import { TableList } from '../../table-list/TableList';
-import { QuickAction } from './QuickAction';
+// import { TableList } from '../../table-list/TableList';
+import { useBase } from '@teable/sdk/hooks';
+import { BaseNodeTree } from './BaseNodeTree';
+import { BasePageRouter } from './BasePageRouter';
 
-export const BaseSideBar = () => {
-  const router = useRouter();
-  const { baseId } = router.query;
-  const { t } = useTranslation(tableConfig.i18nNamespaces);
-  const pageRoutes: {
-    href: string;
-    text: string;
-    Icon: React.FC<{ className?: string }>;
-    disabled?: boolean;
-  }[] = [
-    {
-      href: `/base/${baseId}/dashboard`,
-      text: t('common:noun.dashboard'),
-      Icon: Gauge,
-    },
-    {
-      href: `/base/${baseId}/automation`,
-      text: t('common:noun.automation'),
-      Icon: PackageCheck,
-      disabled: true,
-    },
-  ];
+export const BaseSideBar = (props: {
+  renderWinFreeCredit?: (spaceId: string) => React.ReactNode;
+  renderAnnouncementCard?: () => React.ReactNode;
+}) => {
+  const { renderWinFreeCredit, renderAnnouncementCard } = props;
+  const base = useBase();
   return (
     <>
-      <div className="flex flex-col gap-2 px-3">
-        <div>
-          <QuickAction>{t('space:quickAction.title')}</QuickAction>
-        </div>
-        <ul>
-          {pageRoutes.map(({ href, text, Icon, disabled }) => {
-            return (
-              <li key={href}>
-                <Button
-                  variant="ghost"
-                  size={'xs'}
-                  asChild
-                  className={cn(
-                    'w-full justify-start text-sm px-2 my-[2px]',
-                    href === router.pathname && 'bg-secondary'
-                  )}
-                  disabled={disabled}
-                >
-                  <Link href={href} className="font-normal">
-                    <Icon className="size-4 shrink-0" />
-                    <p className="truncate">{text}</p>
-                    <div className="grow basis-0"></div>
-                  </Link>
-                </Button>
-              </li>
-            );
-          })}
-        </ul>
+      <BasePageRouter />
+      {/* <TableList /> */}
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+        <BaseNodeTree />
       </div>
-      <TableList />
+      {renderWinFreeCredit && renderWinFreeCredit(base.spaceId)}
+      {renderAnnouncementCard && renderAnnouncementCard()}
     </>
   );
 };

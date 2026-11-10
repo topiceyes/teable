@@ -1,3 +1,4 @@
+import type { ReadStream } from 'node:fs';
 import type { RouteConfig } from '@asteasolutions/zod-to-openapi';
 import { axios } from '../axios';
 import { registerRoute } from '../utils';
@@ -17,7 +18,7 @@ export const UploadFileRoute: RouteConfig = registerRoute({
     body: {
       content: {
         'application/json': {
-          schema: z.string().openapi({ format: 'binary' }),
+          schema: z.string().meta({ format: 'binary' }),
         },
       },
       description: 'upload attachment',
@@ -34,7 +35,7 @@ export const UploadFileRoute: RouteConfig = registerRoute({
 
 export const uploadFile = async (
   token: string,
-  data: Buffer,
+  data: Buffer | ReadStream,
   header: Record<string, unknown>,
   shareId?: string
 ) => {

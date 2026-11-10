@@ -1,126 +1,102 @@
 import { useQuery } from '@tanstack/react-query';
-import type { IUserCellValue, IUserFieldOptions } from '@teable/core';
-import { Check } from '@teable/icons';
-import { getBaseCollaboratorList } from '@teable/openapi';
-import {
-  Avatar,
-  AvatarFallback,
-  AvatarImage,
-  Command,
-  CommandEmpty,
-  CommandGroup,
-  CommandInput,
-  CommandItem,
-  CommandList,
-  Skeleton,
-} from '@teable/ui-lib';
-import classNames from 'classnames';
+import type { IUserCellValue } from '@teable/core';
+import { FieldType } from '@teable/core';
+import { getShareViewCollaborators, getUserCollaborators } from '@teable/openapi';
 import type { ForwardRefRenderFunction } from 'react';
-import React, { useCallback, useImperativeHandle, useRef, forwardRef } from 'react';
+import React, { forwardRef, useContext, useState } from 'react';
 import { ReactQueryKeys } from '../../../config';
-import { useBase } from '../../../hooks';
-import { convertNextImageUrl } from '../../grid-enhancements';
-import type { ICellEditor, IEditorRef } from '../type';
+import { useTranslation } from '../../../context/app/i18n';
+import { ShareViewContext } from '../../../context/table/ShareViewContext';
+import { useBaseId } from '../../../hooks';
+import type { ICellEditor, ICellEditorContext } from '../type';
+import type { IUserEditorRef } from './EditorBase';
+import { UserEditorBase } from './EditorBase';
 
 export interface IUserEditorMainProps extends ICellEditor<IUserCellValue | IUserCellValue[]> {
-  options: IUserFieldOptions;
+  isMultiple?: boolean;
+  includeMe?: boolean;
   onChange?: (value?: IUserCellValue | IUserCellValue[]) => void;
+  onSearch?: (value: string) => void;
   style?: React.CSSProperties;
   className?: string;
+  initialSearch?: string;
 }
 
-const UserEditorMainBase: ForwardRefRenderFunction<
-  IEditorRef<IUserCellValue | IUserCellValue[] | undefined>,
-  IUserEditorMainProps
-> = (props, ref) => {
-  const { options, value: cellValue, onChange, className, style } = props;
-  const { isMultiple } = options;
-  const { id: baseId } = useBase();
-  const inputRef = useRef<HTMLInputElement | null>(null);
-
-  useImperativeHandle(ref, () => ({
-    focus: () => {
-      inputRef.current?.focus();
-    },
-  }));
-
-  const { data: collaborators, isLoading } = useQuery({
-    queryKey: ReactQueryKeys.baseCollaboratorList(baseId),
-    queryFn: ({ queryKey }) => getBaseCollaboratorList(queryKey[1]),
+const DefaultDataWrapper = forwardRef<IUserEditorRef, IUserEditorMainProps>((props, ref) => {
+  const { t } = useTranslation();
+  const baseId = useBaseId();
+  const { shareId } = useContext(ShareViewContext);
+  const [search, setSearch] = useState('');
+  const shareQuery = useQuery({
+    queryKey: ReactQueryKeys.shareViewCollaborators(shareId as string, { search }),
+    queryFn: ({ queryKey }) =>
+      getShareViewCollaborators(queryKey[1], queryKey[2]).then((res) => res.data),
+    enabled: Boolean(shareId),
+  });
+  const baseQuery = useQuery({
+    queryKey: ReactQueryKeys.baseCollaboratorListUser(baseId as string, { search }),
+    queryFn: ({ queryKey }) =>
+      getUserCollaborators(queryKey[1], queryKey[2]).then((res) => res.data),
+    enabled: !shareId && Boolean(baseId),
   });
 
-  const onSelect = (value: IUserCellValue) => {
-    if (isMultiple) {
-      const innerValue = (cellValue || []) as IUserCellValue[];
-      const newValue = innerValue.some((v) => v.id === value.id)
-        ? innerValue.filter((v) => v.id !== value.id)
-        : [...innerValue, value];
-      onChange?.(newValue);
-      return;
-    }
-    onChange?.(value.id === (cellValue as IUserCellValue)?.id ? undefined : value);
-  };
+  const isLoading = shareId ? shareQuery.isLoading : baseQuery.isLoading;
+  const users = shareId
+    ? shareQuery.data
+    : baseQuery.data?.users?.map((item) => ({
+        userId: item.id,
+        userName: item.name,
+        email: item.email,
+        avatar: item.avatar,
+      }));
 
-  const activeStatus = useCallback(
-    (value: string) => {
-      const originValue = isMultiple
-        ? (cellValue as IUserCellValue[])?.map((user) => user?.id)
-        : [(cellValue as IUserCellValue)?.id];
-
-      return originValue?.includes(value);
-    },
-    [cellValue, isMultiple]
-  );
+  const collaborators = props.includeMe
+    ? [{ userId: 'me', userName: t('filter.currentUser'), email: '' }, ...(users || [])]
+    : users;
 
   return (
-    <Command className={className} style={style}>
-      <CommandInput ref={inputRef} placeholder="Search user" />
-      <CommandList>
-        <CommandEmpty>No found.</CommandEmpty>
-        <CommandGroup aria-valuetext="name">
-          {isLoading ? (
-            <CommandItem className="flex items-center space-x-4">
-              <Skeleton className="size-7 rounded-full" />
-              <Skeleton className="h-4 w-32" />
-            </CommandItem>
-          ) : (
-            collaborators?.data?.map(({ userId, userName, avatar, email }) => (
-              <CommandItem
-                key={userId}
-                value={userName}
-                onSelect={() => onSelect({ id: userId, title: userName, avatarUrl: avatar })}
-                className="flex justify-between"
-              >
-                <div className="flex items-center space-x-4">
-                  <Avatar className="box-content size-7 cursor-pointer border">
-                    <AvatarImage
-                      src={convertNextImageUrl({
-                        url: avatar as string,
-                        w: 64,
-                        q: 75,
-                      })}
-                      alt={userName}
-                    />
-                    <AvatarFallback className="text-sm">{userName.slice(0, 1)}</AvatarFallback>
-                  </Avatar>
-                  <div>
-                    <p className="text-sm font-medium leading-none">{userName}</p>
-                    <p className="text-sm text-muted-foreground">{email}</p>
-                  </div>
-                </div>
-                <Check
-                  className={classNames(
-                    'ml-2 h-4 w-4',
-                    activeStatus(userId) ? 'opacity-100' : 'opacity-0'
-                  )}
-                />
-              </CommandItem>
-            ))
-          )}
-        </CommandGroup>
-      </CommandList>
-    </Command>
+    <UserEditorBase
+      {...props}
+      collaborators={collaborators}
+      isLoading={isLoading}
+      ref={ref}
+      onSearch={setSearch}
+    />
   );
+});
+
+DefaultDataWrapper.displayName = 'UserDefaultDataWrapper';
+
+const ContextDataWrapper = forwardRef<
+  IUserEditorRef,
+  IUserEditorMainProps & {
+    contextData: ICellEditorContext[FieldType.User];
+  }
+>((props, ref) => {
+  const { isLoading, data, onSearch } = props.contextData;
+  return (
+    <UserEditorBase
+      {...props}
+      collaborators={data}
+      isLoading={isLoading}
+      ref={ref}
+      onSearch={onSearch}
+    />
+  );
+});
+
+ContextDataWrapper.displayName = 'UserContextDataWrapper';
+
+const UserEditorMainBase: ForwardRefRenderFunction<IUserEditorRef, IUserEditorMainProps> = (
+  props,
+  ref
+) => {
+  const contextData = props.context?.[FieldType.User];
+
+  if (contextData) {
+    return <ContextDataWrapper {...props} contextData={contextData} ref={ref} />;
+  }
+  return <DefaultDataWrapper {...props} ref={ref} />;
 };
 
 export const UserEditorMain = forwardRef(UserEditorMainBase);

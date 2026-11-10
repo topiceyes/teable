@@ -1,57 +1,98 @@
-import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
-import type {
-  ICreateTableRo,
-  IOtOperation,
-  ISnapshotBase,
-  ITableFullVo,
-  ITableVo,
-} from '@teable/core';
+/* eslint-disable sonarjs/no-duplicate-string */
+import { Injectable, Logger, Optional } from '@nestjs/common';
+import type { IOtOperation, ISnapshotBase } from '@teable/core';
 import {
-  FieldKeyType,
+  DriverClient,
   generateTableId,
   getRandomString,
   getUniqName,
+  HttpErrorCode,
   IdPrefix,
   nullsToUndefined,
 } from '@teable/core';
 import type { Prisma } from '@teable/db-main-prisma';
-import { PrismaService } from '@teable/db-main-prisma';
+import { PrismaService, ProvisionState } from '@teable/db-main-prisma';
+import type { ICreateTableRo, ITableVo } from '@teable/openapi';
+import { tableFullVoSchema } from '@teable/openapi';
 import { Knex } from 'knex';
 import { InjectModel } from 'nest-knexjs';
 import { ClsService } from 'nestjs-cls';
+import { CustomHttpException } from '../../custom.exception';
 import { InjectDbProvider } from '../../db-provider/db.provider';
 import { IDbProvider } from '../../db-provider/db.provider.interface';
+import { DataDbClientManager } from '../../global/data-db-client-manager.service';
+import { DATA_KNEX } from '../../global/knex';
 import type { IReadonlyAdapterService } from '../../share-db/interface';
 import { RawOpType } from '../../share-db/interface';
 import type { IClsStore } from '../../types/cls';
 import { convertNameToValidCharacter } from '../../utils/name-conversion';
-import { Timing } from '../../utils/timing';
 import { BatchService } from '../calculation/batch.service';
-import { FieldService } from '../field/field.service';
-import { RecordService } from '../record/record.service';
-import { ViewService } from '../view/view.service';
+import { SpaceDataDbMigrationGuardService } from '../space/space-data-db-migration-guard.service';
+
+type IDataPrismaExecutor = {
+  $executeRawUnsafe(query: string, ...values: unknown[]): PromiseLike<number>;
+};
+
+type IDataPrismaScopedClient = IDataPrismaExecutor & {
+  txClient?: () => IDataPrismaExecutor;
+};
 
 @Injectable()
 export class TableService implements IReadonlyAdapterService {
-  private logger = new Logger(TableService.name);
+  private readonly logger = new Logger(TableService.name);
 
   constructor(
     private readonly cls: ClsService<IClsStore>,
     private readonly prismaService: PrismaService,
+    private readonly dataDbClientManager: DataDbClientManager,
     private readonly batchService: BatchService,
-    private readonly viewService: ViewService,
-    private readonly fieldService: FieldService,
-    private readonly recordService: RecordService,
     @InjectDbProvider() private readonly dbProvider: IDbProvider,
-    @InjectModel('CUSTOM_KNEX') private readonly knex: Knex
+    @InjectModel(DATA_KNEX) private readonly knex: Knex,
+    @Optional()
+    private readonly spaceDataDbMigrationGuard?: SpaceDataDbMigrationGuardService
   ) {}
+
+  private async assertBaseWritable(baseId: string) {
+    await this.spaceDataDbMigrationGuard?.assertBaseWritable(baseId);
+  }
 
   generateValidName(name: string) {
     return convertNameToValidCharacter(name, 40);
   }
 
-  private async createDBTable(baseId: string, tableRo: ICreateTableRo) {
+  private async lockBaseRow(baseId: string) {
+    if (this.dbProvider.driver !== DriverClient.Pg) return;
+
+    await this.prismaService.txClient()
+      .$executeRaw`select id from base where id = ${baseId} for update`;
+  }
+
+  private async cleanupCreatedDataTable(
+    dataPrisma: IDataPrismaExecutor,
+    dbTableName: string,
+    reason: unknown
+  ) {
+    try {
+      await dataPrisma.$executeRawUnsafe(this.dbProvider.dropTable(dbTableName));
+    } catch (cleanupError) {
+      this.logger.error(
+        `Failed to clean up data table ${dbTableName} after table metadata provisioning error: ${
+          reason instanceof Error ? reason.message : String(reason)
+        }`,
+        cleanupError instanceof Error ? cleanupError.stack : undefined
+      );
+    }
+  }
+
+  private getDataPrismaExecutor(prisma: IDataPrismaScopedClient): IDataPrismaExecutor {
+    return prisma.txClient?.() ?? prisma;
+  }
+
+  private async createDBTable(baseId: string, tableRo: ICreateTableRo, createTable = true) {
     const userId = this.cls.get('user.id');
+    await this.assertBaseWritable(baseId);
+    await this.lockBaseRow(baseId);
+
     const tableRaws = await this.prismaService.txClient().tableMeta.findMany({
       where: { baseId, deletedTime: null },
       select: { name: true, order: true },
@@ -61,7 +102,7 @@ export class TableService implements IReadonlyAdapterService {
     const uniqName = getUniqName(tableRo.name ?? 'New table', names);
     const order =
       tableRaws.reduce((acc, cur) => {
-        return acc > cur.order ? acc : cur.order;
+        return Math.max(acc, cur.order);
       }, 0) + 1;
 
     const validTableName = this.generateValidName(uniqName);
@@ -70,15 +111,38 @@ export class TableService implements IReadonlyAdapterService {
       tableRo.dbTableName || validTableName
     );
 
-    const existTable = await this.prismaService.txClient().tableMeta.findFirst({
-      where: { dbTableName: tableRo.dbTableName },
-      select: { id: true },
-    });
+    if (tableRo.dbTableName) {
+      // The name becomes a raw SQL identifier; enforce the create-route rule
+      // for callers that bypass the HTTP validation pipe (base import).
+      if (!tableFullVoSchema.shape.dbTableName.safeParse(tableRo.dbTableName).success) {
+        throw new CustomHttpException(
+          `Invalid dbTableName: ${tableRo.dbTableName}`,
+          HttpErrorCode.VALIDATION_ERROR
+        );
+      }
+      const existTable = await this.prismaService.txClient().tableMeta.findFirst({
+        where: { dbTableName, baseId },
+        select: { id: true },
+      });
 
-    if (existTable) {
-      if (tableRo.dbTableName) {
-        throw new BadRequestException(`dbTableName ${tableRo.dbTableName} is already used`);
-      } else {
+      if (existTable) {
+        throw new CustomHttpException(
+          `dbTableName ${tableRo.dbTableName} already exists`,
+          HttpErrorCode.VALIDATION_ERROR,
+          {
+            localization: {
+              i18nKey: 'httpErrors.table.dbTableNameAlreadyExists',
+            },
+          }
+        );
+      }
+    } else {
+      const existTable = await this.prismaService.txClient().tableMeta.findFirst({
+        where: { dbTableName },
+        select: { id: true },
+      });
+
+      if (existTable) {
         // add uniqId ensure no conflict
         dbTableName += getRandomString(10);
       }
@@ -98,14 +162,19 @@ export class TableService implements IReadonlyAdapterService {
       order,
       createdBy: userId,
       version: 1,
+      provisionState: createTable ? ProvisionState.pending : ProvisionState.ready,
     };
 
     const tableMeta = await this.prismaService.txClient().tableMeta.create({
       data,
     });
 
+    if (!createTable) {
+      return tableMeta;
+    }
+
     const createTableSchema = this.knex.schema.createTable(dbTableName, (table) => {
-      table.string('__id').unique().notNullable();
+      table.string('__id').unique(`${baseId}_${tableMeta.id}__id_unique`).notNullable();
       table.increments('__auto_number').primary();
       table.dateTime('__created_time').defaultTo(this.knex.fn.now()).notNullable();
       table.dateTime('__last_modified_time');
@@ -114,41 +183,37 @@ export class TableService implements IReadonlyAdapterService {
       table.integer('__version').notNullable();
     });
 
-    for (const sql of createTableSchema.toSQL()) {
-      await this.prismaService.txClient().$executeRawUnsafe(sql.sql);
+    let dataPrisma: IDataPrismaExecutor | undefined;
+    try {
+      const scopedDataPrisma = await this.dataDbClientManager.dataPrismaForBase(baseId, {
+        useTransaction: true,
+      });
+      dataPrisma = this.getDataPrismaExecutor(scopedDataPrisma);
+      for (const sql of createTableSchema.toSQL()) {
+        await dataPrisma.$executeRawUnsafe(sql.sql);
+      }
+      await this.prismaService.txClient().tableMeta.update({
+        where: { id: tableMeta.id },
+        data: {
+          provisionState: ProvisionState.ready,
+          lastModifiedBy: userId,
+        },
+      });
+    } catch (error) {
+      if (dataPrisma) {
+        await this.cleanupCreatedDataTable(dataPrisma, dbTableName, error);
+      }
+      await this.prismaService.txClient().tableMeta.update({
+        where: { id: tableMeta.id },
+        data: {
+          provisionState: ProvisionState.error,
+          lastModifiedBy: userId,
+        },
+      });
+      throw error;
     }
+
     return tableMeta;
-  }
-
-  @Timing()
-  async getTableLastModifiedTime(tableIds: string[]) {
-    if (!tableIds.length) return [];
-
-    const nativeSql = this.knex
-      .select({
-        tableId: 'id',
-        lastModifiedTime: this.knex
-          .select('created_time')
-          .from('ops')
-          .whereRaw('ops.collection = table_meta.id')
-          .orderBy('created_time', 'desc')
-          .limit(1),
-      })
-      .from('table_meta')
-      .whereIn('id', tableIds)
-      .toSQL()
-      .toNative();
-
-    const results = await this.prismaService
-      .txClient()
-      .$queryRawUnsafe<
-        { tableId: string; lastModifiedTime: Date }[]
-      >(nativeSql.sql, ...nativeSql.bindings);
-
-    return tableIds.map((tableId) => {
-      const item = results.find((result) => result.tableId === tableId);
-      return item?.lastModifiedTime?.toISOString();
-    });
   }
 
   async getTableDefaultViewId(tableIds: string[]) {
@@ -161,6 +226,7 @@ export class TableService implements IReadonlyAdapterService {
           .select('id')
           .from('view')
           .whereRaw('view.table_id = table_meta.id')
+          .whereRaw('view.deleted_time is null')
           .orderBy('order')
           .limit(1),
       })
@@ -181,51 +247,37 @@ export class TableService implements IReadonlyAdapterService {
 
   async getTableMeta(baseId: string, tableId: string): Promise<ITableVo> {
     const tableMeta = await this.prismaService.txClient().tableMeta.findFirst({
-      where: { id: tableId, baseId, deletedTime: null },
+      where: { id: tableId, baseId, deletedTime: null, provisionState: ProvisionState.ready },
     });
 
     if (!tableMeta) {
-      throw new NotFoundException();
+      throw new CustomHttpException(
+        `Table not found with id: ${tableId}`,
+        HttpErrorCode.NOT_FOUND,
+        {
+          localization: {
+            i18nKey: 'httpErrors.table.notFound',
+          },
+        }
+      );
     }
 
-    const tableTime = await this.getTableLastModifiedTime([tableId]);
     const tableDefaultViewIds = await this.getTableDefaultViewId([tableId]);
     if (!tableDefaultViewIds[0]) {
-      throw new Error('defaultViewId is not found');
+      throw new CustomHttpException('defaultViewId not found', HttpErrorCode.NOT_FOUND, {
+        localization: {
+          i18nKey: 'httpErrors.view.defaultViewNotFound',
+        },
+      });
     }
 
     return {
       ...tableMeta,
       description: tableMeta.description ?? undefined,
       icon: tableMeta.icon ?? undefined,
-      lastModifiedTime: tableTime[0] || tableMeta.createdTime.toISOString(),
+      lastModifiedTime:
+        tableMeta.lastModifiedTime?.toISOString() || tableMeta.createdTime.toISOString(),
       defaultViewId: tableDefaultViewIds[0],
-    };
-  }
-
-  async getFullTable(
-    baseId: string,
-    tableId: string,
-    viewId?: string,
-    fieldKeyType: FieldKeyType = FieldKeyType.Name
-  ): Promise<ITableFullVo> {
-    const tableMeta = await this.getTableMeta(baseId, tableId);
-    const fields = await this.fieldService.getFieldsByQuery(tableId, { viewId });
-    const views = await this.viewService.getViews(tableId);
-    const { records } = await this.recordService.getRecords(tableId, {
-      viewId,
-      skip: 0,
-      take: 50,
-      fieldKeyType,
-    });
-
-    return {
-      ...tableMeta,
-      description: tableMeta.description ?? undefined,
-      icon: tableMeta.icon ?? undefined,
-      fields,
-      views,
-      records,
     };
   }
 
@@ -236,39 +288,103 @@ export class TableService implements IReadonlyAdapterService {
       orderBy: { order: 'asc' },
     });
     if (!viewRaw) {
-      throw new NotFoundException('Table No found');
+      throw new CustomHttpException(
+        `View not found with tableId: ${tableId}`,
+        HttpErrorCode.NOT_FOUND,
+        {
+          localization: {
+            i18nKey: 'httpErrors.view.notFound',
+          },
+        }
+      );
     }
     return viewRaw;
   }
 
-  async createTable(baseId: string, snapshot: ICreateTableRo): Promise<ITableVo> {
-    const tableVo = await this.createDBTable(baseId, snapshot);
-    await this.batchService.saveRawOps(baseId, RawOpType.Create, IdPrefix.Table, [
+  async createTable(
+    baseId: string,
+    snapshot: ICreateTableRo,
+    createTable: boolean = true
+  ): Promise<ITableVo> {
+    const tableVo = await this.createDBTable(baseId, snapshot, createTable);
+    const { provisionState: _provisionState, ...tableData } = tableVo;
+    this.batchService.saveRawOps(baseId, RawOpType.Create, IdPrefix.Table, [
       {
-        docId: tableVo.id,
+        docId: tableData.id,
         version: 0,
-        data: tableVo,
+        data: tableData,
       },
     ]);
     return nullsToUndefined({
-      ...tableVo,
-      lastModifiedTime: tableVo.lastModifiedTime?.toISOString(),
+      ...tableData,
+      lastModifiedTime: tableData.lastModifiedTime?.toISOString(),
     });
   }
 
-  async deleteTable(baseId: string, tableId: string) {
+  async deleteTable(baseId: string, tableId: string, deletedTime: Date) {
+    await this.assertBaseWritable(baseId);
     const result = await this.prismaService.txClient().tableMeta.findFirst({
       where: { id: tableId, baseId, deletedTime: null },
     });
 
     if (!result) {
-      throw new NotFoundException('Table not found');
+      throw new CustomHttpException(
+        `Table not found with id: ${tableId}`,
+        HttpErrorCode.NOT_FOUND,
+        {
+          localization: {
+            i18nKey: 'httpErrors.table.notFound',
+          },
+        }
+      );
     }
 
     const { version } = result;
-    await this.del(version + 1, baseId, tableId);
+    const userId = this.cls.get('user.id');
 
-    await this.batchService.saveRawOps(baseId, RawOpType.Del, IdPrefix.Table, [
+    await this.prismaService.txClient().tableMeta.update({
+      where: { id: tableId, baseId },
+      data: {
+        version: version + 1,
+        deletedTime,
+        lastModifiedBy: userId,
+        provisionState: ProvisionState.deleting,
+      },
+    });
+
+    this.batchService.saveRawOps(baseId, RawOpType.Del, IdPrefix.Table, [
+      { docId: tableId, version },
+    ]);
+  }
+
+  async restoreTable(baseId: string, tableId: string) {
+    await this.assertBaseWritable(baseId);
+    const result = await this.prismaService.txClient().tableMeta.findFirst({
+      where: { id: tableId, baseId, deletedTime: { not: null } },
+    });
+
+    if (!result) {
+      throw new CustomHttpException(`Table ${tableId} not found`, HttpErrorCode.NOT_FOUND, {
+        localization: {
+          i18nKey: 'httpErrors.table.notFound',
+        },
+      });
+    }
+
+    const { version } = result;
+    const userId = this.cls.get('user.id');
+
+    await this.prismaService.txClient().tableMeta.update({
+      where: { id: tableId, baseId },
+      data: {
+        version: version + 1,
+        deletedTime: null,
+        lastModifiedBy: userId,
+        provisionState: ProvisionState.ready,
+      },
+    });
+
+    this.batchService.saveRawOps(baseId, RawOpType.Create, IdPrefix.Table, [
       { docId: tableId, version },
     ]);
   }
@@ -289,6 +405,7 @@ export class TableService implements IReadonlyAdapterService {
       | 'views'
     >
   ) {
+    await this.assertBaseWritable(baseId);
     const select = Object.keys(input).reduce<{ [key: string]: boolean }>((acc, key) => {
       acc[key] = true;
       return acc;
@@ -306,14 +423,22 @@ export class TableService implements IReadonlyAdapterService {
         },
       })
       .catch(() => {
-        throw new NotFoundException('Table not found');
+        throw new CustomHttpException(
+          `Table not found with id: ${tableId}`,
+          HttpErrorCode.NOT_FOUND,
+          {
+            localization: {
+              i18nKey: 'httpErrors.table.notFound',
+            },
+          }
+        );
       });
 
     const updateInput: Prisma.TableMetaUpdateInput = {
       ...input,
       version: tableRaw.version + 1,
       lastModifiedBy: this.cls.get('user.id'),
-      lastModifiedTime: new Date(),
+      lastModifiedTime: new Date().toISOString(),
     };
 
     const ops = Object.entries(updateInput)
@@ -331,7 +456,7 @@ export class TableService implements IReadonlyAdapterService {
       data: updateInput,
     });
 
-    await this.batchService.saveRawOps(baseId, RawOpType.Edit, IdPrefix.Table, [
+    this.batchService.saveRawOps(baseId, RawOpType.Edit, IdPrefix.Table, [
       {
         docId: tableId,
         version: tableRaw.version,
@@ -346,25 +471,24 @@ export class TableService implements IReadonlyAdapterService {
     await this.createDBTable(baseId, snapshot);
   }
 
-  async del(version: number, baseId: string, tableId: string) {
-    const userId = this.cls.get('user.id');
-    await this.prismaService.txClient().tableMeta.update({
-      where: { id: tableId, baseId },
-      data: { version, deletedTime: new Date(), lastModifiedBy: userId },
-    });
-  }
-
-  async getSnapshotBulk(baseId: string, ids: string[]): Promise<ISnapshotBase<ITableVo>[]> {
+  async getSnapshotBulk(
+    baseId: string,
+    ids: string[],
+    ops: {
+      ignoreDefaultViewId?: boolean;
+    } = {}
+  ): Promise<ISnapshotBase<ITableVo>[]> {
+    const { ignoreDefaultViewId } = ops;
     const tables = await this.prismaService.txClient().tableMeta.findMany({
-      where: { baseId, id: { in: ids }, deletedTime: null },
+      where: { baseId, id: { in: ids }, deletedTime: null, provisionState: ProvisionState.ready },
       orderBy: { order: 'asc' },
     });
-    const tableTime = await this.getTableLastModifiedTime(ids);
-    const tableDefaultViewIds = await this.getTableDefaultViewId(ids);
+
+    const tableDefaultViewIds = ignoreDefaultViewId ? [] : await this.getTableDefaultViewId(ids);
     return tables
       .sort((a, b) => ids.indexOf(a.id) - ids.indexOf(b.id))
       .map((table, i) => {
-        return {
+        const res = {
           id: table.id,
           v: table.version,
           type: 'json0',
@@ -372,16 +496,30 @@ export class TableService implements IReadonlyAdapterService {
             ...table,
             description: table.description ?? undefined,
             icon: table.icon ?? undefined,
-            lastModifiedTime: tableTime[i] || table.createdTime.toISOString(),
-            defaultViewId: tableDefaultViewIds[i],
-          },
+            lastModifiedTime:
+              table.lastModifiedTime?.toISOString() || table.createdTime.toISOString(),
+          } as ITableVo,
         };
+        if (!ignoreDefaultViewId) {
+          res.data.defaultViewId = tableDefaultViewIds[i];
+        }
+        return res;
       });
   }
 
-  async getDocIdsByQuery(baseId: string, _query: unknown) {
+  async getDocIdsByQuery(baseId: string, query: { projectionTableIds?: string[] } = {}) {
+    const { projectionTableIds } = query;
     const tables = await this.prismaService.txClient().tableMeta.findMany({
-      where: { deletedTime: null, baseId },
+      where: {
+        deletedTime: null,
+        baseId,
+        provisionState: ProvisionState.ready,
+        ...(projectionTableIds
+          ? {
+              id: { in: projectionTableIds },
+            }
+          : {}),
+      },
       select: { id: true },
       orderBy: { order: 'asc' },
     });

@@ -14,7 +14,7 @@ export class TypedValueConverter {
       console.log(func);
       throw new TypeError(`function ${func.name} is not accept array value: ${value}`);
     }
-    const transValue = value && value[0];
+    const transValue = value?.[0];
     return new TypedValue(transValue, type);
   }
 
@@ -27,6 +27,9 @@ export class TypedValueConverter {
     }
 
     const firstAcceptValueType = func.acceptValueType.values().next().value;
+    if (!firstAcceptValueType) {
+      throw new TypeError(`function ${func.name} has no acceptable value types`);
+    }
 
     const converted = typedValue.isMultiple
       ? (typedValue.value as unknown[])?.map((v) =>

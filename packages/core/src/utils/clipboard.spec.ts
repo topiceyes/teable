@@ -74,6 +74,24 @@ describe('clipboard', () => {
       const data = parseClipboardText('text1\n\n"text2"');
       expect(data).toEqual([['text1'], [''], ['"text2"']]);
     });
+
+    it('content has windows newline', () => {
+      const data = parseClipboardText('text1"\r\ntext2');
+      expect(data).toEqual([['text1"'], ['text2']]);
+    });
+
+    it('content end with newline', () => {
+      const data = parseClipboardText('text1\n');
+      expect(data).toEqual([['text1']]);
+
+      const data2 = parseClipboardText('tex"t1\n');
+      expect(data2).toEqual([['tex"t1']]);
+    });
+
+    it('preserves a leading newline as an empty first row', () => {
+      expect(parseClipboardText('\ntext1')).toEqual([[''], ['text1']]);
+      expect(parseClipboardText('\ntex"t1')).toEqual([[''], ['tex"t1']]);
+    });
   });
 
   describe('stringify', () => {

@@ -1,0 +1,20 @@
+{
+  "auth": {
+    "title": "Ingresa tu contraseña para ver esta página",
+    "submit": "Enviar",
+    "password": "Contraseña",
+    "passwordTooShort": "La contraseña debe tener al menos 3 caracteres"
+  },
+  "form": {
+    "requireLoginTip": "Este formulario requiere que inicies sesión antes de enviarlo",
+    "login": "Iniciar sesión"
+  },
+  "toolbar": {
+    "filterLinkSelectPlaceholder": "Seleccionar..."
+  },
+  "view": {
+    "signInToEdit": "<a>Inicia sesión</a> para editar"
+  },
+  "openOnNewPage": "Abrir en nueva página",
+  "errorTips": "La fuente compartida tiene habilitada una Matriz de Autoridad, no se permite la visualización"
+}

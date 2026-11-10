@@ -1,6 +1,6 @@
-import { SUPPORTEDTYPE } from '@teable/core';
 import { File, FileCsv, FileExcel } from '@teable/icons';
-import { useConnection, useTablePermission } from '@teable/sdk';
+import { SUPPORTEDTYPE } from '@teable/openapi';
+import { useBasePermission, useConnection } from '@teable/sdk';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -13,8 +13,7 @@ import AddBoldIcon from '@teable/ui-lib/icons/app/add-bold.svg';
 import { Button } from '@teable/ui-lib/shadcn/ui/button';
 import { useTranslation } from 'next-i18next';
 import { useState } from 'react';
-import { GUIDE_CREATE_TABLE } from '@/components/Guide';
-import { TableImport } from '../import-table';
+import { TableImport } from '@overridable/TableImport';
 import { DraggableList } from './DraggableList';
 import { NoDraggableList } from './NoDraggableList';
 import { useAddTable } from './useAddTable';
@@ -22,7 +21,7 @@ import { useAddTable } from './useAddTable';
 export const TableList: React.FC = () => {
   const { connected } = useConnection();
   const addTable = useAddTable();
-  const permission = useTablePermission();
+  const permission = useBasePermission();
   const { t } = useTranslation(['table']);
   const [dialogVisible, setDialogVisible] = useState(false);
   const [fileType, setFileType] = useState<SUPPORTEDTYPE>(SUPPORTEDTYPE.CSV);
@@ -36,15 +35,20 @@ export const TableList: React.FC = () => {
       <DropdownMenu modal={false}>
         <DropdownMenuTrigger asChild>
           <div className="px-3">
-            {permission['table|create'] && (
-              <Button variant={'outline'} size={'xs'} className={`${GUIDE_CREATE_TABLE} w-full`}>
-                <AddBoldIcon />
+            {permission?.['table|create'] && (
+              <Button variant={'outline'} size={'icon-xs'} className="w-full">
+                <AddBoldIcon className="size-4 shrink-0" />
               </Button>
             )}
           </div>
         </DropdownMenuTrigger>
         <DropdownMenuContent className="w-64">
-          <DropdownMenuItem onClick={addTable} className="cursor-pointer">
+          <DropdownMenuItem
+            onClick={() => {
+              addTable();
+            }}
+            className="cursor-pointer"
+          >
             <Button variant="ghost" size="xs" className="h-4">
               <File className="size-4" />
               {t('table.operator.createBlank')}
@@ -80,11 +84,11 @@ export const TableList: React.FC = () => {
           fileType={fileType}
           open={dialogVisible}
           onOpenChange={(open) => setDialogVisible(open)}
-        ></TableImport>
+        />
       )}
 
       <div className="overflow-y-auto px-3">
-        {connected && permission['table|update'] ? <DraggableList /> : <NoDraggableList />}
+        {connected && permission?.['table|update'] ? <DraggableList /> : <NoDraggableList />}
       </div>
     </div>
   );

@@ -1,0 +1,2156 @@
+import { readFileSync } from 'node:fs';
+import { err, ok } from 'neverthrow';
+import type { Result } from 'neverthrow';
+import { describe, expect, it, vi } from 'vitest';
+
+import { RecordBulkUpdateService } from '../application/services/RecordBulkUpdateService';
+import type { IRecordChangedValueDecoratorService } from '../application/services/RecordChangedValueDecoratorService';
+import type { RecordMutationSpecResolverService } from '../application/services/RecordMutationSpecResolverService';
+import { RecordReorderService } from '../application/services/RecordReorderService';
+import { RecordWriteSideEffectService } from '../application/services/RecordWriteSideEffectService';
+import type { RecordWriteUndoRedoPlanService } from '../application/services/RecordWriteUndoRedoPlanService';
+import { TableQueryService } from '../application/services/TableQueryService';
+import { TableUpdateFlow } from '../application/services/TableUpdateFlow';
+import type { UndoRedoStackService } from '../application/services/UndoRedoStackService';
+import { BaseId } from '../domain/base/BaseId';
+import { ActorId } from '../domain/shared/ActorId';
+import { domainError, type DomainError } from '../domain/shared/DomainError';
+import type { IDomainEvent } from '../domain/shared/DomainEvent';
+import { flattenAndSpecs } from '../domain/shared/specification/composeAndSpecs';
+import type { ISpecification } from '../domain/shared/specification/ISpecification';
+import { RecordReordered } from '../domain/table/events/RecordReordered';
+import { isRecordsBatchUpdatedEvent } from '../domain/table/events/RecordsBatchUpdated';
+import { FieldId } from '../domain/table/fields/FieldId';
+import { FieldName } from '../domain/table/fields/FieldName';
+import { SelectOption } from '../domain/table/fields/types/SelectOption';
+import type { SingleSelectField } from '../domain/table/fields/types/SingleSelectField';
+import { RecordId } from '../domain/table/records/RecordId';
+import type { ITableRecordConditionSpecVisitor } from '../domain/table/records/specs/ITableRecordConditionSpecVisitor';
+import { RecordByIdsSpec } from '../domain/table/records/specs/RecordByIdsSpec';
+import type { ICellValueSpec } from '../domain/table/records/specs/values/ICellValueSpecVisitor';
+import {
+  SetAttachmentValueSpec,
+  type AttachmentItem,
+} from '../domain/table/records/specs/values/SetAttachmentValueSpec';
+import type { TableRecord } from '../domain/table/records/TableRecord';
+import { CellValue } from '../domain/table/records/values/CellValue';
+import type { ITableSpecVisitor } from '../domain/table/specs/ITableSpecVisitor';
+import { Table } from '../domain/table/Table';
+import { TableId } from '../domain/table/TableId';
+import { TableName } from '../domain/table/TableName';
+import type { TableSortKey } from '../domain/table/TableSortKey';
+import { NoopLogger } from '../ports/defaults/NoopLogger';
+import type { IEventBus } from '../ports/EventBus';
+import type { IExecutionContext, IUnitOfWorkTransaction } from '../ports/ExecutionContext';
+import { EventBusDomainWriteTransaction } from '../ports/memory/EventBusDomainWriteTransaction';
+import type { IRecordOrderCalculator } from '../ports/RecordOrderCalculator';
+import { RecordWriteOperationKind } from '../ports/RecordWritePlugin';
+import type { IFindOptions } from '../ports/RepositoryQuery';
+import type {
+  ITableRecordQueryOptions,
+  ITableRecordQueryRepository,
+} from '../ports/TableRecordQueryRepository';
+import type {
+  ITableRecordRepository,
+  RecordMutationResult,
+  BatchRecordMutationResult,
+  UpdateManyStreamBatchInput,
+  UpdateManyResult,
+  UpdateManyStreamResult,
+} from '../ports/TableRecordRepository';
+import type { ITableRepository } from '../ports/TableRepository';
+import {
+  createTableSchemaCoordinationLease,
+  type ITableSchemaCoordination,
+  type TableSchemaCoordinationMode,
+} from '../ports/TableSchemaCoordination';
+import type { ITableSchemaRepository } from '../ports/TableSchemaRepository';
+import type { ISpan, ITracer, SpanAttributes } from '../ports/Tracer';
+import type { IUnitOfWork, UnitOfWorkOperation } from '../ports/UnitOfWork';
+import {
+  createRecordWritePluginRunner,
+  createTrackedRecordWritePlugin,
+  expectRecordWritePluginToBeSkipped,
+} from './recordWritePluginRunnerTestUtils';
+import { UpdateRecordsApplicationService } from './UpdateRecordsApplicationService';
+import { UpdateRecordsCommand } from './UpdateRecordsCommand';
+import { UpdateRecordsHandler } from './UpdateRecordsHandler';
+
+const createContext = (config?: IExecutionContext['config']): IExecutionContext => {
+  const actorId = ActorId.create('system')._unsafeUnwrap();
+  return { actorId, windowId: 'test-window', config };
+};
+
+class FakeSpan implements ISpan {
+  ended = false;
+  readonly errors: string[] = [];
+
+  constructor(
+    readonly name: string,
+    readonly attributes: Record<string, string | number | boolean> = {}
+  ) {}
+
+  setAttribute(key: string, value: string | number | boolean): void {
+    this.attributes[key] = value;
+  }
+
+  setAttributes(attributes: SpanAttributes): void {
+    Object.assign(this.attributes, attributes);
+  }
+
+  recordError(message: string): void {
+    this.errors.push(message);
+  }
+
+  end(): void {
+    this.ended = true;
+  }
+}
+
+class FakeTracer implements ITracer {
+  readonly spans: FakeSpan[] = [];
+  private readonly activeSpans: FakeSpan[] = [];
+
+  startSpan(name: string, attributes?: SpanAttributes): ISpan {
+    const span = new FakeSpan(name, attributes ? { ...attributes } : {});
+    this.spans.push(span);
+    return span;
+  }
+
+  async withSpan<T>(span: ISpan, callback: () => Promise<T>): Promise<T> {
+    this.activeSpans.push(span as FakeSpan);
+    try {
+      return await callback();
+    } finally {
+      this.activeSpans.pop();
+    }
+  }
+
+  getActiveSpan(): ISpan | undefined {
+    return this.activeSpans[this.activeSpans.length - 1];
+  }
+}
+
+const createTableUpdateFlow = (
+  tableRepository: FakeTableRepository,
+  eventBus: FakeEventBus,
+  unitOfWork: FakeUnitOfWork
+) => new TableUpdateFlow(tableRepository, new FakeTableSchemaRepository(), eventBus, unitOfWork);
+
+const noopRecordWriteUndoRedoPlanService = {
+  captureSelectOptionSideEffects: async () => ok({ undoCommands: [], redoCommands: [] }),
+} as unknown as RecordWriteUndoRedoPlanService;
+
+const noopRecordChangedValueDecoratorService = {
+  decorateChangedFields: async (_table: Table, changedFields?: ReadonlyMap<string, unknown>) =>
+    ok(changedFields),
+  decorateChangedFieldsByRecord: async (
+    _table: Table,
+    changedFieldsByRecord?: ReadonlyMap<string, ReadonlyMap<string, unknown>>
+  ) => ok(changedFieldsByRecord),
+} as unknown as IRecordChangedValueDecoratorService;
+
+const buildTable = () => {
+  const baseId = BaseId.create(`bse${'u'.repeat(16)}`)._unsafeUnwrap();
+  const tableId = TableId.create(`tbl${'v'.repeat(16)}`)._unsafeUnwrap();
+  const tableName = TableName.create('Bulk Update Records')._unsafeUnwrap();
+  const textFieldId = FieldId.create(`fld${'t'.repeat(16)}`)._unsafeUnwrap();
+  const numberFieldId = FieldId.create(`fld${'n'.repeat(16)}`)._unsafeUnwrap();
+  const singleSelectFieldId = FieldId.create(`fld${'s'.repeat(16)}`)._unsafeUnwrap();
+  const attachmentFieldId = FieldId.create(`fld${'a'.repeat(16)}`)._unsafeUnwrap();
+
+  const builder = Table.builder().withId(tableId).withBaseId(baseId).withName(tableName);
+  builder
+    .field()
+    .singleLineText()
+    .withId(textFieldId)
+    .withName(FieldName.create('Title')._unsafeUnwrap())
+    .primary()
+    .done();
+  builder
+    .field()
+    .number()
+    .withId(numberFieldId)
+    .withName(FieldName.create('Amount')._unsafeUnwrap())
+    .done();
+  builder
+    .field()
+    .singleSelect()
+    .withId(singleSelectFieldId)
+    .withName(FieldName.create('Status')._unsafeUnwrap())
+    .withOptions([])
+    .done();
+  builder
+    .field()
+    .attachment()
+    .withId(attachmentFieldId)
+    .withName(FieldName.create('Attachments')._unsafeUnwrap())
+    .done();
+  builder.view().defaultGrid().done();
+
+  return {
+    table: builder.build()._unsafeUnwrap(),
+    tableId,
+    textFieldId,
+    numberFieldId,
+    singleSelectFieldId,
+    attachmentFieldId,
+  };
+};
+
+class FakeTableRepository implements ITableRepository {
+  tables: Table[] = [];
+  updated: Table[] = [];
+
+  async insert(_: IExecutionContext, table: Table): Promise<Result<Table, DomainError>> {
+    this.tables.push(table);
+    return ok(table);
+  }
+
+  async insertMany(
+    _: IExecutionContext,
+    tables: ReadonlyArray<Table>
+  ): Promise<Result<ReadonlyArray<Table>, DomainError>> {
+    this.tables.push(...tables);
+    return ok([...tables]);
+  }
+
+  async duplicatePhysicalRows(
+    _context: IExecutionContext,
+    _plan: unknown
+  ): Promise<Result<{ rowCount: number; recordIds: string[] }, DomainError>> {
+    return ok({ rowCount: 0, recordIds: [] });
+  }
+
+  findOneCalls = 0;
+
+  async findOne(
+    _: IExecutionContext,
+    spec: ISpecification<Table, ITableSpecVisitor>
+  ): Promise<Result<Table, DomainError>> {
+    this.findOneCalls += 1;
+    const match = this.tables.find((table) => spec.isSatisfiedBy(table));
+    if (!match) return err(domainError.notFound({ message: 'Table not found' }));
+    return ok(match);
+  }
+
+  async find(
+    _: IExecutionContext,
+    spec: ISpecification<Table, ITableSpecVisitor>,
+    __?: IFindOptions<TableSortKey>
+  ): Promise<Result<ReadonlyArray<Table>, DomainError>> {
+    return ok(this.tables.filter((table) => spec.isSatisfiedBy(table)));
+  }
+
+  async updateOne(
+    _: IExecutionContext,
+    table: Table,
+    ___: ISpecification<Table, ITableSpecVisitor>
+  ): Promise<Result<void, DomainError>> {
+    this.updated.push(table);
+    return ok(undefined);
+  }
+
+  async restore(_: IExecutionContext, __: Table): Promise<Result<void, DomainError>> {
+    return ok(undefined);
+  }
+
+  async delete(_: IExecutionContext, __: Table): Promise<Result<void, DomainError>> {
+    return ok(undefined);
+  }
+}
+
+class FakeTableSchemaRepository implements ITableSchemaRepository {
+  async insert(_context: IExecutionContext, _table: Table): Promise<Result<void, DomainError>> {
+    return ok(undefined);
+  }
+
+  async insertMany(
+    _context: IExecutionContext,
+    _tables: ReadonlyArray<Table>
+  ): Promise<Result<void, DomainError>> {
+    return ok(undefined);
+  }
+
+  async update(
+    _context: IExecutionContext,
+    table: Table,
+    _mutateSpec: ISpecification<Table, ITableSpecVisitor>
+  ): Promise<Result<Table, DomainError>> {
+    return ok(table);
+  }
+
+  async delete(_context: IExecutionContext, _table: Table): Promise<Result<void, DomainError>> {
+    return ok(undefined);
+  }
+}
+
+class FakeTableRecordRepository implements ITableRecordRepository {
+  updateManyCalls = 0;
+  updateManyStreamCalls = 0;
+  lastSpec: ISpecification<TableRecord, ITableRecordConditionSpecVisitor> | undefined;
+  lastMutateSpec: ICellValueSpec | undefined;
+  lastUpdateManyStreamBatches: UpdateManyStreamBatchInput[] = [];
+  updateManyStreamVersions = new Map<string, number>();
+  updateManyStreamOldVersions = new Map<string, number>();
+  updateManyStreamOldFieldValues = new Map<string, Readonly<Record<string, unknown>>>();
+  omitUpdateManyStreamOldFieldValues = false;
+  updateManyStreamUpdatedRecordIds: Set<string> | undefined;
+  updateManyResult: UpdateManyResult = {
+    totalUpdated: 0,
+    updatedRecordIds: [],
+    updatedRecords: [],
+  };
+
+  async insert(
+    _: IExecutionContext,
+    __: Table,
+    ___: TableRecord
+  ): Promise<Result<RecordMutationResult, DomainError>> {
+    return ok({});
+  }
+
+  async insertMany(
+    _: IExecutionContext,
+    __: Table,
+    ___: ReadonlyArray<TableRecord>
+  ): Promise<Result<BatchRecordMutationResult, DomainError>> {
+    return ok({});
+  }
+
+  async insertManyStream(
+    _: IExecutionContext,
+    __: Table,
+    ___: Iterable<ReadonlyArray<TableRecord>>
+  ): Promise<Result<{ totalInserted: number }, DomainError>> {
+    return ok({ totalInserted: 0 });
+  }
+
+  async updateOne(): Promise<Result<RecordMutationResult, DomainError>> {
+    return ok({});
+  }
+
+  async updateMany(
+    _: IExecutionContext,
+    __: Table,
+    spec: ISpecification<TableRecord, ITableRecordConditionSpecVisitor>,
+    mutateSpec: ICellValueSpec
+  ): Promise<Result<UpdateManyResult, DomainError>> {
+    this.updateManyCalls += 1;
+    this.lastSpec = spec;
+    this.lastMutateSpec = mutateSpec;
+    return ok(this.updateManyResult);
+  }
+
+  async updateManyStream(
+    _: IExecutionContext,
+    __: Table,
+    batches:
+      | Iterable<Result<UpdateManyStreamBatchInput, DomainError>>
+      | AsyncIterable<Result<UpdateManyStreamBatchInput, DomainError>>
+  ): Promise<Result<UpdateManyStreamResult, DomainError>> {
+    this.updateManyStreamCalls += 1;
+    this.lastUpdateManyStreamBatches = [];
+    let totalUpdated = 0;
+    const updatedRecords: Array<NonNullable<UpdateManyStreamResult['updatedRecords']>[number]> = [];
+
+    if (Symbol.asyncIterator in batches) {
+      for await (const batch of batches as AsyncIterable<
+        Result<UpdateManyStreamBatchInput, DomainError>
+      >) {
+        if (batch.isErr()) {
+          return err(batch.error);
+        }
+        this.lastUpdateManyStreamBatches.push(batch.value);
+        const updates = Array.isArray(batch.value)
+          ? batch.value
+          : 'updates' in batch.value
+            ? batch.value.updates
+            : [];
+        totalUpdated += updates.length;
+        for (const update of updates) {
+          const recordId = update.record.id();
+          if (
+            this.updateManyStreamUpdatedRecordIds &&
+            !this.updateManyStreamUpdatedRecordIds.has(recordId.toString())
+          ) {
+            totalUpdated -= 1;
+            continue;
+          }
+          updatedRecords.push(this.createStreamSnapshot(update));
+        }
+      }
+    } else {
+      for (const batch of batches as Iterable<Result<UpdateManyStreamBatchInput, DomainError>>) {
+        if (batch.isErr()) {
+          return err(batch.error);
+        }
+        this.lastUpdateManyStreamBatches.push(batch.value);
+        const updates = Array.isArray(batch.value)
+          ? batch.value
+          : 'updates' in batch.value
+            ? batch.value.updates
+            : [];
+        totalUpdated += updates.length;
+        for (const update of updates) {
+          const recordId = update.record.id();
+          if (
+            this.updateManyStreamUpdatedRecordIds &&
+            !this.updateManyStreamUpdatedRecordIds.has(recordId.toString())
+          ) {
+            totalUpdated -= 1;
+            continue;
+          }
+          updatedRecords.push(this.createStreamSnapshot(update));
+        }
+      }
+    }
+
+    return ok({ totalUpdated, updatedRecords });
+  }
+
+  private createStreamSnapshot(update: RecordUpdateResult) {
+    const recordId = update.record.id();
+    const id = recordId.toString();
+    return {
+      recordId,
+      oldVersion: this.updateManyStreamOldVersions.get(id) ?? 0,
+      newVersion: this.updateManyStreamVersions.get(id) ?? 1,
+      oldFieldValues: this.omitUpdateManyStreamOldFieldValues
+        ? {}
+        : {
+            ...Object.fromEntries(
+              update.record
+                .fields()
+                .entries()
+                .map(({ fieldId }) => [fieldId.toString(), null])
+            ),
+            ...this.updateManyStreamOldFieldValues.get(id),
+          },
+    };
+  }
+
+  async deleteMany(
+    _: IExecutionContext,
+    __: Table,
+    ___: ISpecification<TableRecord, ITableRecordConditionSpecVisitor>
+  ) {
+    return ok({});
+  }
+
+  async deleteManyStream(): Promise<Result<{ totalDeleted: number }, DomainError>> {
+    return ok({ totalDeleted: 0 });
+  }
+}
+
+class FakeRecordMutationSpecResolverService {
+  constructor(private readonly resolvedSpecs?: ReadonlyArray<ICellValueSpec | null>) {}
+
+  needsResolution(_: ICellValueSpec): Result<boolean, DomainError> {
+    return ok(false);
+  }
+
+  async resolveAndReplace(
+    _: IExecutionContext,
+    _tableId: TableId,
+    spec: ICellValueSpec
+  ): Promise<Result<ICellValueSpec, DomainError>> {
+    return ok(spec);
+  }
+
+  async resolveAndReplaceMany(
+    _: IExecutionContext,
+    _tableId: TableId,
+    specs: ReadonlyArray<ICellValueSpec | null>
+  ): Promise<Result<ReadonlyArray<ICellValueSpec | null>, DomainError>> {
+    return ok(this.resolvedSpecs ?? specs);
+  }
+}
+
+type FakeQueryRecord = {
+  id: string;
+  fields: Record<string, unknown>;
+  version: number;
+  autoNumber?: number;
+  orders?: Record<string, number>;
+};
+
+class FakeTableRecordQueryRepository implements ITableRecordQueryRepository {
+  records: FakeQueryRecord[] = [];
+  lastFindOptions?: ITableRecordQueryOptions;
+
+  async find(
+    _context: IExecutionContext,
+    _table: Table,
+    _spec?: ISpecification<TableRecord, ITableRecordConditionSpecVisitor>,
+    options?: ITableRecordQueryOptions
+  ): Promise<Result<{ records: FakeQueryRecord[]; total: number }, DomainError>> {
+    this.lastFindOptions = options;
+    return ok({
+      records: [...this.records],
+      total: this.records.length,
+    });
+  }
+
+  async findOne(): Promise<Result<FakeQueryRecord, DomainError>> {
+    const record = this.records[0];
+    if (!record) {
+      return err(domainError.notFound({ message: 'Record not found' }));
+    }
+    return ok(record);
+  }
+
+  async *findStream(): AsyncIterable<Result<FakeQueryRecord, DomainError>> {
+    for (const record of this.records) {
+      yield ok(record);
+    }
+  }
+}
+
+class FakeRecordOrderCalculator implements IRecordOrderCalculator {
+  orderValues: number[] = [];
+
+  async calculateOrders(): Promise<Result<ReadonlyArray<number>, DomainError>> {
+    return ok(this.orderValues);
+  }
+}
+
+class FakeEventBus implements IEventBus {
+  published: IDomainEvent[] = [];
+  calls?: string[];
+
+  async publish(_: IExecutionContext, event: IDomainEvent) {
+    this.calls?.push('publish');
+    this.published.push(event);
+    return ok(undefined);
+  }
+
+  async publishMany(_: IExecutionContext, events: ReadonlyArray<IDomainEvent>) {
+    this.calls?.push('publishMany');
+    this.published.push(...events);
+    return ok(undefined);
+  }
+}
+
+class FakeUnitOfWork implements IUnitOfWork {
+  transactions: IExecutionContext[] = [];
+
+  async withTransaction<T>(
+    context: IExecutionContext,
+    work: UnitOfWorkOperation<T>
+  ): Promise<Result<T, DomainError>> {
+    const transaction: IUnitOfWorkTransaction = { kind: 'unitOfWorkTransaction' };
+    const transactionContext = { ...context, transaction };
+    this.transactions.push(transactionContext);
+    return work(transactionContext);
+  }
+}
+
+class FakeUndoRedoService {
+  entries: unknown[] = [];
+  calls?: string[];
+
+  async recordEntry(_context: IExecutionContext, _tableId: TableId, entry: unknown) {
+    this.calls?.push('undoRedo.append');
+    this.entries.push(entry);
+    return ok(undefined);
+  }
+
+  async appendEntry(_context: IExecutionContext, _tableId: TableId, entry: unknown) {
+    this.calls?.push('undoRedo.append');
+    this.entries.push(entry);
+    return ok(undefined);
+  }
+}
+class RecordingTableSchemaCoordination implements ITableSchemaCoordination {
+  readonly calls: Array<{ tableIds: ReadonlyArray<string>; mode: TableSchemaCoordinationMode }> =
+    [];
+  readonly events: string[] = [];
+  releaseCount = 0;
+  failMode?: TableSchemaCoordinationMode;
+  onAcquire?: (mode: TableSchemaCoordinationMode) => void;
+
+  constructor(private readonly failure?: DomainError) {}
+
+  async acquire(
+    _context: IExecutionContext,
+    tableIds: ReadonlyArray<string>,
+    mode: TableSchemaCoordinationMode
+  ) {
+    this.calls.push({ tableIds, mode });
+    this.events.push(`acquire:${mode}`);
+    if (this.failure && (this.failMode === undefined || this.failMode === mode)) {
+      return err(this.failure);
+    }
+    this.onAcquire?.(mode);
+    return ok(
+      createTableSchemaCoordinationLease(mode, tableIds, async () => {
+        this.releaseCount += 1;
+        this.events.push(`release:${mode}`);
+      })
+    );
+  }
+}
+
+const createHandler = (
+  tableRepository: FakeTableRepository,
+  recordRepository: FakeTableRecordRepository,
+  eventBus: FakeEventBus,
+  unitOfWork: FakeUnitOfWork,
+  undoRedoService: FakeUndoRedoService,
+  options?: {
+    queryRepository?: FakeTableRecordQueryRepository;
+    orderCalculator?: FakeRecordOrderCalculator;
+    plugins?: Parameters<typeof createRecordWritePluginRunner>[0];
+    recordMutationSpecResolver?: FakeRecordMutationSpecResolverService;
+    recordChangedValueDecoratorService?: IRecordChangedValueDecoratorService;
+    tableSchemaCoordination?: ITableSchemaCoordination;
+  }
+) => {
+  for (const record of options?.queryRepository?.records ?? []) {
+    if (!recordRepository.updateManyStreamOldFieldValues.has(record.id)) {
+      recordRepository.updateManyStreamOldFieldValues.set(record.id, record.fields);
+    }
+  }
+  const orderCalculator = options?.orderCalculator ?? new FakeRecordOrderCalculator();
+  const recordReorderService = new RecordReorderService(recordRepository, orderCalculator);
+  const recordBulkUpdateService = new RecordBulkUpdateService(
+    recordRepository,
+    options?.queryRepository ?? new FakeTableRecordQueryRepository(),
+    (options?.recordMutationSpecResolver ??
+      new FakeRecordMutationSpecResolverService()) as unknown as RecordMutationSpecResolverService,
+    recordReorderService,
+    createRecordWritePluginRunner(options?.plugins),
+    new RecordWriteSideEffectService(),
+    noopRecordWriteUndoRedoPlanService,
+    options?.recordChangedValueDecoratorService ?? noopRecordChangedValueDecoratorService,
+    createTableUpdateFlow(tableRepository, eventBus, unitOfWork),
+    new EventBusDomainWriteTransaction(unitOfWork, eventBus),
+    undoRedoService as unknown as UndoRedoStackService,
+    new NoopLogger()
+  );
+
+  return new UpdateRecordsHandler(
+    new UpdateRecordsApplicationService(
+      new TableQueryService(tableRepository),
+      recordBulkUpdateService,
+      options?.tableSchemaCoordination
+    )
+  );
+};
+
+it('keeps the handler limited to application forwarding', () => {
+  const source = readFileSync(new URL('./UpdateRecordsHandler.ts', import.meta.url), 'utf8');
+  expect(source).not.toMatch(/order|typecast|FieldKeyResolver|select.option|acquire|release/i);
+  expect(source).toContain('return this.applicationService.execute(context, command)');
+});
+
+describe('UpdateRecordsHandler', () => {
+  it('updates matched records and publishes batch event', async () => {
+    const { table, tableId, textFieldId, numberFieldId } = buildTable();
+    const recordIdA = `rec${'a'.repeat(16)}`;
+    const recordIdB = `rec${'b'.repeat(16)}`;
+
+    const tableRepository = new FakeTableRepository();
+    tableRepository.tables.push(table);
+
+    const recordRepository = new FakeTableRecordRepository();
+    recordRepository.updateManyResult = {
+      totalUpdated: 2,
+      updatedRecordIds: [
+        RecordId.create(recordIdA)._unsafeUnwrap(),
+        RecordId.create(recordIdB)._unsafeUnwrap(),
+      ],
+      updatedRecords: [
+        {
+          recordId: RecordId.create(recordIdA)._unsafeUnwrap(),
+          oldVersion: 2,
+          newVersion: 3,
+          oldFieldValues: { [numberFieldId.toString()]: 1 },
+        },
+        {
+          recordId: RecordId.create(recordIdB)._unsafeUnwrap(),
+          oldVersion: 7,
+          newVersion: 8,
+          oldFieldValues: { [numberFieldId.toString()]: 2 },
+        },
+      ],
+    };
+
+    const eventBus = new FakeEventBus();
+    const unitOfWork = new FakeUnitOfWork();
+    const undoRedoService = new FakeUndoRedoService();
+    const handler = createHandler(
+      tableRepository,
+      recordRepository,
+      eventBus,
+      unitOfWork,
+      undoRedoService
+    );
+
+    const command = UpdateRecordsCommand.create({
+      tableId: tableId.toString(),
+      fields: { [numberFieldId.toString()]: 99 },
+      filter: {
+        fieldId: textFieldId.toString(),
+        operator: 'contains',
+        value: 'task',
+      },
+    })._unsafeUnwrap();
+
+    const result = await handler.handle(createContext(), command);
+    const payload = result._unsafeUnwrap();
+
+    expect(payload.updatedCount).toBe(2);
+    expect(recordRepository.updateManyCalls).toBe(1);
+    expect(recordRepository.lastSpec).toBeDefined();
+    expect(recordRepository.lastMutateSpec).toBeDefined();
+    expect(unitOfWork.transactions).toHaveLength(1);
+    expect(undoRedoService.entries).toHaveLength(1);
+
+    const batchEvent = eventBus.published.find(isRecordsBatchUpdatedEvent);
+    expect(batchEvent).toBeDefined();
+    expect(batchEvent?.updates).toHaveLength(2);
+    expect(batchEvent?.updates[0]?.changes).toMatchObject([
+      {
+        fieldId: numberFieldId.toString(),
+        oldValue: 1,
+        newValue: 99,
+      },
+    ]);
+  });
+
+  it('skips plugins that do not support updateMany', async () => {
+    const { table, tableId, textFieldId, numberFieldId } = buildTable();
+    const recordId = `rec${'z'.repeat(16)}`;
+
+    const tableRepository = new FakeTableRepository();
+    tableRepository.tables.push(table);
+
+    const recordRepository = new FakeTableRecordRepository();
+    recordRepository.updateManyResult = {
+      totalUpdated: 1,
+      updatedRecordIds: [RecordId.create(recordId)._unsafeUnwrap()],
+      updatedRecords: [
+        {
+          recordId: RecordId.create(recordId)._unsafeUnwrap(),
+          oldVersion: 1,
+          newVersion: 2,
+          oldFieldValues: { [numberFieldId.toString()]: 1 },
+        },
+      ],
+    };
+
+    const eventBus = new FakeEventBus();
+    const unitOfWork = new FakeUnitOfWork();
+    const undoRedoService = new FakeUndoRedoService();
+    const { plugin, calls } = createTrackedRecordWritePlugin([RecordWriteOperationKind.createOne]);
+
+    const handler = createHandler(
+      tableRepository,
+      recordRepository,
+      eventBus,
+      unitOfWork,
+      undoRedoService,
+      {
+        plugins: [plugin],
+      }
+    );
+
+    const command = UpdateRecordsCommand.create({
+      tableId: tableId.toString(),
+      fields: { [numberFieldId.toString()]: 99 },
+      filter: {
+        fieldId: textFieldId.toString(),
+        operator: 'contains',
+        value: 'task',
+      },
+    })._unsafeUnwrap();
+
+    const result = await handler.handle(createContext(), command);
+    result._unsafeUnwrap();
+
+    expectRecordWritePluginToBeSkipped(calls, RecordWriteOperationKind.updateMany);
+  });
+
+  it('uses RecordByIdsSpec when recordIds are provided', async () => {
+    const { table, tableId, numberFieldId } = buildTable();
+    const recordIdA = `rec${'c'.repeat(16)}`;
+
+    const tableRepository = new FakeTableRepository();
+    tableRepository.tables.push(table);
+
+    const recordRepository = new FakeTableRecordRepository();
+    recordRepository.updateManyResult = {
+      totalUpdated: 1,
+      updatedRecordIds: [RecordId.create(recordIdA)._unsafeUnwrap()],
+      updatedRecords: [
+        {
+          recordId: RecordId.create(recordIdA)._unsafeUnwrap(),
+          oldVersion: 4,
+          newVersion: 5,
+          oldFieldValues: { [numberFieldId.toString()]: 10 },
+        },
+      ],
+    };
+
+    const eventBus = new FakeEventBus();
+    const unitOfWork = new FakeUnitOfWork();
+    const undoRedoService = new FakeUndoRedoService();
+    const handler = createHandler(
+      tableRepository,
+      recordRepository,
+      eventBus,
+      unitOfWork,
+      undoRedoService
+    );
+
+    const command = UpdateRecordsCommand.create({
+      tableId: tableId.toString(),
+      fields: { [numberFieldId.toString()]: 99 },
+      recordIds: [recordIdA],
+    })._unsafeUnwrap();
+
+    const result = await handler.handle(createContext(), command);
+
+    expect(result._unsafeUnwrap().updatedCount).toBe(1);
+    expect(recordRepository.lastSpec).toBeInstanceOf(RecordByIdsSpec);
+    expect(
+      (recordRepository.lastSpec as RecordByIdsSpec)
+        .recordIds()
+        .map((recordId) => recordId.toString())
+    ).toEqual([recordIdA]);
+    expect(eventBus.published.some(isRecordsBatchUpdatedEvent)).toBe(true);
+    expect(undoRedoService.entries).toHaveLength(1);
+  });
+
+  it('composes explicit recordIds with plugin scope', async () => {
+    const { table, tableId, numberFieldId } = buildTable();
+    const recordIdA = `rec${'q'.repeat(16)}`;
+    const scopedSpec = {
+      isSatisfiedBy: () => true,
+      mutate: (candidate: TableRecord) => ok(candidate),
+      accept: () => ok(undefined),
+    } satisfies ISpecification<TableRecord, ITableRecordConditionSpecVisitor>;
+
+    const tableRepository = new FakeTableRepository();
+    tableRepository.tables.push(table);
+
+    const recordRepository = new FakeTableRecordRepository();
+    recordRepository.updateManyResult = {
+      totalUpdated: 1,
+      updatedRecordIds: [RecordId.create(recordIdA)._unsafeUnwrap()],
+      updatedRecords: [
+        {
+          recordId: RecordId.create(recordIdA)._unsafeUnwrap(),
+          oldVersion: 1,
+          newVersion: 2,
+          oldFieldValues: { [numberFieldId.toString()]: 10 },
+        },
+      ],
+    };
+    const eventBus = new FakeEventBus();
+    const unitOfWork = new FakeUnitOfWork();
+    const undoRedoService = new FakeUndoRedoService();
+    const plugin = {
+      name: 'scoped-update',
+      supports: (operation: RecordWriteOperationKind) =>
+        operation === RecordWriteOperationKind.updateMany,
+      scope: () => ok({ recordSpec: scopedSpec }),
+    };
+
+    const handler = createHandler(
+      tableRepository,
+      recordRepository,
+      eventBus,
+      unitOfWork,
+      undoRedoService,
+      {
+        plugins: [plugin],
+      }
+    );
+
+    const command = UpdateRecordsCommand.create({
+      tableId: tableId.toString(),
+      fields: { [numberFieldId.toString()]: 99 },
+      recordIds: [recordIdA],
+    })._unsafeUnwrap();
+
+    const result = await handler.handle(createContext(), command);
+
+    expect(result.isOk()).toBe(true);
+    const specs = flattenAndSpecs(recordRepository.lastSpec);
+    expect(specs.some((spec) => spec instanceof RecordByIdsSpec)).toBe(true);
+    expect(specs).toContain(scopedSpec);
+  });
+
+  it('updates explicit records through updateManyStream', async () => {
+    const { table, tableId, textFieldId, numberFieldId } = buildTable();
+    const recordIdA = `rec${'m'.repeat(16)}`;
+    const recordIdB = `rec${'n'.repeat(16)}`;
+
+    const tableRepository = new FakeTableRepository();
+    tableRepository.tables.push(table);
+    const recordRepository = new FakeTableRecordRepository();
+    const queryRepository = new FakeTableRecordQueryRepository();
+    queryRepository.records = [
+      {
+        id: recordIdB,
+        version: 5,
+        fields: {
+          [numberFieldId.toString()]: 2,
+          [textFieldId.toString()]: 'before-b',
+        },
+      },
+      {
+        id: recordIdA,
+        version: 2,
+        fields: {
+          [numberFieldId.toString()]: 1,
+          [textFieldId.toString()]: 'before-a',
+        },
+      },
+    ];
+
+    const eventBus = new FakeEventBus();
+    const unitOfWork = new FakeUnitOfWork();
+    const undoRedoService = new FakeUndoRedoService();
+    const { plugin, calls } = createTrackedRecordWritePlugin([RecordWriteOperationKind.updateMany]);
+    const handler = createHandler(
+      tableRepository,
+      recordRepository,
+      eventBus,
+      unitOfWork,
+      undoRedoService,
+      {
+        queryRepository,
+        plugins: [plugin],
+      }
+    );
+
+    const result = await handler.handle(
+      createContext(),
+      UpdateRecordsCommand.create({
+        tableId: tableId.toString(),
+        fieldKeyType: 'id',
+        records: [
+          {
+            id: recordIdA,
+            fields: { [numberFieldId.toString()]: 99 },
+          },
+          {
+            id: recordIdB,
+            fields: { [textFieldId.toString()]: 'after-b' },
+          },
+        ],
+      })._unsafeUnwrap()
+    );
+
+    const payload = result._unsafeUnwrap();
+
+    expect(payload.updatedCount).toBe(2);
+    expect(
+      payload.records?.map((record) => ({
+        id: record.id().toString(),
+        fields: Object.fromEntries(
+          record
+            .fields()
+            .entries()
+            .map((entry) => [entry.fieldId.toString(), entry.value.toValue()])
+        ),
+      }))
+    ).toMatchObject([
+      {
+        id: recordIdA,
+        fields: {
+          [numberFieldId.toString()]: 99,
+          [textFieldId.toString()]: 'before-a',
+        },
+      },
+      {
+        id: recordIdB,
+        fields: {
+          [numberFieldId.toString()]: 2,
+          [textFieldId.toString()]: 'after-b',
+        },
+      },
+    ]);
+    expect(recordRepository.updateManyCalls).toBe(0);
+    expect(recordRepository.updateManyStreamCalls).toBe(1);
+    expect(queryRepository.lastFindOptions).toMatchObject({
+      mode: 'stored',
+      includeOrders: false,
+      includeTotal: false,
+    });
+    expect(queryRepository.lastFindOptions?.recordIdsOrder).toBeUndefined();
+    expect(calls.prepare[0]?.payload).toMatchObject({
+      variant: 'explicit',
+      recordCount: 2,
+      recordIds: [
+        RecordId.create(recordIdA)._unsafeUnwrap(),
+        RecordId.create(recordIdB)._unsafeUnwrap(),
+      ],
+    });
+    expect(calls.prepare[0]?.payload).toHaveProperty('recordUpdates');
+
+    const batchEvent = eventBus.published.find(isRecordsBatchUpdatedEvent);
+    expect(batchEvent?.updates.map((update) => update.changes)).toMatchObject([
+      [
+        {
+          fieldId: numberFieldId.toString(),
+          oldValue: 1,
+          newValue: 99,
+        },
+      ],
+      [
+        {
+          fieldId: textFieldId.toString(),
+          oldValue: 'before-b',
+          newValue: 'after-b',
+        },
+      ],
+    ]);
+  });
+
+  it('rejects incomplete explicit before-images without publishing or recording undo', async () => {
+    const { table, tableId, numberFieldId } = buildTable();
+    const recordId = `rec${'m'.repeat(16)}`;
+    const tableRepository = new FakeTableRepository();
+    tableRepository.tables.push(table);
+    const recordRepository = new FakeTableRecordRepository();
+    recordRepository.omitUpdateManyStreamOldFieldValues = true;
+    const queryRepository = new FakeTableRecordQueryRepository();
+    queryRepository.records = [
+      { id: recordId, version: 2, fields: { [numberFieldId.toString()]: 1 } },
+    ];
+    const eventBus = new FakeEventBus();
+    const undoRedoService = new FakeUndoRedoService();
+    const handler = createHandler(
+      tableRepository,
+      recordRepository,
+      eventBus,
+      new FakeUnitOfWork(),
+      undoRedoService,
+      { queryRepository }
+    );
+
+    const result = await handler.handle(
+      createContext(),
+      UpdateRecordsCommand.create({
+        tableId: tableId.toString(),
+        fieldKeyType: 'id',
+        records: [{ id: recordId, fields: { [numberFieldId.toString()]: 99 } }],
+      })._unsafeUnwrap()
+    );
+
+    expect(result.isErr()).toBe(true);
+    expect(result._unsafeUnwrapErr().code).toBe('record.update_snapshot.missing');
+    expect(eventBus.published.some(isRecordsBatchUpdatedEvent)).toBe(false);
+    expect(undoRedoService.entries).toHaveLength(0);
+  });
+
+  it('traces explicit bulk-update preparation phases', async () => {
+    const { table, tableId, textFieldId, numberFieldId } = buildTable();
+    const recordIdA = `rec${'m'.repeat(16)}`;
+    const recordIdB = `rec${'n'.repeat(16)}`;
+    const tracer = new FakeTracer();
+
+    const tableRepository = new FakeTableRepository();
+    tableRepository.tables.push(table);
+    const recordRepository = new FakeTableRecordRepository();
+    const queryRepository = new FakeTableRecordQueryRepository();
+    queryRepository.records = [
+      {
+        id: recordIdA,
+        version: 2,
+        fields: {
+          [numberFieldId.toString()]: 1,
+          [textFieldId.toString()]: 'before-a',
+        },
+      },
+      {
+        id: recordIdB,
+        version: 5,
+        fields: {
+          [numberFieldId.toString()]: 2,
+          [textFieldId.toString()]: 'before-b',
+        },
+      },
+    ];
+
+    const eventBus = new FakeEventBus();
+    const unitOfWork = new FakeUnitOfWork();
+    const undoRedoService = new FakeUndoRedoService();
+    const handler = createHandler(
+      tableRepository,
+      recordRepository,
+      eventBus,
+      unitOfWork,
+      undoRedoService,
+      {
+        queryRepository,
+      }
+    );
+
+    const result = await handler.handle(
+      { ...createContext(), tracer },
+      UpdateRecordsCommand.create({
+        tableId: tableId.toString(),
+        fieldKeyType: 'id',
+        records: [
+          {
+            id: recordIdA,
+            fields: { [numberFieldId.toString()]: 99 },
+          },
+          {
+            id: recordIdB,
+            fields: { [textFieldId.toString()]: 'after-b' },
+          },
+        ],
+      })._unsafeUnwrap()
+    );
+
+    expect(result.isOk()).toBe(true);
+    expect(tracer.spans.map((span) => span.name)).toEqual(
+      expect.arrayContaining([
+        'teable.RecordBulkUpdateService.resolveExplicitUpdates',
+        'teable.RecordBulkUpdateService.pluginPrepare',
+        'teable.RecordBulkUpdateService.loadExplicitCurrentRecords',
+        'teable.RecordBulkUpdateService.prepareTableForWrite',
+        'teable.RecordBulkUpdateService.createUpdateRecordsStream',
+        'teable.RecordBulkUpdateService.generateUpdateBatch',
+        'teable.RecordBulkUpdateService.generateUpdateBatch.updateRecord',
+        'teable.RecordBulkUpdateService.generateUpdateBatch.updateRecord.resolveFieldKeys',
+        'teable.RecordBulkUpdateService.generateUpdateBatch.updateRecord.configureMutationSpec',
+        'teable.RecordBulkUpdateService.generateUpdateBatch.updateRecord.buildMutationSpec',
+        'teable.RecordBulkUpdateService.generateUpdateBatch.updateRecord.mutateRecord',
+        'teable.RecordBulkUpdateService.generateUpdateBatch.yieldFinalBatch',
+        'teable.RecordBulkUpdateService.resolveUpdateBatch',
+        'teable.RecordBulkUpdateService.materializeResolvedBatch',
+        'teable.RecordBulkUpdateService.updateManyStream',
+        'teable.RecordBulkUpdateService.buildPersistedEventData',
+        'teable.RecordBulkUpdateService.materializeResultRecords',
+      ])
+    );
+    const updateManyStreamSpan = tracer.spans.find(
+      (span) => span.name === 'teable.RecordBulkUpdateService.updateManyStream'
+    );
+    expect(updateManyStreamSpan?.attributes).toMatchObject({
+      'record.update.batchCount': 1,
+      'record.update.maxBatchSize': 2,
+      'record.update.authorizedRecordCount': 2,
+    });
+    const generateBatchSpan = tracer.spans.find(
+      (span) => span.name === 'teable.RecordBulkUpdateService.generateUpdateBatch'
+    );
+    expect(generateBatchSpan?.attributes).toMatchObject({
+      'record.update.generateBatchTotalRecords': 2,
+      'record.update.generateBatchTotalFieldAssignments': 2,
+      'record.update.generateBatchMaxFieldsPerRecord': 1,
+    });
+    expect(
+      Object.keys(generateBatchSpan?.attributes ?? {}).some((key) =>
+        key.startsWith('record.update.generateBatch.record.resolveFieldKeys.ms')
+      )
+    ).toBe(true);
+    expect(tracer.spans.every((span) => span.ended)).toBe(true);
+  });
+
+  it('uses repository-returned versions for explicit bulk-update events', async () => {
+    const { table, tableId, numberFieldId } = buildTable();
+    const recordId = `rec${'w'.repeat(16)}`;
+
+    const tableRepository = new FakeTableRepository();
+    tableRepository.tables.push(table);
+    const recordRepository = new FakeTableRecordRepository();
+    recordRepository.updateManyStreamOldVersions.set(recordId, 5);
+    recordRepository.updateManyStreamVersions.set(recordId, 6);
+    const queryRepository = new FakeTableRecordQueryRepository();
+    queryRepository.records = [
+      {
+        id: recordId,
+        version: 3,
+        fields: { [numberFieldId.toString()]: 1 },
+      },
+    ];
+
+    const eventBus = new FakeEventBus();
+    const unitOfWork = new FakeUnitOfWork();
+    const undoRedoService = new FakeUndoRedoService();
+    const handler = createHandler(
+      tableRepository,
+      recordRepository,
+      eventBus,
+      unitOfWork,
+      undoRedoService,
+      {
+        queryRepository,
+      }
+    );
+
+    const result = await handler.handle(
+      createContext(),
+      UpdateRecordsCommand.create({
+        tableId: tableId.toString(),
+        fieldKeyType: 'id',
+        records: [{ id: recordId, fields: { [numberFieldId.toString()]: 99 } }],
+      })._unsafeUnwrap()
+    );
+
+    expect(result._unsafeUnwrap().updatedCount).toBe(1);
+    const batchEvent = eventBus.published.find(isRecordsBatchUpdatedEvent);
+    expect(batchEvent?.updates[0]).toMatchObject({
+      recordId,
+      oldVersion: 5,
+      newVersion: 6,
+    });
+  });
+
+  it('publishes committed bulk-update events before recording the undo entry', async () => {
+    const { table, tableId, numberFieldId } = buildTable();
+    const recordId = `rec${'o'.repeat(16)}`;
+    const calls: string[] = [];
+
+    const tableRepository = new FakeTableRepository();
+    tableRepository.tables.push(table);
+    const recordRepository = new FakeTableRecordRepository();
+    const queryRepository = new FakeTableRecordQueryRepository();
+    queryRepository.records = [
+      {
+        id: recordId,
+        version: 3,
+        fields: { [numberFieldId.toString()]: 1 },
+      },
+    ];
+
+    const eventBus = new FakeEventBus();
+    eventBus.calls = calls;
+    const unitOfWork = new FakeUnitOfWork();
+    const undoRedoService = new FakeUndoRedoService();
+    undoRedoService.calls = calls;
+    const handler = createHandler(
+      tableRepository,
+      recordRepository,
+      eventBus,
+      unitOfWork,
+      undoRedoService,
+      {
+        queryRepository,
+      }
+    );
+
+    const result = await handler.handle(
+      createContext(),
+      UpdateRecordsCommand.create({
+        tableId: tableId.toString(),
+        fieldKeyType: 'id',
+        records: [{ id: recordId, fields: { [numberFieldId.toString()]: 99 } }],
+      })._unsafeUnwrap()
+    );
+
+    result._unsafeUnwrap();
+
+    expect(calls).toEqual(['publishMany', 'undoRedo.append']);
+    expect(eventBus.published.some(isRecordsBatchUpdatedEvent)).toBe(true);
+    expect(undoRedoService.entries).toHaveLength(1);
+  });
+
+  it('does not publish explicit update events for rows skipped by storage as no-ops', async () => {
+    const { table, tableId, numberFieldId } = buildTable();
+    const recordId = `rec${'x'.repeat(16)}`;
+
+    const tableRepository = new FakeTableRepository();
+    tableRepository.tables.push(table);
+    const recordRepository = new FakeTableRecordRepository();
+    recordRepository.updateManyStreamUpdatedRecordIds = new Set();
+    const queryRepository = new FakeTableRecordQueryRepository();
+    queryRepository.records = [
+      {
+        id: recordId,
+        version: 3,
+        fields: { [numberFieldId.toString()]: 1 },
+      },
+    ];
+
+    const eventBus = new FakeEventBus();
+    const unitOfWork = new FakeUnitOfWork();
+    const undoRedoService = new FakeUndoRedoService();
+    const handler = createHandler(
+      tableRepository,
+      recordRepository,
+      eventBus,
+      unitOfWork,
+      undoRedoService,
+      {
+        queryRepository,
+      }
+    );
+
+    const result = await handler.handle(
+      createContext(),
+      UpdateRecordsCommand.create({
+        tableId: tableId.toString(),
+        fieldKeyType: 'id',
+        records: [{ id: recordId, fields: { [numberFieldId.toString()]: 1 } }],
+      })._unsafeUnwrap()
+    );
+
+    const payload = result._unsafeUnwrap();
+    expect(payload.updatedCount).toBe(0);
+    expect(recordRepository.updateManyStreamCalls).toBe(1);
+    expect(eventBus.published.some(isRecordsBatchUpdatedEvent)).toBe(false);
+    expect(undoRedoService.entries).toHaveLength(0);
+  });
+
+  it.each([false, true])(
+    'preserves authoritative nulls without restoring stale attachments when storage changes=%s',
+    async (storageChanges) => {
+      const { table, tableId, numberFieldId, singleSelectFieldId, attachmentFieldId } =
+        buildTable();
+      const recordId = `rec${'x'.repeat(16)}`;
+      const requestedAmount = storageChanges ? 2 : 1;
+      const staleAttachment: AttachmentItem = {
+        id: 'att-stale',
+        name: 'stale.png',
+        path: '/attachments/stale.png',
+        token: 'tok-stale',
+        size: 12,
+        mimetype: 'image/png',
+        presignedUrl: 'https://example.test/expired.png',
+      };
+      const tableRepository = new FakeTableRepository();
+      tableRepository.tables.push(table);
+      const recordRepository = new FakeTableRecordRepository();
+      if (!storageChanges) {
+        recordRepository.updateManyStreamUpdatedRecordIds = new Set();
+      }
+      recordRepository.updateManyStreamOldFieldValues.set(recordId, {
+        [numberFieldId.toString()]: 1,
+        [singleSelectFieldId.toString()]: null,
+      });
+      const queryRepository = new FakeTableRecordQueryRepository();
+      const find = vi
+        .spyOn(queryRepository, 'find')
+        .mockResolvedValueOnce(
+          ok({
+            records: [
+              {
+                id: recordId,
+                version: 1,
+                fields: {
+                  [numberFieldId.toString()]: 1,
+                  [singleSelectFieldId.toString()]: null,
+                  [attachmentFieldId.toString()]: [staleAttachment],
+                },
+              },
+            ],
+            total: 1,
+          })
+        )
+        .mockResolvedValueOnce(
+          ok({
+            records: [
+              {
+                id: recordId,
+                version: 2,
+                fields: {
+                  [numberFieldId.toString()]: requestedAmount,
+                  [singleSelectFieldId.toString()]: null,
+                  [attachmentFieldId.toString()]: null,
+                },
+              },
+            ],
+            total: 1,
+          })
+        );
+      const eventBus = new FakeEventBus();
+      const unitOfWork = new FakeUnitOfWork();
+      const undoRedoService = new FakeUndoRedoService();
+      const handler = createHandler(
+        tableRepository,
+        recordRepository,
+        eventBus,
+        unitOfWork,
+        undoRedoService,
+        { queryRepository }
+      );
+
+      const result = await handler.handle(
+        createContext(),
+        UpdateRecordsCommand.create({
+          tableId: tableId.toString(),
+          fieldKeyType: 'id',
+          records: [
+            {
+              id: recordId,
+              fields: {
+                [numberFieldId.toString()]: requestedAmount,
+                [singleSelectFieldId.toString()]: null,
+              },
+            },
+          ],
+        })._unsafeUnwrap()
+      );
+
+      const payload = result._unsafeUnwrap();
+      const fields = payload.records?.[0]?.fields();
+      expect(fields?.get(numberFieldId)?.toValue()).toBe(requestedAmount);
+      expect(fields?.get(singleSelectFieldId)?.toValue()).toBeNull();
+      expect(fields?.get(attachmentFieldId)?.toValue()).toBeNull();
+      expect(find).toHaveBeenCalledTimes(2);
+      expect(find.mock.calls[1]?.[0].transaction?.kind).toBe('unitOfWorkTransaction');
+      expect(payload.updatedCount).toBe(storageChanges ? 1 : 0);
+      expect(eventBus.published.some(isRecordsBatchUpdatedEvent)).toBe(storageChanges);
+      expect(undoRedoService.entries).toHaveLength(storageChanges ? 1 : 0);
+    }
+  );
+
+  it('skips explicit records that are missing from storage while updating the rest', async () => {
+    const { table, tableId, numberFieldId } = buildTable();
+    const existingRecordId = `rec${'h'.repeat(16)}`;
+    const missingRecordId = `rec${'i'.repeat(16)}`;
+
+    const tableRepository = new FakeTableRepository();
+    tableRepository.tables.push(table);
+    const recordRepository = new FakeTableRecordRepository();
+    const queryRepository = new FakeTableRecordQueryRepository();
+    queryRepository.records = [
+      {
+        id: existingRecordId,
+        version: 3,
+        fields: {
+          [numberFieldId.toString()]: 12,
+        },
+      },
+    ];
+    const eventBus = new FakeEventBus();
+    const unitOfWork = new FakeUnitOfWork();
+    const undoRedoService = new FakeUndoRedoService();
+    const handler = createHandler(
+      tableRepository,
+      recordRepository,
+      eventBus,
+      unitOfWork,
+      undoRedoService,
+      {
+        queryRepository,
+      }
+    );
+
+    const result = await handler.handle(
+      createContext(),
+      UpdateRecordsCommand.create({
+        tableId: tableId.toString(),
+        fieldKeyType: 'id',
+        records: [
+          {
+            id: existingRecordId,
+            fields: { [numberFieldId.toString()]: 99 },
+          },
+          {
+            id: missingRecordId,
+            fields: { [numberFieldId.toString()]: 100 },
+          },
+        ],
+      })._unsafeUnwrap()
+    );
+
+    expect(result._unsafeUnwrap().updatedCount).toBe(1);
+    expect(recordRepository.updateManyStreamCalls).toBe(1);
+    const batchEvent = eventBus.published.find(isRecordsBatchUpdatedEvent);
+    expect(batchEvent?.updates).toHaveLength(1);
+    expect(batchEvent?.updates[0]?.recordId).toBe(existingRecordId);
+  });
+
+  it('filters explicit records through plugin scope before persisting', async () => {
+    const { table, tableId, numberFieldId } = buildTable();
+    const allowedRecordId = `rec${'j'.repeat(16)}`;
+    const blockedRecordId = `rec${'k'.repeat(16)}`;
+    const scopedSpec = {
+      isSatisfiedBy: (record: TableRecord) => record.id().toString() === allowedRecordId,
+      mutate: (candidate: TableRecord) => ok(candidate),
+      accept: () => ok(undefined),
+    } satisfies ISpecification<TableRecord, ITableRecordConditionSpecVisitor>;
+
+    const tableRepository = new FakeTableRepository();
+    tableRepository.tables.push(table);
+    const recordRepository = new FakeTableRecordRepository();
+    const queryRepository = new FakeTableRecordQueryRepository();
+    queryRepository.records = [
+      {
+        id: allowedRecordId,
+        version: 1,
+        fields: { [numberFieldId.toString()]: 10 },
+      },
+      {
+        id: blockedRecordId,
+        version: 1,
+        fields: { [numberFieldId.toString()]: 20 },
+      },
+    ];
+    const eventBus = new FakeEventBus();
+    const unitOfWork = new FakeUnitOfWork();
+    const undoRedoService = new FakeUndoRedoService();
+    const plugin = {
+      name: 'explicit-scope',
+      supports: (operation: RecordWriteOperationKind) =>
+        operation === RecordWriteOperationKind.updateMany,
+      scope: () => ok({ recordSpec: scopedSpec }),
+    };
+    const handler = createHandler(
+      tableRepository,
+      recordRepository,
+      eventBus,
+      unitOfWork,
+      undoRedoService,
+      {
+        queryRepository,
+        plugins: [plugin],
+      }
+    );
+
+    const result = await handler.handle(
+      createContext(),
+      UpdateRecordsCommand.create({
+        tableId: tableId.toString(),
+        fieldKeyType: 'id',
+        records: [
+          {
+            id: allowedRecordId,
+            fields: { [numberFieldId.toString()]: 99 },
+          },
+          {
+            id: blockedRecordId,
+            fields: { [numberFieldId.toString()]: 88 },
+          },
+        ],
+      })._unsafeUnwrap()
+    );
+
+    expect(result._unsafeUnwrap().updatedCount).toBe(1);
+    expect(recordRepository.updateManyStreamCalls).toBe(1);
+    const streamedUpdates = recordRepository.lastUpdateManyStreamBatches.flatMap((batch) => {
+      if (Array.isArray(batch)) {
+        return batch;
+      }
+      return 'updates' in batch ? batch.updates : [];
+    });
+    expect(streamedUpdates).toHaveLength(1);
+    expect(streamedUpdates[0]?.record.id().toString()).toBe(allowedRecordId);
+  });
+
+  it('reorders explicit records through native v2 updateRecords', async () => {
+    const { table, tableId, numberFieldId } = buildTable();
+    const recordIdA = `rec${'o'.repeat(16)}`;
+    const recordIdB = `rec${'p'.repeat(16)}`;
+    const viewId = `viw${'q'.repeat(16)}`;
+
+    const tableRepository = new FakeTableRepository();
+    tableRepository.tables.push(table);
+    const recordRepository = new FakeTableRecordRepository();
+    const queryRepository = new FakeTableRecordQueryRepository();
+    queryRepository.records = [
+      {
+        id: recordIdA,
+        version: 1,
+        fields: { [numberFieldId.toString()]: 1 },
+        autoNumber: 10,
+        orders: { [viewId]: 10 },
+      },
+      {
+        id: recordIdB,
+        version: 2,
+        fields: { [numberFieldId.toString()]: 2 },
+        autoNumber: 20,
+        orders: { [viewId]: 20 },
+      },
+    ];
+    const orderCalculator = new FakeRecordOrderCalculator();
+    orderCalculator.orderValues = [100, 101];
+
+    const eventBus = new FakeEventBus();
+    const unitOfWork = new FakeUnitOfWork();
+    const undoRedoService = new FakeUndoRedoService();
+    const handler = createHandler(
+      tableRepository,
+      recordRepository,
+      eventBus,
+      unitOfWork,
+      undoRedoService,
+      {
+        queryRepository,
+        orderCalculator,
+      }
+    );
+
+    const result = await handler.handle(
+      createContext(),
+      UpdateRecordsCommand.create({
+        tableId: tableId.toString(),
+        fieldKeyType: 'id',
+        records: [
+          { id: recordIdA, fields: {} },
+          { id: recordIdB, fields: {} },
+        ],
+        order: {
+          viewId,
+          anchorId: recordIdA,
+          position: 'after',
+        },
+      })._unsafeUnwrap()
+    );
+
+    const payload = result._unsafeUnwrap();
+
+    expect(payload.updatedCount).toBe(2);
+    expect(
+      payload.records?.map((record) => ({
+        id: record.id().toString(),
+        fields: Object.fromEntries(
+          record
+            .fields()
+            .entries()
+            .map((entry) => [entry.fieldId.toString(), entry.value.toValue()])
+        ),
+      }))
+    ).toMatchObject([
+      {
+        id: recordIdA,
+        fields: {
+          [numberFieldId.toString()]: 1,
+        },
+      },
+      {
+        id: recordIdB,
+        fields: {
+          [numberFieldId.toString()]: 2,
+        },
+      },
+    ]);
+    expect(recordRepository.updateManyStreamCalls).toBe(1);
+    expect(eventBus.published.some((event) => event instanceof RecordReordered)).toBe(true);
+    expect(eventBus.published.some(isRecordsBatchUpdatedEvent)).toBe(false);
+    expect(undoRedoService.entries).toHaveLength(1);
+  });
+
+  it('propagates typecast side effects for explicit updates before persisting rows', async () => {
+    const { table, tableId, singleSelectFieldId } = buildTable();
+    const recordId = `rec${'r'.repeat(16)}`;
+
+    const tableRepository = new FakeTableRepository();
+    tableRepository.tables.push(table);
+    const recordRepository = new FakeTableRecordRepository();
+    const queryRepository = new FakeTableRecordQueryRepository();
+    queryRepository.records = [
+      {
+        id: recordId,
+        version: 1,
+        fields: { [singleSelectFieldId.toString()]: null },
+      },
+    ];
+
+    const eventBus = new FakeEventBus();
+    const unitOfWork = new FakeUnitOfWork();
+    const undoRedoService = new FakeUndoRedoService();
+    const handler = createHandler(
+      tableRepository,
+      recordRepository,
+      eventBus,
+      unitOfWork,
+      undoRedoService,
+      {
+        queryRepository,
+      }
+    );
+
+    const result = await handler.handle(
+      createContext(),
+      UpdateRecordsCommand.create({
+        tableId: tableId.toString(),
+        fieldKeyType: 'id',
+        typecast: true,
+        records: [
+          {
+            id: recordId,
+            fields: { [singleSelectFieldId.toString()]: 'Closed' },
+          },
+        ],
+      })._unsafeUnwrap()
+    );
+
+    expect(result._unsafeUnwrap().updatedCount).toBe(1);
+    expect(tableRepository.updated).toHaveLength(1);
+    expect(eventBus.published.some(isRecordsBatchUpdatedEvent)).toBe(true);
+  });
+
+  it('persists resolved attachment values for explicit typecast updates', async () => {
+    const { table, tableId, attachmentFieldId } = buildTable();
+    const recordId = `rec${'a'.repeat(15)}1`;
+    const resolvedAttachment: AttachmentItem = {
+      id: 'att-1',
+      name: 'image.png',
+      path: '/attachments/image.png',
+      token: 'tok-1',
+      size: 12,
+      mimetype: 'image/png',
+    };
+    const decoratedAttachment: AttachmentItem = {
+      ...resolvedAttachment,
+      presignedUrl: 'https://example.test/image.png',
+      smThumbnailUrl: 'https://example.test/sm.png',
+      lgThumbnailUrl: 'https://example.test/lg.png',
+    };
+
+    const tableRepository = new FakeTableRepository();
+    tableRepository.tables.push(table);
+    const recordRepository = new FakeTableRecordRepository();
+    const queryRepository = new FakeTableRecordQueryRepository();
+    queryRepository.records = [
+      {
+        id: recordId,
+        version: 1,
+        fields: { [attachmentFieldId.toString()]: null },
+      },
+    ];
+
+    const eventBus = new FakeEventBus();
+    const unitOfWork = new FakeUnitOfWork();
+    const undoRedoService = new FakeUndoRedoService();
+    const handler = createHandler(
+      tableRepository,
+      recordRepository,
+      eventBus,
+      unitOfWork,
+      undoRedoService,
+      {
+        queryRepository,
+        recordMutationSpecResolver: new FakeRecordMutationSpecResolverService([
+          new SetAttachmentValueSpec(
+            attachmentFieldId,
+            CellValue.fromValidated<AttachmentItem[]>([resolvedAttachment])
+          ),
+        ]),
+        recordChangedValueDecoratorService: {
+          decorateChangedFields: async (_table, changedFields) =>
+            ok(
+              changedFields
+                ? new Map([[attachmentFieldId.toString(), [decoratedAttachment]]])
+                : changedFields
+            ),
+          decorateChangedFieldsByRecord: async (_table, changedFieldsByRecord) =>
+            ok(
+              changedFieldsByRecord
+                ? new Map(
+                    [...changedFieldsByRecord.entries()].map(([recordId, changedFields]) => [
+                      recordId,
+                      changedFields.has(attachmentFieldId.toString())
+                        ? new Map([[attachmentFieldId.toString(), [decoratedAttachment]]])
+                        : changedFields,
+                    ])
+                  )
+                : changedFieldsByRecord
+            ),
+        },
+      }
+    );
+
+    const result = await handler.handle(
+      createContext(),
+      UpdateRecordsCommand.create({
+        tableId: tableId.toString(),
+        fieldKeyType: 'id',
+        typecast: true,
+        records: [
+          {
+            id: recordId,
+            fields: { [attachmentFieldId.toString()]: [{ token: 'tok-1' }] },
+          },
+        ],
+      })._unsafeUnwrap()
+    );
+
+    const payload = result._unsafeUnwrap();
+    const persistedBatch = recordRepository.lastUpdateManyStreamBatches[0];
+    const persistedUpdates =
+      persistedBatch && 'updates' in persistedBatch ? persistedBatch.updates : [];
+    const persistedValue = persistedUpdates[0]?.record.fields().get(attachmentFieldId)?.toValue();
+
+    expect(payload.records?.[0]?.fields().get(attachmentFieldId)?.toValue()).toEqual([
+      decoratedAttachment,
+    ]);
+    expect(persistedValue).toEqual([resolvedAttachment]);
+    const batchEvent = eventBus.published.find(isRecordsBatchUpdatedEvent);
+    expect(batchEvent?.updates[0]?.changes[0]?.newValue).toEqual([decoratedAttachment]);
+  });
+
+  it('returns early when the filter matches no records', async () => {
+    const { table, tableId, textFieldId, singleSelectFieldId } = buildTable();
+
+    const tableRepository = new FakeTableRepository();
+    tableRepository.tables.push(table);
+
+    const recordRepository = new FakeTableRecordRepository();
+    const eventBus = new FakeEventBus();
+    const unitOfWork = new FakeUnitOfWork();
+    const undoRedoService = new FakeUndoRedoService();
+    const handler = createHandler(
+      tableRepository,
+      recordRepository,
+      eventBus,
+      unitOfWork,
+      undoRedoService
+    );
+
+    const command = UpdateRecordsCommand.create({
+      tableId: tableId.toString(),
+      typecast: true,
+      fields: { [singleSelectFieldId.toString()]: 'Closed' },
+      filter: {
+        fieldId: textFieldId.toString(),
+        operator: 'is',
+        value: 'missing',
+      },
+    })._unsafeUnwrap();
+
+    const result = await handler.handle(createContext(), command);
+
+    expect(result._unsafeUnwrap().updatedCount).toBe(0);
+    expect(recordRepository.updateManyCalls).toBe(1);
+    expect(tableRepository.updated).toHaveLength(0);
+    expect(eventBus.published.some(isRecordsBatchUpdatedEvent)).toBe(false);
+    expect(undoRedoService.entries).toHaveLength(0);
+  });
+});
+
+describe('UpdateRecordsHandler schema coordination', () => {
+  const recordId = `rec${'q'.repeat(16)}`;
+
+  const setup = (
+    coordination: ITableSchemaCoordination,
+    options: {
+      omitTable?: boolean;
+      plugins?: Parameters<typeof createRecordWritePluginRunner>[0];
+    } = {}
+  ) => {
+    const { table, tableId, textFieldId, numberFieldId, singleSelectFieldId } = buildTable();
+    const tableRepository = new FakeTableRepository();
+    if (!options.omitTable) {
+      tableRepository.tables.push(table);
+    }
+
+    const recordRepository = new FakeTableRecordRepository();
+    recordRepository.updateManyResult = {
+      totalUpdated: 1,
+      updatedRecordIds: [RecordId.create(recordId)._unsafeUnwrap()],
+      updatedRecords: [
+        {
+          recordId: RecordId.create(recordId)._unsafeUnwrap(),
+          oldVersion: 1,
+          newVersion: 2,
+          oldFieldValues: { [numberFieldId.toString()]: 1 },
+        },
+      ],
+    };
+
+    const handler = createHandler(
+      tableRepository,
+      recordRepository,
+      new FakeEventBus(),
+      new FakeUnitOfWork(),
+      new FakeUndoRedoService(),
+      { tableSchemaCoordination: coordination, plugins: options.plugins }
+    );
+
+    return {
+      table,
+      tableId,
+      textFieldId,
+      numberFieldId,
+      singleSelectFieldId,
+      tableRepository,
+      handler,
+    };
+  };
+
+  const createCommand = (input: Record<string, unknown>) =>
+    UpdateRecordsCommand.create(input)._unsafeUnwrap();
+
+  const selectorInput = (tableId: TableId, fields: Record<string, unknown>) => ({
+    tableId: tableId.toString(),
+    fields,
+    filter: { fieldId: `fld${'t'.repeat(16)}`, operator: 'is', value: 'task' },
+  });
+
+  it('holds a shared lease for an ordinary bulk update', async () => {
+    const coordination = new RecordingTableSchemaCoordination();
+    const { tableId, numberFieldId, handler } = setup(coordination);
+
+    const result = await handler.handle(
+      createContext(),
+      createCommand(selectorInput(tableId, { [numberFieldId.toString()]: 99 }))
+    );
+
+    expect(result.isOk()).toBe(true);
+    expect(coordination.calls).toEqual([{ tableIds: [tableId.toString()], mode: 'shared' }]);
+    expect(coordination.releaseCount).toBe(1);
+  });
+
+  it('keeps a shared lease for typecast bulk updates that do not change metadata', async () => {
+    const coordination = new RecordingTableSchemaCoordination();
+    const { tableId, textFieldId, handler, tableRepository } = setup(coordination);
+
+    const result = await handler.handle(
+      createContext(),
+      createCommand({
+        ...selectorInput(tableId, { [textFieldId.toString()]: 'Renamed' }),
+        typecast: true,
+      })
+    );
+
+    expect(result.isOk()).toBe(true);
+    expect(coordination.calls).toEqual([{ tableIds: [tableId.toString()], mode: 'shared' }]);
+    expect(coordination.events).toEqual(['acquire:shared', 'release:shared']);
+    expect(tableRepository.findOneCalls).toBe(1);
+  });
+
+  it('releases the shared lease before acquiring exclusive for new select options', async () => {
+    const coordination = new RecordingTableSchemaCoordination();
+    const { tableId, singleSelectFieldId, handler, tableRepository } = setup(coordination);
+
+    const result = await handler.handle(
+      createContext(),
+      createCommand({
+        ...selectorInput(tableId, { [singleSelectFieldId.toString()]: 'Closed' }),
+        typecast: true,
+      })
+    );
+
+    expect(result.isOk()).toBe(true);
+    expect(coordination.calls).toEqual([
+      { tableIds: [tableId.toString()], mode: 'shared' },
+      { tableIds: [tableId.toString()], mode: 'exclusive' },
+    ]);
+    expect(coordination.events).toEqual([
+      'acquire:shared',
+      'release:shared',
+      'acquire:exclusive',
+      'release:exclusive',
+    ]);
+    expect(tableRepository.updated).toHaveLength(1);
+    expect(tableRepository.findOneCalls).toBe(2);
+  });
+
+  it('reloads table metadata after the lease gap and keeps a concurrent option', async () => {
+    const coordination = new RecordingTableSchemaCoordination();
+    const { table, tableId, singleSelectFieldId, handler, tableRepository } = setup(coordination);
+    const tableWithClosedOption = table
+      .update((mutator) =>
+        mutator.addSelectOptions(singleSelectFieldId, [
+          SelectOption.create({ name: 'Closed', color: 'red' })._unsafeUnwrap(),
+        ])
+      )
+      ._unsafeUnwrap().table;
+    // Another writer created the option while this command held only the shared
+    // lease. The exclusive attempt must see it instead of persisting its own.
+    coordination.onAcquire = (mode) => {
+      if (mode === 'exclusive') {
+        tableRepository.tables = [tableWithClosedOption];
+      }
+    };
+
+    const result = await handler.handle(
+      createContext(),
+      createCommand({
+        ...selectorInput(tableId, { [singleSelectFieldId.toString()]: 'Closed' }),
+        typecast: true,
+      })
+    );
+
+    expect(result._unsafeUnwrap().updatedCount).toBe(1);
+    expect(coordination.events).toEqual([
+      'acquire:shared',
+      'release:shared',
+      'acquire:exclusive',
+      'release:exclusive',
+    ]);
+    expect(tableRepository.updated).toHaveLength(0);
+    const statusField = tableRepository.tables[0]!.getField((field) =>
+      field.id().equals(singleSelectFieldId)
+    )._unsafeUnwrap() as SingleSelectField;
+    expect(statusField.selectOptions().map((option) => option.name().toString())).toEqual([
+      'Closed',
+    ]);
+  });
+
+  it('considers explicit record fields when choosing the exclusive lease', async () => {
+    const coordination = new RecordingTableSchemaCoordination();
+    const { tableId, singleSelectFieldId, handler } = setup(coordination);
+
+    const result = await handler.handle(
+      createContext(),
+      createCommand({
+        tableId: tableId.toString(),
+        typecast: true,
+        records: [
+          {
+            id: recordId,
+            fields: { [singleSelectFieldId.toString()]: 'Closed' },
+          },
+        ],
+      })
+    );
+
+    expect(result.isOk()).toBe(true);
+    expect(coordination.calls).toEqual([
+      { tableIds: [tableId.toString()], mode: 'shared' },
+      { tableIds: [tableId.toString()], mode: 'exclusive' },
+    ]);
+  });
+
+  it('keeps unsupported bulk input on the exclusive lease when the full-input probe errors', async () => {
+    const coordination = new RecordingTableSchemaCoordination();
+    const { tableId, singleSelectFieldId, handler } = setup(coordination);
+
+    const result = await handler.handle(
+      createContext({ allowSelectOptionAutoCreate: false }),
+      createCommand({
+        ...selectorInput(tableId, { [singleSelectFieldId.toString()]: 'Closed' }),
+        typecast: true,
+      })
+    );
+
+    // The full input errors, but filtering can remove that record while another
+    // authorized record still adds an option. Widen the lease instead of
+    // assuming the error means no metadata write.
+    expect(result._unsafeUnwrapErr().code).toBe(
+      'permission.field.update_required_for_select_options'
+    );
+    expect(coordination.calls.map((call) => call.mode)).toEqual(['shared', 'exclusive']);
+    expect(coordination.releaseCount).toBe(2);
+  });
+
+  it('releases the shared lease when the exclusive acquisition fails', async () => {
+    const coordination = new RecordingTableSchemaCoordination(
+      domainError.infrastructure({
+        code: 'schema_coordination.acquire_failed',
+        message: 'Failed to acquire table schema coordination locks',
+      })
+    );
+    coordination.failMode = 'exclusive';
+    const { tableId, singleSelectFieldId, handler } = setup(coordination);
+
+    const result = await handler.handle(
+      createContext(),
+      createCommand({
+        ...selectorInput(tableId, { [singleSelectFieldId.toString()]: 'Closed' }),
+        typecast: true,
+      })
+    );
+
+    expect(result._unsafeUnwrapErr().code).toBe('schema_coordination.acquire_failed');
+    expect(coordination.events).toEqual(['acquire:shared', 'release:shared', 'acquire:exclusive']);
+    expect(coordination.releaseCount).toBe(1);
+  });
+
+  it('releases the exclusive lease when table metadata disappears during the gap', async () => {
+    const coordination = new RecordingTableSchemaCoordination();
+    const { tableId, singleSelectFieldId, handler, tableRepository } = setup(coordination);
+    coordination.onAcquire = (mode) => {
+      if (mode === 'exclusive') {
+        tableRepository.tables = [];
+      }
+    };
+
+    const result = await handler.handle(
+      createContext(),
+      createCommand({
+        ...selectorInput(tableId, { [singleSelectFieldId.toString()]: 'Closed' }),
+        typecast: true,
+      })
+    );
+
+    expect(result.isErr()).toBe(true);
+    expect(coordination.releaseCount).toBe(2);
+    expect(tableRepository.updated).toHaveLength(0);
+  });
+
+  it('runs plugin prepare and guard once while upgrading to the exclusive lease', async () => {
+    const tracked = createTrackedRecordWritePlugin([RecordWriteOperationKind.updateMany]);
+    const coordination = new RecordingTableSchemaCoordination();
+    const { tableId, singleSelectFieldId, handler } = setup(coordination, {
+      plugins: [tracked.plugin],
+    });
+
+    const result = await handler.handle(
+      createContext(),
+      createCommand({
+        ...selectorInput(tableId, { [singleSelectFieldId.toString()]: 'Closed' }),
+        typecast: true,
+      })
+    );
+
+    expect(result.isOk()).toBe(true);
+    expect(coordination.calls.map((call) => call.mode)).toEqual(['shared', 'exclusive']);
+    expect(tracked.calls.prepare).toHaveLength(1);
+    expect(tracked.calls.guard).toHaveLength(1);
+  });
+
+  it('does not coordinate ordered bulk updates because row-order CIC cannot run inside the lease', async () => {
+    const coordination = new RecordingTableSchemaCoordination();
+    const { table, tableId, numberFieldId, handler } = setup(coordination);
+
+    const result = await handler.handle(
+      createContext(),
+      createCommand({
+        tableId: tableId.toString(),
+        records: [
+          {
+            id: recordId,
+            fields: { [numberFieldId.toString()]: 99 },
+          },
+        ],
+        order: {
+          viewId: table.views()[0]!.id().toString(),
+          anchorId: recordId,
+          position: 'after',
+        },
+      })
+    );
+
+    expect(result.isOk()).toBe(true);
+    expect(coordination.calls).toEqual([]);
+    expect(coordination.releaseCount).toBe(0);
+  });
+
+  it('returns the coordination failure before reading table metadata', async () => {
+    const coordination = new RecordingTableSchemaCoordination(
+      domainError.infrastructure({
+        code: 'schema_coordination.acquire_failed',
+        message: 'Failed to acquire table schema coordination locks',
+      })
+    );
+    const { tableId, numberFieldId, tableRepository, handler } = setup(coordination);
+
+    const result = await handler.handle(
+      createContext(),
+      createCommand(selectorInput(tableId, { [numberFieldId.toString()]: 99 }))
+    );
+
+    expect(result._unsafeUnwrapErr().code).toBe('schema_coordination.acquire_failed');
+    expect(tableRepository.findOneCalls).toBe(0);
+    expect(coordination.releaseCount).toBe(0);
+  });
+
+  it('releases the lease when the bulk update fails', async () => {
+    const coordination = new RecordingTableSchemaCoordination();
+    const { tableId, numberFieldId, handler } = setup(coordination, { omitTable: true });
+
+    const result = await handler.handle(
+      createContext(),
+      createCommand(selectorInput(tableId, { [numberFieldId.toString()]: 99 }))
+    );
+
+    expect(result.isErr()).toBe(true);
+    expect(coordination.releaseCount).toBe(1);
+  });
+});

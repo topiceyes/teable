@@ -1,4 +1,4 @@
-import type { IRecord } from '@teable/core';
+import type { IFieldVo, IRecord } from '@teable/core';
 import { match } from 'ts-pattern';
 import { RawOpType } from '../../../share-db/interface';
 import type { IEventContext } from '../core-event';
@@ -15,7 +15,19 @@ type IRecordDeletePayload = { tableId: string; recordId: string | string[] };
 type IRecordUpdatePayload = {
   tableId: string;
   record: IChangeRecord | IChangeRecord[];
+  oldField: IFieldVo | undefined;
 };
+
+export function getFieldIdsFromRecord(record: IRecord | IRecord[]) {
+  const records = Array.isArray(record) ? record : [record];
+  const fieldIds: string[] = [];
+  for (const r of records) {
+    if (r?.fields) {
+      fieldIds.push(...Object.keys(r.fields));
+    }
+  }
+  return fieldIds;
+}
 
 export class RecordCreateEvent extends OpEvent<IRecordCreatePayload> {
   public readonly name = Events.TABLE_RECORD_CREATE;
@@ -39,8 +51,13 @@ export class RecordUpdateEvent extends OpEvent<IRecordUpdatePayload> {
   public readonly name = Events.TABLE_RECORD_UPDATE;
   public readonly rawOpType = RawOpType.Edit;
 
-  constructor(tableId: string, record: IChangeRecord | IChangeRecord[], context: IEventContext) {
-    super({ tableId, record }, context, Array.isArray(record));
+  constructor(
+    tableId: string,
+    record: IChangeRecord | IChangeRecord[],
+    oldField: IFieldVo | undefined,
+    context: IEventContext
+  ) {
+    super({ tableId, record, oldField }, context, Array.isArray(record));
   }
 }
 
@@ -60,8 +77,8 @@ export class RecordEventFactory {
         return new RecordDeleteEvent(tableId, recordId, context);
       })
       .with(Events.TABLE_RECORD_UPDATE, () => {
-        const { tableId, record } = payload as IRecordUpdatePayload;
-        return new RecordUpdateEvent(tableId, record, context);
+        const { tableId, record, oldField } = payload as IRecordUpdatePayload;
+        return new RecordUpdateEvent(tableId, record, oldField, context);
       })
       .otherwise(() => null);
   }

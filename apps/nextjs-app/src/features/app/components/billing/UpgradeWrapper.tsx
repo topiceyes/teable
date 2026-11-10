@@ -1,0 +1,285 @@
+import { useQuery } from '@tanstack/react-query';
+import { Role } from '@teable/core';
+import { BillingProductLevel, getSpaceById, getSubscriptionSummary } from '@teable/openapi';
+import { UsageLimitModalType, useUsageLimitModalStore } from '@teable/sdk/components/billing/store';
+import { ReactQueryKeys } from '@teable/sdk/config';
+import { useBase, useIsReadOnlyPreview } from '@teable/sdk/hooks';
+import type { Base } from '@teable/sdk/model';
+import { toast } from '@teable/ui-lib/shadcn/ui/sonner';
+import { useTranslation } from 'next-i18next';
+import { useMemo, useCallback, type ReactElement, cloneElement } from 'react';
+import { useBaseUsage } from '../../hooks/useBaseUsage';
+import { useBillingLevel } from '../../hooks/useBillingLevel';
+import { useAppSumoTierConfig, useBillingLevelConfig } from '../../hooks/useBillingLevelConfig';
+import { useIsCloud } from '../../hooks/useIsCloud';
+import { useIsCommunity } from '../../hooks/useIsCommunity';
+import { useIsEE } from '../../hooks/useIsEE';
+import { useUpgradeCtaEnabled } from '../../hooks/useUpgradeCtaEnabled';
+import { PRICING_URL } from './constant';
+
+interface IUpgradeWrapperRenderProps {
+  badge: ReactElement | null;
+  needsUpgrade: boolean;
+  isCommunity: boolean;
+  currentLevel?: BillingProductLevel;
+}
+
+// React 19 types ReactElement props as unknown, so cloneElement needs the injected prop shape spelled out
+interface IClickCaptureProps {
+  onClickCapture?: (e: Event) => void;
+}
+
+interface IUpgradeWrapperProps {
+  children?: ReactElement | ((props: IUpgradeWrapperRenderProps) => ReactElement);
+  spaceId?: string;
+  baseId?: string;
+  targetBillingLevel?: BillingProductLevel;
+  onUpgradeClick?: () => void;
+}
+
+const getBillingLevelWeight = (level?: BillingProductLevel): number => {
+  const levelMap: Record<BillingProductLevel, number> = {
+    [BillingProductLevel.Free]: 1,
+    [BillingProductLevel.Pro]: 2,
+    [BillingProductLevel.Business]: 3,
+    [BillingProductLevel.Enterprise]: 4,
+  };
+  return level ? levelMap[level] : 0;
+};
+
+const isLevelSufficient = (
+  currentLevel?: BillingProductLevel,
+  targetLevel?: BillingProductLevel
+): boolean => {
+  if (!targetLevel) return true;
+  return getBillingLevelWeight(currentLevel) >= getBillingLevelWeight(targetLevel);
+};
+
+// The upgrade affordance as data: badge element, upgrade-needed flag and click action.
+// Use it directly where JSX wrapping does not fit (e.g. config-driven menus); the
+// UpgradeWrapper component below is built on top of it.
+export const useUpgradeAction = (props: {
+  spaceId?: string;
+  targetBillingLevel?: BillingProductLevel;
+  onUpgradeClick?: () => void;
+}) => {
+  const { onUpgradeClick } = props;
+  let { spaceId, targetBillingLevel } = props;
+  const isCloud = useIsCloud();
+  const isCommunity = useIsCommunity();
+  const isEE = useIsEE();
+  const isReadOnlyPreview = useIsReadOnlyPreview();
+  const upgradeCtaEnabled = useUpgradeCtaEnabled();
+  const base = useBase() as Base | undefined;
+  const { t } = useTranslation('common');
+  const { openModal } = useUsageLimitModalStore();
+  spaceId = base?.spaceId ?? spaceId;
+  const baseId = base?.id;
+  // EE starts from business level
+  targetBillingLevel =
+    targetBillingLevel === BillingProductLevel.Pro && isEE
+      ? BillingProductLevel.Business
+      : targetBillingLevel;
+
+  const currentLevel = useBillingLevel(baseId ? { baseId } : { spaceId });
+
+  const { data: space } = useQuery({
+    queryKey: ReactQueryKeys.space(spaceId as string),
+    queryFn: ({ queryKey }) => getSpaceById(queryKey[1]).then((res) => res.data),
+    enabled: Boolean(!baseId) && Boolean(spaceId),
+  });
+
+  // Check if user is AppSumo
+  const { data: subscriptionSummary } = useQuery({
+    queryKey: ReactQueryKeys.subscriptionSummary(spaceId as string),
+    queryFn: () => getSubscriptionSummary(spaceId as string).then((res) => res.data),
+    enabled: isCloud && Boolean(spaceId) && Boolean(!baseId),
+  });
+
+  const baseUsage = useBaseUsage({ disabled: !baseId });
+  const appSumoTier = subscriptionSummary?.appSumoTier ?? baseUsage?.appSumoTier;
+  const isAppSumo = Boolean(appSumoTier);
+
+  // Get the target tier for AppSumo users based on target billing level
+  const targetAppSumoTier = useMemo(() => {
+    if (targetBillingLevel === BillingProductLevel.Business) {
+      return 3; // Tier 3 is the minimum for Business level
+    }
+    if (targetBillingLevel === BillingProductLevel.Pro) {
+      return 1; // Tier 1 is Pro level
+    }
+    return undefined;
+  }, [targetBillingLevel]);
+
+  const targetAppSumoTierConfig = useAppSumoTierConfig(
+    targetAppSumoTier as 1 | 2 | 3 | 4 | undefined
+  );
+
+  const isLevelSufficientMemo = useMemo(() => {
+    return isLevelSufficient(currentLevel, targetBillingLevel);
+  }, [currentLevel, targetBillingLevel]);
+
+  const isSpaceOwner = useMemo(() => {
+    if (baseId) {
+      return base?.role === Role.Owner;
+    }
+    return space?.role === Role.Owner;
+  }, [baseId, base?.role, space?.role]);
+
+  // In template/share preview mode, don't show upgrade prompts
+  // Allow all features to be displayed (similar to template preview)
+  const needsUpgrade =
+    !isReadOnlyPreview &&
+    currentLevel &&
+    !isLevelSufficientMemo &&
+    !!targetBillingLevel &&
+    !isCommunity;
+
+  const handleUpgradeClick = useCallback(() => {
+    // Native mobile WebView: the feature stays gated, but the click states the
+    // constraint instead of steering to a purchase (App Store 3.1.3).
+    if (!upgradeCtaEnabled) {
+      toast.warning(t('billing.unavailableInPlanTips'));
+      return;
+    }
+
+    if (onUpgradeClick) {
+      onUpgradeClick();
+      return;
+    }
+
+    // For AppSumo users, redirect to AppSumo account
+    if (isAppSumo) {
+      window.open('https://appsumo.com/account/products/', '_blank', 'noopener,noreferrer');
+      return;
+    }
+
+    if (isCloud) {
+      if (!spaceId) {
+        toast.error('Space ID is required for billing upgrade');
+        return;
+      }
+
+      if (!isSpaceOwner) {
+        toast.warning(t('billing.spaceSubscriptionModal.description'));
+        return;
+      }
+
+      openModal(UsageLimitModalType.Upgrade);
+    } else {
+      window.open(PRICING_URL, '_blank');
+    }
+  }, [upgradeCtaEnabled, isCloud, isAppSumo, spaceId, isSpaceOwner, t, openModal, onUpgradeClick]);
+
+  const billingConfig = useBillingLevelConfig(targetBillingLevel);
+
+  const badge = useMemo(() => {
+    // The badge is an "Upgrade to X" affordance, so it has no place in embed mode.
+    if (!needsUpgrade || !upgradeCtaEnabled) {
+      return null;
+    }
+
+    const badgeName =
+      isAppSumo && targetAppSumoTierConfig ? targetAppSumoTierConfig.name : billingConfig.name;
+    const badgeCls =
+      isAppSumo && targetAppSumoTierConfig
+        ? targetAppSumoTierConfig.tagCls
+        : billingConfig.upgradeTagCls;
+
+    return (
+      <span
+        className={`cursor-pointer rounded px-1 text-[10px] leading-[16px] ${badgeCls}`}
+        onClick={handleUpgradeClick}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            handleUpgradeClick();
+          }
+        }}
+        tabIndex={0}
+        role="button"
+        aria-label={`Upgrade to ${badgeName}`}
+      >
+        {badgeName}
+      </span>
+    );
+  }, [
+    needsUpgrade,
+    upgradeCtaEnabled,
+    isAppSumo,
+    targetAppSumoTierConfig,
+    billingConfig,
+    handleUpgradeClick,
+  ]);
+
+  return {
+    badge,
+    needsUpgrade: Boolean(needsUpgrade),
+    isCommunity,
+    isReadOnlyPreview,
+    currentLevel,
+    isLevelSufficient: isLevelSufficientMemo,
+    handleUpgradeClick,
+    upgradeCtaEnabled,
+  };
+};
+
+export const UpgradeWrapper: React.FC<IUpgradeWrapperProps> = ({
+  children,
+  spaceId,
+  targetBillingLevel,
+  onUpgradeClick,
+}) => {
+  const {
+    badge,
+    needsUpgrade,
+    isCommunity,
+    isReadOnlyPreview,
+    currentLevel,
+    isLevelSufficient: isLevelSufficientMemo,
+    handleUpgradeClick,
+  } = useUpgradeAction({ spaceId, targetBillingLevel, onUpgradeClick });
+
+  if (typeof children === 'function') {
+    const element = children({
+      badge,
+      needsUpgrade: Boolean(needsUpgrade),
+      isCommunity,
+      currentLevel,
+    });
+    return cloneElement(element as ReactElement<IClickCaptureProps>, {
+      onClickCapture: (e: Event) => {
+        if (!needsUpgrade) return;
+        e.preventDefault();
+        e.stopPropagation();
+        handleUpgradeClick();
+      },
+    });
+  }
+
+  if (!children) {
+    return badge;
+  }
+
+  // In template/share preview mode, always show children without upgrade prompts
+  if (isReadOnlyPreview) {
+    return children;
+  }
+
+  if (isCommunity) {
+    return null;
+  }
+
+  if (isLevelSufficientMemo) {
+    return children;
+  }
+
+  return cloneElement(children as ReactElement<IClickCaptureProps>, {
+    onClickCapture: (e: Event) => {
+      if (!needsUpgrade) return;
+      e.preventDefault();
+      e.stopPropagation();
+      handleUpgradeClick();
+    },
+  });
+};

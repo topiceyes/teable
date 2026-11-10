@@ -1,7 +1,6 @@
 import type { INestApplication } from '@nestjs/common';
-import type { ITableFullVo } from '@teable/core';
 import { ViewType } from '@teable/core';
-import type { ICreateBaseVo, ICreateSpaceVo } from '@teable/openapi';
+import type { ITableFullVo, ICreateBaseVo, ICreateSpaceVo } from '@teable/openapi';
 import {
   createBase,
   createSpace,
@@ -18,7 +17,7 @@ import {
 import {
   initApp,
   createView,
-  deleteTable,
+  permanentDeleteTable,
   getViews,
   getRecords,
   createRecords,
@@ -39,11 +38,16 @@ describe('order update', () => {
     const baseId = globalThis.testConfig.baseId;
     let table: ITableFullVo;
     beforeEach(async () => {
-      table = (await createTable(baseId, { name: 'table1' })).data;
+      table = (
+        await createTable(baseId, {
+          name: 'table1',
+          records: [{ fields: {} }, { fields: {} }, { fields: {} }],
+        })
+      ).data;
     });
 
     afterEach(async () => {
-      await deleteTable(baseId, table.id);
+      await permanentDeleteTable(baseId, table.id);
     });
 
     it('should update record order', async () => {
@@ -150,7 +154,7 @@ describe('order update', () => {
     });
 
     afterEach(async () => {
-      await deleteTable(baseId, table.id);
+      await permanentDeleteTable(baseId, table.id);
     });
 
     it('should update view order', async () => {

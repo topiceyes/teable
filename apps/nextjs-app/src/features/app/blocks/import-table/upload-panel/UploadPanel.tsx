@@ -1,11 +1,10 @@
-import type { SUPPORTEDTYPE } from '@teable/core';
 import { generateAttachmentId } from '@teable/core';
-import type { INotifyVo } from '@teable/openapi';
+import type { SUPPORTEDTYPE, INotifyVo } from '@teable/openapi';
 import { UploadType } from '@teable/openapi';
 import { AttachmentManager } from '@teable/sdk/components';
-import { Button, Spin } from '@teable/ui-lib';
+import { Spin, Button, cn } from '@teable/ui-lib';
+import { useTranslation } from 'next-i18next';
 import { useState } from 'react';
-import { useTranslation } from 'react-i18next';
 import { Process } from './Process';
 import { Trigger } from './Trigger';
 
@@ -23,17 +22,26 @@ const UploadPanel = (props: IUploadPanelProps) => {
   const { file, fileType, onChange, onFinished, onClose, analyzeLoading } = props;
   const { t } = useTranslation(['table']);
   const [process, setProcess] = useState(0);
+  const [isImporting, setIsImporting] = useState(false);
 
   return (
-    <div className="relative flex h-96 items-center justify-center">
+    <div
+      className={cn('relative flex h-72 items-center justify-center sm:h-80', {
+        'pointer-events-none': isImporting,
+      })}
+    >
       {!file ? (
         <Trigger
+          onBeforeUpload={() => {
+            setIsImporting(true);
+          }}
           fileType={fileType}
-          onChange={(file) => {
+          onChange={async (file) => {
+            setIsImporting(false);
             if (file) {
               attchmentManager.upload(
                 [{ id: generateAttachmentId(), instance: file }],
-                UploadType.Table,
+                UploadType.Import,
                 {
                   successCallback: (_, result) => {
                     onFinished?.(result);
@@ -47,8 +55,17 @@ const UploadPanel = (props: IUploadPanelProps) => {
             onChange(file);
           }}
         >
-          <div className="flex h-full cursor-pointer items-center justify-center rounded-sm border-2 border-dashed hover:border-secondary">
-            <Button variant="ghost">{t('table:import.tips.importWayTip')}</Button>
+          <div className="flex h-full items-center justify-center rounded-sm border-2 border-dashed hover:border-secondary">
+            {!isImporting ? (
+              <Button variant="ghost">{t('table:import.tips.importWayTip')}</Button>
+            ) : (
+              <div className="absolute flex size-full items-center justify-center bg-secondary opacity-90">
+                <span className="me-1 size-4 animate-spin">
+                  <Spin className="size-4" />
+                </span>
+                <span>{t('table:import.tips.importing')}</span>
+              </div>
+            )}
           </div>
         </Trigger>
       ) : (
@@ -56,7 +73,7 @@ const UploadPanel = (props: IUploadPanelProps) => {
           <Process file={file} onClose={onClose} process={process}></Process>
           {analyzeLoading && (
             <div className="absolute flex size-full items-center justify-center bg-secondary opacity-90">
-              <Spin className="mr-1 size-4" />
+              <Spin className="me-1 size-4" />
               <span>{t('table:import.tips.analyzing')}</span>
             </div>
           )}

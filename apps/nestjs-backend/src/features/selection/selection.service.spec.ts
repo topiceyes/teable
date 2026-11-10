@@ -2,7 +2,13 @@
 import { faker } from '@faker-js/faker';
 import type { TestingModule } from '@nestjs/testing';
 import { Test } from '@nestjs/testing';
-import type { IFieldOptionsVo, IFieldVo, IRecord } from '@teable/core';
+import type {
+  IDatetimeFormatting,
+  IFieldOptionsVo,
+  IFieldVo,
+  IMultiNumberShowAs,
+  ISingleLineTextFieldOptions,
+} from '@teable/core';
 import {
   CellValueType,
   Colors,
@@ -16,8 +22,7 @@ import {
   TIME_ZONE_LIST,
   defaultUserFieldOptions,
   getPermissions,
-  nullsToUndefined,
-  SpaceRole,
+  Role,
 } from '@teable/core';
 import { PrismaService } from '@teable/db-main-prisma';
 import { RangeType } from '@teable/openapi';
@@ -27,11 +32,11 @@ import type { DeepMockProxy } from 'vitest-mock-extended';
 import { mockDeep, mockReset } from 'vitest-mock-extended';
 import { GlobalModule } from '../../global/global.module';
 import type { IClsStore } from '../../types/cls';
-import { AggregationService } from '../aggregation/aggregation.service';
+import type { IAggregationService } from '../aggregation/aggregation.service.interface';
+import { AGGREGATION_SERVICE_SYMBOL } from '../aggregation/aggregation.service.symbol';
 import { FieldCreatingService } from '../field/field-calculate/field-creating.service';
 import { FieldSupplementService } from '../field/field-calculate/field-supplement.service';
 import { FieldService } from '../field/field.service';
-import type { IFieldInstance } from '../field/model/factory';
 import { createFieldInstanceByVo } from '../field/model/factory';
 import { RecordOpenApiService } from '../record/open-api/record-open-api.service';
 import { RecordService } from '../record/record.service';
@@ -47,10 +52,11 @@ describe('selectionService', () => {
   let fieldCreatingService: FieldCreatingService;
   let fieldSupplementService: FieldSupplementService;
   let clsService: ClsService<IClsStore>;
-  let aggregationService: AggregationService;
+  let aggregationService: IAggregationService;
+  let module: TestingModule;
 
   beforeEach(async () => {
-    const module: TestingModule = await Test.createTestingModule({
+    module = await Test.createTestingModule({
       imports: [GlobalModule, SelectionModule],
     })
       .overrideProvider(PrismaService)
@@ -64,13 +70,16 @@ describe('selectionService', () => {
     fieldCreatingService = module.get<FieldCreatingService>(FieldCreatingService);
     fieldSupplementService = module.get<FieldSupplementService>(FieldSupplementService);
     clsService = module.get<ClsService<IClsStore>>(ClsService);
-    aggregationService = module.get<AggregationService>(AggregationService);
+    aggregationService = module.get<IAggregationService>(AGGREGATION_SERVICE_SYMBOL);
 
     prismaService = module.get<PrismaService>(
       PrismaService
     ) as unknown as DeepMockProxy<PrismaService>;
     mockReset(prismaService);
   });
+
+  // GlobalModule opens Redis-backed queues; close them before the file is torn down.
+  afterEach(() => module.close());
 
   const tableId = 'table1';
   const viewId = 'view1';
@@ -113,6 +122,121 @@ describe('selectionService', () => {
 
       expect(result?.content).toEqual('1\t2\n1\t2');
     });
+
+    it('should return content from selected record and field ids', async () => {
+      const fields = [
+        { id: 'field1', name: 'Field 1', type: FieldType.SingleLineText },
+        { id: 'field2', name: 'Field 2', type: FieldType.SingleLineText },
+      ] as IFieldVo[];
+      const records = [
+        {
+          id: 'record2',
+          fields: {
+            field1: 'A2',
+            field2: 'B2',
+          },
+        },
+        {
+          id: 'record1',
+          fields: {
+            field1: 'A1',
+            field2: 'B1',
+          },
+        },
+      ];
+      vi.spyOn(selectionService, 'resolveRecordIdsBySelection').mockResolvedValue([
+        'record2',
+        'record1',
+      ]);
+      vi.spyOn(selectionService, 'resolveFieldsBySelection').mockResolvedValue(fields);
+      vi.spyOn(selectionService, 'getRecordsByIdsForFields').mockResolvedValue(records);
+
+      const result = await selectionService.copyById(tableId, {
+        viewId,
+        selection: {
+          recordIds: ['record2', 'record1'],
+          fieldIds: ['field1', 'field2'],
+        },
+      });
+
+      expect(selectionService.getRecordsByIdsForFields).toHaveBeenCalledWith(
+        tableId,
+        ['record2', 'record1'],
+        ['field1', 'field2']
+      );
+      expect(result.content).toEqual('A2\tB2\nA1\tB1');
+      expect(result.header).toEqual(fields);
+    });
+  });
+
+  describe('by-id payload record loader', () => {
+    const fields = [
+      {
+        id: 'field1',
+        name: 'Field 1',
+        type: FieldType.SingleLineText,
+        options: {},
+        dbFieldName: 'Field 1',
+        cellValueType: CellValueType.String,
+        dbFieldType: DbFieldType.Text,
+      },
+    ] as IFieldVo[];
+
+    it('uses a supplied record loader for clear payload preparation', async () => {
+      const recordLoader = vi.fn().mockResolvedValue([
+        { id: 'record2', fields: { field1: 'second' } },
+        { id: 'record1', fields: { field1: 'first' } },
+      ]);
+      vi.spyOn(selectionService, 'resolveFieldsBySelection').mockResolvedValue(fields);
+      const legacyLoader = vi.spyOn(selectionService, 'getRecordsByIdsForFields');
+
+      const result = await selectionService.buildClearByIdUpdatePayload(
+        tableId,
+        { selection: { recordIds: ['record2', 'record1'], fieldIds: ['field1'] } },
+        { recordIds: ['record2', 'record1'], recordLoader }
+      );
+
+      expect(recordLoader).toHaveBeenCalledWith(tableId, ['record2', 'record1'], ['field1']);
+      expect(legacyLoader).not.toHaveBeenCalled();
+      expect(result.recordIds).toEqual(['record2', 'record1']);
+    });
+
+    it('uses a supplied record loader for paste payload preparation', async () => {
+      const recordLoader = vi.fn().mockResolvedValue([
+        { id: 'record2', fields: { field1: 'second' } },
+        { id: 'record1', fields: { field1: 'first' } },
+      ]);
+      vi.spyOn(selectionService, 'resolveFieldsBySelection').mockResolvedValue(fields);
+      const legacyLoader = vi.spyOn(selectionService, 'getRecordsByIdsForFields');
+
+      const result = await selectionService.buildPasteByIdPayload(
+        tableId,
+        {
+          selection: { recordIds: ['record2', 'record1'], fieldIds: ['field1'] },
+          content: [['new second'], ['new first']],
+        },
+        { recordIds: ['record2', 'record1'], recordLoader }
+      );
+
+      expect(recordLoader).toHaveBeenCalledWith(tableId, ['record2', 'record1'], ['field1']);
+      expect(legacyLoader).not.toHaveBeenCalled();
+      expect(result.recordIds).toEqual(['record2', 'record1']);
+    });
+
+    it('keeps the legacy loader as the default', async () => {
+      vi.spyOn(selectionService, 'resolveFieldsBySelection').mockResolvedValue(fields);
+      const legacyLoader = vi
+        .spyOn(selectionService, 'getRecordsByIdsForFields')
+        .mockResolvedValue([{ id: 'record1', fields: { field1: 'first' } }]);
+
+      await selectionService.buildClearByIdUpdatePayload(
+        tableId,
+        { selection: { recordIds: ['record1'], fieldIds: ['field1'] } },
+        { recordIds: ['record1'] }
+      );
+
+      expect(legacyLoader).toHaveBeenCalledWith(tableId, ['record1'], ['field1']);
+    });
   });
 
   describe('parseCopyContent', () => {
@@ -145,7 +269,13 @@ describe('selectionService', () => {
         {
           user: {} as any,
           tx: {},
-          permissions: getPermissions(SpaceRole.Owner),
+          origin: {
+            ip: '127.0.0.1',
+            byApi: false,
+            userAgent: 'test',
+            referer: 'test',
+          },
+          permissions: getPermissions(Role.Owner),
         },
         async () => selectionService['calculateExpansion'](tableSize, cell, tableDataSize)
       );
@@ -156,7 +286,13 @@ describe('selectionService', () => {
         {
           user: {} as any,
           tx: {},
-          permissions: getPermissions(SpaceRole.Editor),
+          origin: {
+            ip: '127.0.0.1',
+            byApi: false,
+            userAgent: 'test',
+            referer: 'test',
+          },
+          permissions: getPermissions(Role.Editor),
         },
         async () => selectionService['calculateExpansion'](tableSize, cell, tableDataSize)
       );
@@ -164,45 +300,6 @@ describe('selectionService', () => {
       // Verify the result
       expect(result).toEqual(expectedExpansion);
       expect(resultNoPermission).toEqual([0, expectedExpansion[1]]);
-    });
-  });
-
-  describe('expandRows', () => {
-    it('should expand the rows and create new records', async () => {
-      // Mock dependencies
-      const tableId = 'table1';
-      const numRowsToExpand = 3;
-      const expectedRecords = [
-        { id: 'record1', fields: {} },
-        { id: 'record2', fields: {} },
-      ] as IRecord[];
-      vi.spyOn(recordOpenApiService, 'createRecords').mockResolvedValueOnce({
-        records: expectedRecords,
-      });
-
-      // Perform expanding rows
-      const result = await selectionService['expandRows']({
-        tableId,
-        numRowsToExpand,
-      });
-
-      // Verify the multipleCreateRecords call
-      expect(recordOpenApiService.createRecords).toHaveBeenCalledTimes(1);
-      expect(recordOpenApiService.createRecords).toHaveBeenCalledWith(tableId, {
-        records: Array.from({ length: numRowsToExpand }, () => ({ fields: {} })),
-      });
-
-      // Verify the result
-      expect(result).toEqual(expectedRecords);
-    });
-
-    it('should return empty array when numRowsToExpand is 0', async () => {
-      const result = await selectionService['expandRows']({
-        tableId: 'table1',
-        numRowsToExpand: 0,
-      });
-
-      expect(result).toEqual([]);
     });
   });
 
@@ -238,150 +335,77 @@ describe('selectionService', () => {
     });
   });
 
-  describe('collectionAttachment', () => {
-    it('should return attachments based on tokens', async () => {
-      const fields: IFieldInstance[] = [
-        createFieldInstanceByVo({
-          id: '1',
-          name: 'attachments',
-          type: FieldType.Attachment,
-          options: {},
-          dbFieldName: 'attachments',
-          cellValueType: CellValueType.String,
-          dbFieldType: DbFieldType.Json,
-        }),
-      ];
-      const tableData: string[][] = [
-        ['file1.png (token1),file2.png (token2)'],
-        ['file3.png (token3)'],
-      ];
-
-      const mockAttachment: any[] = [
-        {
-          token: 'token1',
-          path: '',
-          size: 1,
-          mimetype: 'image/png',
-          width: null,
-          height: null,
-        },
-        {
-          token: 'token2',
-          path: '',
-          size: 1,
-          mimetype: 'image/png',
-          width: 10,
-          height: 10,
-        },
-        {
-          token: 'token3',
-          path: '',
-          size: 1,
-          mimetype: 'image/png',
-          width: 10,
-          height: 10,
-        },
-      ];
-
-      prismaService.attachments.findMany.mockResolvedValue(mockAttachment);
-
-      const result = await selectionService['collectionAttachment']({
-        tableData,
-        fields,
-      });
-
-      expect(prismaService.attachments.findMany).toHaveBeenCalledWith({
-        where: {
-          token: {
-            in: ['token1', 'token2', 'token3'],
-          },
-        },
-        select: {
-          token: true,
-          size: true,
-          mimetype: true,
-          width: true,
-          height: true,
-          path: true,
-        },
-      });
-      // Assert the result based on the mocked attachments
-      expect(result).toEqual(nullsToUndefined(mockAttachment));
-    });
-  });
-
   describe('fillCells', () => {
-    it('should fill the cells with provided table data', async () => {
-      // Mock data
-      const tableData = [
-        ['A1', 'B1', 'C1'],
-        ['A2', 'B2', 'C2'],
-        ['A3', 'B3', 'C3'],
+    it('should return updated records with new fields merged when newRecords is provided', () => {
+      const oldRecords = [
+        { id: '1', fields: { a: 1, b: 2 } },
+        { id: '2', fields: { c: 3, d: 4 } },
       ];
+      const newRecords = [{ fields: { b: 20 } }, { fields: { d: 40, e: 5 } }];
 
-      const fields = [
-        {
-          id: 'field1',
-          name: 'Field 1',
-          type: FieldType.SingleLineText,
-          options: {},
-          dbFieldName: 'Field 1',
-          cellValueType: CellValueType.String,
-          dbFieldType: DbFieldType.Text,
-          columnMeta: {},
-        },
-        {
-          id: 'field2',
-          name: 'Field 2',
-          type: FieldType.SingleLineText,
-          options: {},
-          dbFieldName: 'Field 2',
-          cellValueType: CellValueType.String,
-          dbFieldType: DbFieldType.Text,
-          columnMeta: {},
-        },
-        {
-          id: 'field3',
-          name: 'Field 3',
-          type: FieldType.SingleLineText,
-          options: {},
-          dbFieldName: 'Field 3',
-          cellValueType: CellValueType.String,
-          dbFieldType: DbFieldType.Text,
-          columnMeta: {},
-        },
-      ].map(createFieldInstanceByVo);
+      const result = selectionService['fillCells'](oldRecords, newRecords);
 
-      const records = [
-        { id: 'record1', fields: {} },
-        { id: 'record2', fields: {} },
-        { id: 'record3', fields: {} },
-      ];
-
-      // Execute the method
-      const updateRecordsRo = await selectionService['fillCells']({
-        tableId,
-        tableData,
-        fields,
-        records,
-      });
-
-      expect(updateRecordsRo).toEqual({
+      expect(result).toEqual({
         fieldKeyType: FieldKeyType.Id,
         typecast: true,
         records: [
-          {
-            id: records[0].id,
-            fields: { field1: 'A1', field2: 'B1', field3: 'C1' },
-          },
-          {
-            id: records[1].id,
-            fields: { field1: 'A2', field2: 'B2', field3: 'C2' },
-          },
-          {
-            id: records[2].id,
-            fields: { field1: 'A3', field2: 'B3', field3: 'C3' },
-          },
+          { id: '1', fields: { b: 20 } },
+          { id: '2', fields: { d: 40, e: 5 } },
+        ],
+      });
+    });
+
+    it('should return records with empty fields when newRecords is undefined', () => {
+      const oldRecords = [
+        { id: '1', fields: { a: 1, b: 2 } },
+        { id: '2', fields: { c: 3, d: 4 } },
+      ];
+
+      const result = selectionService['fillCells'](oldRecords);
+
+      expect(result).toEqual({
+        fieldKeyType: FieldKeyType.Id,
+        typecast: true,
+        records: [
+          { id: '1', fields: {} },
+          { id: '2', fields: {} },
+        ],
+      });
+    });
+
+    it('should return records with empty fields when newRecords is an empty array', () => {
+      const oldRecords = [
+        { id: '1', fields: { a: 1, b: 2 } },
+        { id: '2', fields: { c: 3, d: 4 } },
+      ];
+
+      const result = selectionService['fillCells'](oldRecords, []);
+
+      expect(result).toEqual({
+        fieldKeyType: FieldKeyType.Id,
+        typecast: true,
+        records: [
+          { id: '1', fields: {} },
+          { id: '2', fields: {} },
+        ],
+      });
+    });
+
+    it('should merge fields correctly when newRecords has fewer elements', () => {
+      const oldRecords = [
+        { id: '1', fields: { a: 1, b: 2 } },
+        { id: '2', fields: { c: 3, d: 4 } },
+      ];
+      const newRecords = [{ fields: { b: 20 } }];
+
+      const result = selectionService['fillCells'](oldRecords, newRecords);
+
+      expect(result).toEqual({
+        fieldKeyType: FieldKeyType.Id,
+        typecast: true,
+        records: [
+          { id: '1', fields: { b: 20 } },
+          { id: '2', fields: {} },
         ],
       });
     });
@@ -544,11 +568,6 @@ describe('selectionService', () => {
         },
       ].map(createFieldInstanceByVo);
 
-      const mockNewRecords = [
-        { id: 'newRecordId1', fields: {} },
-        { id: 'newRecordId2', fields: {} },
-      ];
-
       vi.spyOn(selectionService as any, 'parseCopyContent').mockReturnValue(tableData);
 
       vi.spyOn(aggregationService, 'performRowCount').mockResolvedValue({
@@ -560,12 +579,11 @@ describe('selectionService', () => {
 
       vi.spyOn(fieldService, 'getFieldInstances').mockResolvedValue(mockFields);
 
-      vi.spyOn(selectionService as any, 'expandRows').mockResolvedValue({
-        records: mockNewRecords,
-      });
       vi.spyOn(selectionService as any, 'expandColumns').mockResolvedValue(mockNewFields);
 
-      vi.spyOn(recordOpenApiService, 'updateRecords').mockResolvedValue(null as any);
+      vi.spyOn(recordOpenApiService, 'updateRecords').mockResolvedValue({} as any);
+
+      vi.spyOn(recordOpenApiService, 'createRecords').mockResolvedValue({ records: [] } as any);
 
       prismaService.$tx.mockImplementation(async (fn, _options) => {
         return await fn(prismaService);
@@ -576,7 +594,13 @@ describe('selectionService', () => {
         {
           user: {} as any,
           tx: {},
-          permissions: getPermissions(SpaceRole.Owner),
+          origin: {
+            ip: '127.0.0.1',
+            byApi: false,
+            userAgent: 'test',
+            referer: 'test',
+          },
+          permissions: getPermissions(Role.Owner),
         },
         async () => await selectionService.paste(tableId, { viewId, ...pasteRo })
       );
@@ -584,13 +608,17 @@ describe('selectionService', () => {
       // Assertions
       expect(selectionService['parseCopyContent']).toHaveBeenCalledWith(content);
       expect(aggregationService.performRowCount).toHaveBeenCalledWith(tableId, { viewId });
-      expect(recordService.getRecordsFields).toHaveBeenCalledWith(tableId, {
-        viewId,
-        skip: 1,
-        projection: ['fieldId3'],
-        take: tableData.length,
-        fieldKeyType: 'id',
-      });
+      expect(recordService.getRecordsFields).toHaveBeenCalledWith(
+        tableId,
+        {
+          viewId,
+          skip: 1,
+          projection: ['fieldId3'],
+          take: tableData.length,
+          fieldKeyType: 'id',
+        },
+        true
+      );
 
       expect(fieldService.getFieldInstances).toHaveBeenCalledWith(tableId, {
         viewId,
@@ -601,11 +629,6 @@ describe('selectionService', () => {
         tableId,
         header: mockFields,
         numColsToExpand: 2,
-      });
-
-      expect(selectionService['expandRows']).toHaveBeenCalledWith({
-        tableId,
-        numRowsToExpand: 2,
       });
 
       expect(result).toEqual([
@@ -645,10 +668,12 @@ describe('selectionService', () => {
         fieldKeyType: FieldKeyType.Id,
         records: [{ id: 'record1', fields: { field1: null } }],
       };
+      const expectedFieldIds = fields.map((field) => field.id);
 
       // Mock the required methods from the service
       selectionService['getSelectionCtxByRange'] = vi.fn().mockResolvedValue({ fields, records });
-      selectionService['fillCells'] = vi.fn().mockResolvedValue(updateRecordsRo);
+      selectionService['tableDataToRecords'] = vi.fn().mockReturnValue([{ fields: {} }]);
+      selectionService['fillCells'] = vi.fn().mockReturnValue(updateRecordsRo);
       recordOpenApiService.updateRecords = vi.fn().mockResolvedValue(null);
 
       // Call the clear method
@@ -659,13 +684,12 @@ describe('selectionService', () => {
         viewId,
         ranges: clearRo.ranges,
       });
-      expect(selectionService['fillCells']).toHaveBeenCalledWith({
+      expect(selectionService['fillCells']).toHaveBeenCalledWith(records, [{ fields: {} }]);
+      expect(recordOpenApiService.updateRecords).toHaveBeenCalledWith(
         tableId,
-        tableData: [],
-        fields,
-        records,
-      });
-      expect(recordOpenApiService.updateRecords).toHaveBeenCalledWith(tableId, updateRecordsRo);
+        { ...updateRecordsRo, fieldIds: expectedFieldIds },
+        undefined
+      );
     });
   });
 
@@ -700,7 +724,7 @@ describe('selectionService', () => {
           date: 'MM/DD/YYYY',
           time: 'HH:mm',
           timeZone: TIME_ZONE_LIST[0],
-        },
+        } as IDatetimeFormatting,
       };
 
       const result = selectionService['optionsRoToVoByCvType'](cellValueType, options);
@@ -717,7 +741,7 @@ describe('selectionService', () => {
         showAs: {
           type: faker.helpers.arrayElement(Object.values(SingleLineTextDisplayType)),
         },
-      };
+      } as ISingleLineTextFieldOptions;
 
       const result = selectionService['optionsRoToVoByCvType'](cellValueType, options);
 
@@ -819,7 +843,7 @@ describe('selectionService', () => {
             color: Colors.Blue,
             showValue: true,
             maxValue: 100,
-          },
+          } as IMultiNumberShowAs,
         },
         dbFieldType: DbFieldType.Text,
         dbFieldName: '',
@@ -876,7 +900,7 @@ describe('selectionService', () => {
             color: Colors.Blue,
             showValue: true,
             maxValue: 100,
-          },
+          } as IMultiNumberShowAs,
         },
         dbFieldType: DbFieldType.Integer,
         dbFieldName: '',
@@ -979,6 +1003,68 @@ describe('selectionService', () => {
         type: field.type,
         options: field.options,
       });
+    });
+  });
+
+  describe('tableDataToRecords', () => {
+    it('should return the cells with provided table data', async () => {
+      // Mock data
+      const tableData = [
+        ['A1', 'B1', 'C1'],
+        ['A2', 'B2', 'C2'],
+        ['A3', 'B3', 'C3'],
+      ];
+
+      const fields = [
+        {
+          id: 'field1',
+          name: 'Field 1',
+          type: FieldType.SingleLineText,
+          options: {},
+          dbFieldName: 'Field 1',
+          cellValueType: CellValueType.String,
+          dbFieldType: DbFieldType.Text,
+          columnMeta: {},
+        },
+        {
+          id: 'field2',
+          name: 'Field 2',
+          type: FieldType.SingleLineText,
+          options: {},
+          dbFieldName: 'Field 2',
+          cellValueType: CellValueType.String,
+          dbFieldType: DbFieldType.Text,
+          columnMeta: {},
+        },
+        {
+          id: 'field3',
+          name: 'Field 3',
+          type: FieldType.SingleLineText,
+          options: {},
+          dbFieldName: 'Field 3',
+          cellValueType: CellValueType.String,
+          dbFieldType: DbFieldType.Text,
+          columnMeta: {},
+        },
+      ].map(createFieldInstanceByVo);
+
+      // Execute the method
+      const updateRecordsRo = selectionService['tableDataToRecords']({
+        tableData,
+        fields,
+      });
+
+      expect(updateRecordsRo).toEqual([
+        {
+          fields: { field1: 'A1', field2: 'B1', field3: 'C1' },
+        },
+        {
+          fields: { field1: 'A2', field2: 'B2', field3: 'C2' },
+        },
+        {
+          fields: { field1: 'A3', field2: 'B3', field3: 'C3' },
+        },
+      ]);
     });
   });
 });

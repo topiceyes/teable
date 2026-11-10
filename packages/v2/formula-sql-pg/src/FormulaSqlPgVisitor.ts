@@ -1,0 +1,256 @@
+/* eslint-disable sonarjs/no-duplicate-string */
+import type {
+  BinaryOpContext,
+  BooleanLiteralContext,
+  BracketsContext,
+  DecimalLiteralContext,
+  ExprContext,
+  FieldReferenceCurlyContext,
+  FunctionCallContext,
+  IntegerLiteralContext,
+  LeftWhitespaceOrCommentsContext,
+  RightWhitespaceOrCommentsContext,
+  RootContext,
+  StringLiteralContext,
+  UnaryOpContext,
+  FormulaVisitor,
+} from '@teable/formula';
+import { AbstractParseTreeVisitor, extractFieldReferenceId } from '@teable/formula';
+import { normalizeFunctionNameAlias } from '@teable/v2-core';
+
+import { FormulaExpressionGraph, type FormulaExpressionNode } from './FormulaExpressionGraph';
+import type { FormulaSqlPgTranslator } from './FormulaSqlPgTranslator';
+import { buildErrorLiteral, sqlStringLiteral } from './PgSqlHelpers';
+import { makeExpr, type SqlExpr } from './SqlExpression';
+
+const DEFAULT_ERROR = buildErrorLiteral('INTERNAL', 'unexpected');
+export class FormulaSqlPgVisitor
+  extends AbstractParseTreeVisitor<FormulaExpressionNode>
+  implements FormulaVisitor<FormulaExpressionNode>
+{
+  constructor(
+    private readonly translator: FormulaSqlPgTranslator,
+    private readonly graph: FormulaExpressionGraph = new FormulaExpressionGraph()
+  ) {
+    super();
+  }
+  private readonly resolved = new Map<ExprContext, FormulaExpressionNode>();
+  private intern(node: Parameters<FormulaExpressionGraph['intern']>[0]): FormulaExpressionNode {
+    return this.graph.intern({ ...node, timeZone: this.translator.timeZone });
+  }
+
+  private leaf(expression: SqlExpr): FormulaExpressionNode {
+    return this.intern({ kind: 'leaf', expression });
+  }
+
+  protected defaultResult(): FormulaExpressionNode {
+    return this.leaf(makeExpr('NULL', 'unknown', false, 'TRUE', DEFAULT_ERROR));
+  }
+
+  visitRoot(ctx: RootContext): FormulaExpressionNode {
+    const pending: Array<{ context: ExprContext; expanded: boolean }> = [
+      { context: ctx.expr(), expanded: false },
+    ];
+    while (pending.length) {
+      const entry = pending.pop()!;
+      if (this.resolved.has(entry.context)) continue;
+      if (!entry.expanded) {
+        pending.push({ context: entry.context, expanded: true });
+        const children = (
+          entry.context as ExprContext & { expr?: () => ExprContext | ExprContext[] }
+        ).expr?.();
+        if (Array.isArray(children)) {
+          for (let index = children.length - 1; index >= 0; index--)
+            pending.push({ context: children[index], expanded: false });
+        } else if (children) pending.push({ context: children, expanded: false });
+      } else {
+        this.resolved.set(entry.context, entry.context.accept(this));
+      }
+    }
+    return this.resolved.get(ctx.expr())!;
+  }
+
+  visitStringLiteral(ctx: StringLiteralContext): FormulaExpressionNode {
+    const cached = this.resolved.get(ctx);
+    if (cached) return cached;
+    const quotedString = ctx.text;
+    this.graph.budget.allocate(Math.max(0, this.graph.budget.bytes(quotedString) - 2));
+    const rawString = quotedString.slice(1, -1);
+    const unescapedString = this.unescapeString(rawString);
+    return this.leaf(
+      makeExpr(sqlStringLiteral(unescapedString, this.graph.budget), 'string', false)
+    );
+  }
+
+  visitIntegerLiteral(ctx: IntegerLiteralContext): FormulaExpressionNode {
+    const cached = this.resolved.get(ctx);
+    if (cached) return cached;
+    const value = Number.parseInt(ctx.text, 10);
+    return this.leaf(makeExpr(Number.isFinite(value) ? value.toString() : '0', 'number', false));
+  }
+
+  visitDecimalLiteral(ctx: DecimalLiteralContext): FormulaExpressionNode {
+    const cached = this.resolved.get(ctx);
+    if (cached) return cached;
+    const value = Number(ctx.text);
+    return this.leaf(makeExpr(Number.isFinite(value) ? value.toString() : '0', 'number', false));
+  }
+
+  visitBooleanLiteral(ctx: BooleanLiteralContext): FormulaExpressionNode {
+    const cached = this.resolved.get(ctx);
+    if (cached) return cached;
+    const value = ctx.text.toUpperCase() === 'TRUE' ? 'TRUE' : 'FALSE';
+    return this.leaf(makeExpr(value, 'boolean', false));
+  }
+
+  visitLeftWhitespaceOrComments(ctx: LeftWhitespaceOrCommentsContext): FormulaExpressionNode {
+    return this.visitWrappedExpression(ctx);
+  }
+
+  visitRightWhitespaceOrComments(ctx: RightWhitespaceOrCommentsContext): FormulaExpressionNode {
+    return this.visitWrappedExpression(ctx);
+  }
+
+  visitBrackets(ctx: BracketsContext): FormulaExpressionNode {
+    return this.visitWrappedExpression(ctx);
+  }
+
+  private visitWrappedExpression(
+    ctx: LeftWhitespaceOrCommentsContext | RightWhitespaceOrCommentsContext | BracketsContext
+  ): FormulaExpressionNode {
+    return this.resolved.get(ctx) ?? ctx.expr().accept(this);
+  }
+
+  visitUnaryOp(ctx: UnaryOpContext): FormulaExpressionNode {
+    const cached = this.resolved.get(ctx);
+    if (cached) return cached;
+    const operand = ctx.expr().accept(this);
+    if (ctx.MINUS()) {
+      return this.intern({ kind: 'unary', operator: 'minus', operand });
+    }
+    return this.leaf(makeExpr('NULL', 'unknown', false, 'TRUE', DEFAULT_ERROR));
+  }
+
+  visitBinaryOp(ctx: BinaryOpContext): FormulaExpressionNode {
+    const cached = this.resolved.get(ctx);
+    if (cached) return cached;
+    const left = ctx.expr(0).accept(this);
+    const right = ctx.expr(1).accept(this);
+
+    if (ctx.PLUS()) {
+      return this.intern({ kind: 'binary', operator: '+', left, right });
+    }
+    if (ctx.MINUS()) {
+      return this.intern({ kind: 'binary', operator: '-', left, right });
+    }
+    if (ctx.STAR()) {
+      return this.intern({ kind: 'binary', operator: '*', left, right });
+    }
+    if (ctx.SLASH()) {
+      return this.intern({ kind: 'binary', operator: '/', left, right });
+    }
+    if (ctx.PERCENT()) {
+      return this.intern({ kind: 'binary', operator: '%', left, right });
+    }
+    if (ctx.EQUAL()) {
+      return this.intern({ kind: 'binary', operator: '=', left, right });
+    }
+    if (ctx.BANG_EQUAL()) {
+      return this.intern({ kind: 'binary', operator: '<>', left, right });
+    }
+    if (ctx.GT()) {
+      return this.intern({ kind: 'binary', operator: '>', left, right });
+    }
+    if (ctx.GTE()) {
+      return this.intern({ kind: 'binary', operator: '>=', left, right });
+    }
+    if (ctx.LT()) {
+      return this.intern({ kind: 'binary', operator: '<', left, right });
+    }
+    if (ctx.LTE()) {
+      return this.intern({ kind: 'binary', operator: '<=', left, right });
+    }
+    if (ctx.PIPE_PIPE()) {
+      return this.intern({ kind: 'binary', operator: 'OR', left, right });
+    }
+    if (ctx.AMP_AMP()) {
+      return this.intern({ kind: 'binary', operator: 'AND', left, right });
+    }
+    if (ctx.AMP()) {
+      return this.intern({ kind: 'binary', operator: '&', left, right });
+    }
+
+    return this.leaf(makeExpr('NULL', 'unknown', false, 'TRUE', DEFAULT_ERROR));
+  }
+
+  visitFieldReferenceCurly(ctx: FieldReferenceCurlyContext): FormulaExpressionNode {
+    const cached = this.resolved.get(ctx);
+    if (cached) return cached;
+    const normalizedFieldId = extractFieldReferenceId(ctx);
+    const rawToken = ctx.text;
+    const fallback = rawToken?.slice(1, -1)?.trim() ?? '';
+    const fieldId = normalizedFieldId ?? fallback;
+    if (!fieldId) {
+      return this.leaf(
+        makeExpr(
+          'NULL',
+          'unknown',
+          false,
+          'TRUE',
+          buildErrorLiteral('REF', 'invalid_field', this.graph.budget)
+        )
+      );
+    }
+
+    const resolved = this.translator.resolveFieldNode(fieldId, this.graph);
+    if (resolved.isErr()) {
+      return this.leaf(
+        makeExpr(
+          'NULL',
+          'unknown',
+          false,
+          'TRUE',
+          buildErrorLiteral('REF', 'missing_field', this.graph.budget)
+        )
+      );
+    }
+    return resolved.value;
+  }
+
+  visitFunctionCall(ctx: FunctionCallContext): FormulaExpressionNode {
+    const cached = this.resolved.get(ctx);
+    if (cached) return cached;
+    const rawName = ctx.func_name().text.toUpperCase();
+    const normalized = normalizeFunctionNameAlias(rawName);
+    const args = ctx.expr().map((exprCtx: ExprContext) => exprCtx.accept(this));
+    return this.intern({ kind: 'call', name: normalized, args });
+  }
+
+  private unescapeString(str: string): string {
+    this.graph.budget.allocate(this.graph.budget.bytes(str));
+    return str.replace(/\\(.)/g, (_match, char: string) => {
+      switch (char) {
+        case 'n':
+          return '\n';
+        case 'r':
+          return '\r';
+        case 't':
+          return '\t';
+        case 'b':
+          return '\b';
+        case 'f':
+          return '\f';
+        case 'v':
+          return '\v';
+        case '\\':
+          return '\\';
+        case '"':
+          return '"';
+        case "'":
+          return "'";
+        default:
+          return this.graph.budget.sql`\\${char}`;
+      }
+    });
+  }
+}

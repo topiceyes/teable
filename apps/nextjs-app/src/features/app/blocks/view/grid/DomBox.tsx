@@ -1,17 +1,19 @@
-import { GridTooltip } from '@teable/sdk/components';
+import { GridTooltip, UserInfoPopover } from '@teable/sdk/components';
 import type { FC } from 'react';
-import { RecordMenu, FieldMenu, FieldSetting, StatisticMenu } from './components';
+import { RecordMenu, FieldMenu, FieldSetting, StatisticMenu, GroupHeaderMenu } from './components';
 
 export const DomBox: FC<{ id?: string }> = (props) => {
   const { id } = props;
 
   return (
     <>
-      {<FieldMenu />}
-      {<RecordMenu />}
-      {<FieldSetting />}
-      {<StatisticMenu />}
-      {<GridTooltip id={id} />}
+      <FieldMenu />
+      <RecordMenu />
+      <GroupHeaderMenu />
+      <FieldSetting />
+      <StatisticMenu />
+      <GridTooltip id={id} />
+      <UserInfoPopover id={id} />
     </>
   );
 };

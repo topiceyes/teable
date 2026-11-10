@@ -25,11 +25,35 @@ describe('FieldConvertingService', () => {
         {
           formatting: 'italic',
           showAs: 'number',
+          filter: {
+            conjunction: 'and',
+            filterSet: [
+              {
+                fieldId: 'fldxxxxxxx01',
+                operator: 'is',
+                value: 'x',
+              },
+            ],
+          },
+          filterByViewId: 'viewxxxxxxx01',
+          visibleFieldIds: ['fldxxxxxxx01'],
           anotherKey: 'anotherKey',
         },
         {
           formatting: 'bold',
           showAs: 'text',
+          filter: {
+            conjunction: 'and',
+            filterSet: [
+              {
+                fieldId: 'fldxxxxxxx02',
+                operator: 'is',
+                value: 'x',
+              },
+            ],
+          },
+          filterByViewId: 'viewxxxxxxx02',
+          visibleFieldIds: ['fldxxxxxxx02'],
           otherKey: 'otherKey',
         }
       )
@@ -43,11 +67,35 @@ describe('FieldConvertingService', () => {
         {
           formatting: 'italic',
           showAs: 'number',
+          filter: {
+            conjunction: 'and',
+            filterSet: [
+              {
+                fieldId: 'fldxxxxxxx01',
+                operator: 'is',
+                value: 'x',
+              },
+            ],
+          },
+          filterByViewId: 'viewxxxxxxx01',
+          visibleFieldIds: ['fldxxxxxxx01'],
           anotherKey: 'anotherKey',
         },
         {
           formatting: 'bold',
           showAs: 'text',
+          filter: {
+            conjunction: 'and',
+            filterSet: [
+              {
+                fieldId: 'fldxxxxxxx02',
+                operator: 'is',
+                value: 'x',
+              },
+            ],
+          },
+          filterByViewId: 'viewxxxxxxx02',
+          visibleFieldIds: ['fldxxxxxxx02'],
           otherKey: 'otherKey',
         },
         true
@@ -57,6 +105,12 @@ describe('FieldConvertingService', () => {
       otherKey: null,
       formatting: null,
       showAs: null,
+      filter: null,
+      filterByViewId: null,
+      visibleFieldIds: null,
+      sort: null,
+      limit: null,
+      defaultValue: null,
     });
 
     expect(
@@ -64,11 +118,35 @@ describe('FieldConvertingService', () => {
         {
           formatting: 'italic',
           showAs: 'number',
+          filter: {
+            conjunction: 'and',
+            filterSet: [
+              {
+                fieldId: 'fldxxxxxxx01',
+                operator: 'is',
+                value: 'x',
+              },
+            ],
+          },
+          filterByViewId: 'viewxxxxxxx01',
+          visibleFieldIds: ['fldxxxxxxx01'],
           otherKey: 'newOtherKey',
         },
         {
           formatting: 'bold',
           showAs: 'text',
+          filter: {
+            conjunction: 'and',
+            filterSet: [
+              {
+                fieldId: 'fldxxxxxxx02',
+                operator: 'is',
+                value: 'x',
+              },
+            ],
+          },
+          filterByViewId: 'viewxxxxxxx02',
+          visibleFieldIds: ['fldxxxxxxx02'],
           otherKey: 'oldOtherKey',
         }
       )

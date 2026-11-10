@@ -1,0 +1,2700 @@
+import { PostgresUnitOfWorkTransaction } from '@teable/v2-adapter-db-postgres-shared';
+import {
+  ActorId,
+  BaseId,
+  DbFieldName,
+  DbTableName,
+  FieldId,
+  FieldName,
+  FormulaExpression,
+  LinkFieldConfig,
+  RecordByIdsSpec,
+  RecordId,
+  RecordsBatchUpdated,
+  Table,
+  TableRecord,
+  TableId,
+  TableName,
+  ViewId,
+  DefaultTableMapper,
+  buildRecordConditionSpec,
+  domainError,
+  err,
+  ok,
+} from '@teable/v2-core';
+import type {
+  IHasher,
+  ILogger,
+  ISpecification,
+  ITablePersistenceDTO,
+  LinkField,
+  IEventBus,
+  IRecordOrderCalculator,
+  ITableRecordConditionSpecVisitor,
+} from '@teable/v2-core';
+import type { V1TeableDatabase } from '@teable/v2-postgres-schema';
+import {
+  Kysely,
+  PostgresAdapter,
+  PostgresIntrospector,
+  PostgresQueryCompiler,
+  type CompiledQuery,
+  type DatabaseConnection,
+  type Driver,
+  type QueryResult,
+} from 'kysely';
+import { describe, expect, it, vi } from 'vitest';
+
+import type {
+  ComputedFieldUpdater,
+  ComputedUpdatePlanner,
+  IUpdateStrategy,
+  IComputedUpdateOutbox,
+} from '../computed';
+import type { DynamicDB } from '../query-builder';
+import { CellValueMutateVisitor } from '../visitors/CellValueMutateVisitor';
+import { createNoopEventBus } from './__tests__/helpers/createNoopEventBus';
+import { PostgresRecordMutationSnapshotCaptureService } from './PostgresRecordMutationSnapshotCaptureService';
+import { PostgresTableRecordRepository } from './PostgresTableRecordRepository';
+
+// =============================================================================
+// Test utilities
+// =============================================================================
+
+type RowProvider = (compiledQuery: CompiledQuery) => unknown[];
+
+const defaultRowsForQuery = (compiledQuery: CompiledQuery): unknown[] => {
+  const sqlText = compiledQuery.sql.toLowerCase();
+  if (
+    sqlText.includes('returning') &&
+    sqlText.includes('record_id') &&
+    sqlText.includes('new_version')
+  ) {
+    const recordId = compiledQuery.sql.match(/\('([^']+)'/)?.[1] ?? `rec${'h'.repeat(16)}`;
+    const row: Record<string, unknown> = { record_id: recordId, old_version: 1, new_version: 2 };
+    for (const match of compiledQuery.sql.matchAll(/ AS "(old_[^"]+)"/g)) {
+      row[match[1]!] = null;
+    }
+    return [row];
+  }
+
+  if (!sqlText.includes('returning') || !sqlText.includes(' as "changed_')) {
+    return [];
+  }
+
+  const row: Record<string, unknown> = {};
+  for (const match of compiledQuery.sql.matchAll(/ as "(changed_\d+)"/g)) {
+    row[match[1]!] = null;
+  }
+  return [row];
+};
+
+class RecordingConnection implements DatabaseConnection {
+  constructor(
+    private readonly queries: CompiledQuery[],
+    private readonly rowProvider?: RowProvider
+  ) {}
+
+  async executeQuery<R>(compiledQuery: CompiledQuery): Promise<QueryResult<R>> {
+    this.queries.push(compiledQuery);
+    const providedRows = this.rowProvider?.(compiledQuery);
+    const rows = (
+      providedRows && providedRows.length > 0 ? providedRows : defaultRowsForQuery(compiledQuery)
+    ) as R[];
+    return { rows };
+  }
+
+  async *streamQuery<R>(): AsyncIterableIterator<QueryResult<R>> {
+    yield { rows: [] };
+  }
+}
+
+class RecordingDriver implements Driver {
+  readonly queries: CompiledQuery[] = [];
+
+  constructor(private readonly rowProvider?: RowProvider) {}
+
+  async init(): Promise<void> {
+    return undefined;
+  }
+
+  async acquireConnection(): Promise<DatabaseConnection> {
+    return new RecordingConnection(this.queries, this.rowProvider);
+  }
+
+  async beginTransaction(): Promise<void> {
+    return undefined;
+  }
+  async commitTransaction(): Promise<void> {
+    return undefined;
+  }
+  async rollbackTransaction(): Promise<void> {
+    return undefined;
+  }
+  async releaseConnection(): Promise<void> {
+    return undefined;
+  }
+  async destroy(): Promise<void> {
+    return undefined;
+  }
+  async savepoint(): Promise<void> {
+    return undefined;
+  }
+  async rollbackToSavepoint(): Promise<void> {
+    return undefined;
+  }
+  async releaseSavepoint(): Promise<void> {
+    return undefined;
+  }
+}
+
+const createRecordingDb = (rowProvider?: RowProvider) => {
+  let currentUndoBatchId: string | undefined;
+  const defaultUndoLogRowProvider: RowProvider = (compiledQuery) => {
+    if (compiledQuery.sql.includes('FROM information_schema.tables')) {
+      return [{ exists: true }];
+    }
+    if (compiledQuery.sql.includes('FROM information_schema.columns')) {
+      return [{ exists: true }];
+    }
+    if (compiledQuery.sql.includes('FROM pg_proc')) {
+      return [{ exists: true }];
+    }
+    if (compiledQuery.sql.includes('FROM pg_trigger AS t')) {
+      return [{ exists: true }];
+    }
+    if (compiledQuery.sql.includes("set_config('teable.undo_batch_id'")) {
+      const batchId = compiledQuery.parameters[0];
+      currentUndoBatchId = typeof batchId === 'string' && batchId.length > 0 ? batchId : undefined;
+      return [{ set_config: currentUndoBatchId ?? '' }];
+    }
+    if (compiledQuery.sql.includes("current_setting('teable.undo_batch_id', true)")) {
+      return [{ batch_id: currentUndoBatchId ?? null }];
+    }
+    if (compiledQuery.sql.includes('FROM "__undo_log"')) {
+      return [
+        {
+          operation: 'UPDATE',
+          record_id: RECORD_ID,
+          old_row: {
+            __id: RECORD_ID,
+            __version: 1,
+          },
+          new_row: {
+            __id: RECORD_ID,
+            __version: 2,
+          },
+        },
+      ];
+    }
+    return [];
+  };
+  const driver = new RecordingDriver(
+    rowProvider
+      ? (compiledQuery) => {
+          const providedRows = rowProvider(compiledQuery);
+          return providedRows.length > 0 ? providedRows : defaultUndoLogRowProvider(compiledQuery);
+        }
+      : defaultUndoLogRowProvider
+  );
+  const db = new Kysely<DynamicDB>({
+    dialect: {
+      createAdapter: () => new PostgresAdapter(),
+      createDriver: () => driver,
+      createIntrospector: (kysely) => new PostgresIntrospector(kysely),
+      createQueryCompiler: () => new PostgresQueryCompiler(),
+    },
+  });
+  return { db, driver };
+};
+
+const runInRecordingTransaction = <T>(
+  db: Kysely<DynamicDB>,
+  operation: (transaction: PostgresUnitOfWorkTransaction<DynamicDB>) => Promise<T>
+): Promise<T> =>
+  db.transaction().execute((trx) => operation(new PostgresUnitOfWorkTransaction(trx, 'data')));
+
+const createLogger = (): ILogger => {
+  const logger: ILogger = {
+    child: () => logger,
+    scope: () => logger,
+    debug: () => undefined,
+    info: () => undefined,
+    warn: () => undefined,
+    error: () => undefined,
+  };
+  return logger;
+};
+
+const createNoopComputedPlanner = (table: Table): ComputedUpdatePlanner => {
+  const mockPlan = {
+    baseId: table.baseId(),
+    seedTableId: table.id(),
+    seedRecordIds: [],
+    extraSeedRecords: [],
+    steps: [],
+    edges: [],
+    estimatedComplexity: 0,
+    changeType: 'update',
+  };
+  return {
+    plan: async () => ok(mockPlan),
+    planStage: async () => ok(mockPlan),
+    resolveBeforeImageRequirements: async () =>
+      ok({
+        needsBeforeImage: false,
+        requiredFieldIds: [],
+      }),
+    hasWritableComputedWork: () => true,
+  } as unknown as ComputedUpdatePlanner;
+};
+
+const createNoopStrategy = (): IUpdateStrategy => {
+  return {
+    mode: 'sync',
+    name: 'noop',
+    execute: async () => ok(undefined),
+    scheduleDispatch: () => undefined,
+  };
+};
+
+const createNoopOutbox = (): IComputedUpdateOutbox => {
+  return {
+    enqueueOrMerge: async () => ok({ taskId: 'test', merged: false }),
+    enqueueSeedTask: async () => ok({ taskId: 'test', merged: false }),
+    enqueueFieldBackfill: async () => ok({ taskId: 'test', merged: false }),
+    claimBatch: async () => ok([]),
+    claimById: async () => ok(null),
+    renewLease: async () => ok([]),
+    markDone: async () => ok(true),
+    markFailed: async () => ok(true),
+  };
+};
+
+const createNoopHasher = (): IHasher => {
+  return {
+    sha256: () => 'test-hash',
+  };
+};
+
+const createNoopRecordOrderCalculator = (): IRecordOrderCalculator => {
+  return {
+    calculateOrders: async () => ok([]),
+  };
+};
+
+const createRepository = (
+  db: Kysely<DynamicDB>,
+  table: Table,
+  computedUpdatePlanner: ComputedUpdatePlanner = createNoopComputedPlanner(table)
+) => {
+  const logger = createLogger();
+  const computedFieldUpdater = {} as ComputedFieldUpdater;
+  const computedUpdateStrategy = createNoopStrategy();
+  const computedUpdateOutbox = createNoopOutbox();
+  const hasher = createNoopHasher();
+
+  return new PostgresTableRecordRepository(
+    db as unknown as Kysely<V1TeableDatabase>,
+    logger,
+    createNoopRecordOrderCalculator(),
+    computedUpdatePlanner,
+    computedFieldUpdater,
+    computedUpdateStrategy,
+    computedUpdateOutbox,
+    new PostgresRecordMutationSnapshotCaptureService(
+      db as unknown as Kysely<V1TeableDatabase>,
+      logger
+    ),
+    createNoopEventBus(),
+    hasher
+  );
+};
+
+const hydrateLinkField = (params: {
+  table: Table;
+  fieldId: FieldId;
+  baseId: BaseId;
+  tableId: TableId;
+}) => {
+  // Link SQL generation expects persisted db config + db field name.
+  const linkField = params.table
+    .getField((field) => field.id().equals(params.fieldId))
+    ._unsafeUnwrap() as LinkField;
+  linkField.setDbFieldName(DbFieldName.rehydrate('col_links')._unsafeUnwrap())._unsafeUnwrap();
+  linkField.ensureDbConfig({ baseId: params.baseId, hostTableId: params.tableId })._unsafeUnwrap();
+};
+
+const isUndoCaptureQuery = (query: CompiledQuery) => {
+  const text = query.sql;
+  return (
+    text.includes('teable_undo_capture_') ||
+    text.includes('"__undo_log"') ||
+    text.includes("table_name = '__undo_log'") ||
+    text.includes('__teable_capture_undo_row') ||
+    text.includes('FROM pg_trigger AS t') ||
+    text.includes('"__teable_undo_capture"') ||
+    text.includes('teable.undo_batch_id')
+  );
+};
+
+const toSnapshot = (queries: ReadonlyArray<CompiledQuery>) =>
+  queries
+    .filter((query) => !isUndoCaptureQuery(query))
+    .map((query) => ({ sql: query.sql, parameters: query.parameters }));
+
+const hasExistingForeignKeyLinkRead = (
+  queries: ReturnType<typeof toSnapshot>,
+  symmetricFieldId: string
+) =>
+  queries.some(
+    (query) =>
+      query.sql.includes('select "__id" as "record_id"') &&
+      query.sql.includes(`where "__fk_${symmetricFieldId}" = $1`)
+  );
+
+const createSingleRowProvider = (tableName: string, row: Record<string, unknown>): RowProvider => {
+  const target = `from ${tableName}`;
+  return (compiledQuery) => {
+    if (compiledQuery.sql.includes(target) && compiledQuery.sql.includes('select "__id"')) {
+      return [row];
+    }
+    return [];
+  };
+};
+
+const createUndoLogRowProvider = (
+  rows: ReadonlyArray<{
+    record_id: string;
+    old_row: Record<string, unknown>;
+    new_row?: Record<string, unknown>;
+    operation?: 'INSERT' | 'UPDATE' | 'DELETE';
+  }>
+): RowProvider => {
+  return (compiledQuery) => {
+    if (compiledQuery.sql.includes('FROM "__undo_log"')) {
+      return [...rows];
+    }
+    return [];
+  };
+};
+
+// Fixed IDs for stable snapshots
+const BASE_ID = `bse${'a'.repeat(16)}`;
+const TABLE_ID = `tbl${'b'.repeat(16)}`;
+const FOREIGN_TABLE_ID = `tbl${'c'.repeat(16)}`;
+const LOOKUP_FIELD_ID = `fld${'d'.repeat(16)}`;
+const LINK_FIELD_ID = `fld${'e'.repeat(16)}`;
+const SYMMETRIC_FIELD_ID = `fld${'f'.repeat(16)}`;
+const NAME_FIELD_ID = `fld${'g'.repeat(16)}`;
+const LAST_MODIFIED_BY_FIELD_ID = `fld${'l'.repeat(16)}`;
+const RECORD_ID = `rec${'h'.repeat(16)}`;
+const LINKED_RECORD_A = `rec${'i'.repeat(16)}`;
+const LINKED_RECORD_B = `rec${'j'.repeat(16)}`;
+const ACTOR_ID = 'usr_test';
+const VIEW_ID = `viw${'k'.repeat(16)}`;
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+describe('PostgresTableRecordRepository.updateOne', () => {
+  it('rejects bulk update when the filter spec does not produce a where clause', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2025-01-01T00:00:00.000Z'));
+
+    const baseId = BaseId.create(BASE_ID)._unsafeUnwrap();
+    const tableId = TableId.create(TABLE_ID)._unsafeUnwrap();
+    const textFieldId = FieldId.create(NAME_FIELD_ID)._unsafeUnwrap();
+    const actorId = ActorId.create(ACTOR_ID)._unsafeUnwrap();
+
+    const builder = Table.builder()
+      .withId(tableId)
+      .withBaseId(baseId)
+      .withName(TableName.create('BulkUpdateTable')._unsafeUnwrap());
+    builder
+      .field()
+      .singleLineText()
+      .withId(textFieldId)
+      .withName(FieldName.create('Status')._unsafeUnwrap())
+      .primary()
+      .done();
+    builder.view().defaultGrid().done();
+
+    const table = builder.build()._unsafeUnwrap();
+    table
+      .getField((field) => field.id().equals(textFieldId))
+      ._unsafeUnwrap()
+      .setDbFieldName(DbFieldName.rehydrate('col_status')._unsafeUnwrap())
+      ._unsafeUnwrap();
+
+    const mutateSpec = table
+      .updateRecord(
+        RecordId.create(RECORD_ID)._unsafeUnwrap(),
+        new Map([[NAME_FIELD_ID, 'inactive']])
+      )
+      ._unsafeUnwrap().mutateSpec;
+    const emptySpec: ISpecification<TableRecord, ITableRecordConditionSpecVisitor> = {
+      isSatisfiedBy: () => true,
+      mutate: (record) => ok(record),
+      accept: () => ok(undefined as never),
+    };
+
+    const { db, driver } = createRecordingDb(
+      createUndoLogRowProvider([
+        {
+          operation: 'UPDATE',
+          record_id: RECORD_ID,
+          old_row: {
+            __id: RECORD_ID,
+            __version: 1,
+            col_name: 'Before',
+          },
+          new_row: {
+            __id: RECORD_ID,
+            __version: 2,
+            col_name: 'Alice',
+          },
+        },
+      ])
+    );
+    const repo = createRepository(db, table);
+
+    const result = await repo.updateMany({ actorId }, table, emptySpec, mutateSpec);
+    expect(result.isErr()).toBe(true);
+    expect(result._unsafeUnwrapErr().code).toBe('record.bulk_update.empty_filter');
+    expect(driver.queries).toHaveLength(0);
+
+    vi.useRealTimers();
+  });
+
+  it('generates bulk update SQL with database-pushed where matching', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2025-01-01T00:00:00.000Z'));
+
+    const baseId = BaseId.create(BASE_ID)._unsafeUnwrap();
+    const tableId = TableId.create(TABLE_ID)._unsafeUnwrap();
+    const textFieldId = FieldId.create(NAME_FIELD_ID)._unsafeUnwrap();
+    const numberFieldId = FieldId.create(`fld${'n'.repeat(16)}`)._unsafeUnwrap();
+    const actorId = ActorId.create(ACTOR_ID)._unsafeUnwrap();
+
+    const builder = Table.builder()
+      .withId(tableId)
+      .withBaseId(baseId)
+      .withName(TableName.create('BulkUpdateTable')._unsafeUnwrap());
+    builder
+      .field()
+      .singleLineText()
+      .withId(textFieldId)
+      .withName(FieldName.create('Status')._unsafeUnwrap())
+      .primary()
+      .done();
+    builder
+      .field()
+      .number()
+      .withId(numberFieldId)
+      .withName(FieldName.create('Amount')._unsafeUnwrap())
+      .done();
+    builder.view().defaultGrid().done();
+
+    const table = builder.build()._unsafeUnwrap();
+    table
+      .getField((field) => field.id().equals(textFieldId))
+      ._unsafeUnwrap()
+      .setDbFieldName(DbFieldName.rehydrate('col_status')._unsafeUnwrap())
+      ._unsafeUnwrap();
+    table
+      .getField((field) => field.id().equals(numberFieldId))
+      ._unsafeUnwrap()
+      .setDbFieldName(DbFieldName.rehydrate('col_amount')._unsafeUnwrap())
+      ._unsafeUnwrap();
+
+    const mutateSpec = table
+      .updateRecord(
+        RecordId.create(RECORD_ID)._unsafeUnwrap(),
+        new Map([[NAME_FIELD_ID, 'inactive']])
+      )
+      ._unsafeUnwrap().mutateSpec;
+    const filterSpec = buildRecordConditionSpec(table, {
+      fieldId: numberFieldId.toString(),
+      operator: 'isGreater',
+      value: 5,
+    })._unsafeUnwrap();
+
+    const { db, driver } = createRecordingDb();
+    const repo = createRepository(db, table);
+
+    const result = await repo.updateMany({ actorId }, table, filterSpec, mutateSpec);
+    expect(result.isOk()).toBe(true);
+
+    expect(toSnapshot(driver.queries)).toMatchInlineSnapshot(`
+      [
+        {
+          "parameters": [
+            5,
+            "2025-01-01T00:00:00.000Z",
+            "usr_test",
+            "inactive",
+            "inactive",
+          ],
+          "sql": "with "matched" as (select "__id" as "matched_id", "__version" as "old_version", "col_status" as "old_fldgggggggggggggggg" from "bseaaaaaaaaaaaaaaaa"."tblbbbbbbbbbbbbbbbb" where ("col_amount" > $1)) update "bseaaaaaaaaaaaaaaaa"."tblbbbbbbbbbbbbbbbb" set "__last_modified_time" = $2, "__last_modified_by" = $3, "__version" = "__version" + 1, "col_status" = $4 from "matched" where "__id" = "matched"."matched_id" and ("col_status" IS DISTINCT FROM $5) returning "__id" as "record_id", "__version" as "new_version", "matched"."old_version" as "old_version", "matched"."old_fldgggggggggggggggg" as "old_fldgggggggggggggggg"",
+        },
+        {
+          "parameters": [
+            "usr_test",
+            "tblbbbbbbbbbbbbbbbb",
+          ],
+          "sql": "update "public"."table_meta" set "last_modified_time" = CASE
+                WHEN "last_modified_time" IS NULL THEN CURRENT_TIMESTAMP
+                ELSE GREATEST(CURRENT_TIMESTAMP, "last_modified_time" + interval '1 millisecond')
+              END, "last_modified_by" = $1 where "id" = $2",
+        },
+      ]
+    `);
+
+    vi.useRealTimers();
+  });
+
+  it('generates bulk update SQL for explicit record ids', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2025-01-01T00:00:00.000Z'));
+
+    const baseId = BaseId.create(BASE_ID)._unsafeUnwrap();
+    const tableId = TableId.create(TABLE_ID)._unsafeUnwrap();
+    const textFieldId = FieldId.create(NAME_FIELD_ID)._unsafeUnwrap();
+    const actorId = ActorId.create(ACTOR_ID)._unsafeUnwrap();
+    const recordIdA = RecordId.create(`rec${'a'.repeat(16)}`)._unsafeUnwrap();
+    const recordIdB = RecordId.create(`rec${'b'.repeat(16)}`)._unsafeUnwrap();
+
+    const builder = Table.builder()
+      .withId(tableId)
+      .withBaseId(baseId)
+      .withName(TableName.create('BulkUpdateByIdsTable')._unsafeUnwrap());
+    builder
+      .field()
+      .singleLineText()
+      .withId(textFieldId)
+      .withName(FieldName.create('Status')._unsafeUnwrap())
+      .primary()
+      .done();
+    builder.view().defaultGrid().done();
+
+    const table = builder.build()._unsafeUnwrap();
+    table
+      .getField((field) => field.id().equals(textFieldId))
+      ._unsafeUnwrap()
+      .setDbFieldName(DbFieldName.rehydrate('col_status')._unsafeUnwrap())
+      ._unsafeUnwrap();
+
+    const mutateSpec = table
+      .updateRecord(
+        RecordId.create(RECORD_ID)._unsafeUnwrap(),
+        new Map([[NAME_FIELD_ID, 'inactive']])
+      )
+      ._unsafeUnwrap().mutateSpec;
+    const targetSpec = RecordByIdsSpec.create([recordIdA, recordIdB]);
+
+    const { db, driver } = createRecordingDb();
+    const repo = createRepository(db, table);
+
+    const result = await repo.updateMany({ actorId }, table, targetSpec, mutateSpec);
+    expect(result.isOk()).toBe(true);
+
+    expect(toSnapshot(driver.queries)).toMatchInlineSnapshot(`
+      [
+        {
+          "parameters": [
+            "recaaaaaaaaaaaaaaaa",
+            "recbbbbbbbbbbbbbbbb",
+            "2025-01-01T00:00:00.000Z",
+            "usr_test",
+            "inactive",
+            "inactive",
+          ],
+          "sql": "with "matched" as (select "__id" as "matched_id", "__version" as "old_version", "col_status" as "old_fldgggggggggggggggg" from "bseaaaaaaaaaaaaaaaa"."tblbbbbbbbbbbbbbbbb" where ("__id" in ($1, $2))) update "bseaaaaaaaaaaaaaaaa"."tblbbbbbbbbbbbbbbbb" set "__last_modified_time" = $3, "__last_modified_by" = $4, "__version" = "__version" + 1, "col_status" = $5 from "matched" where "__id" = "matched"."matched_id" and ("col_status" IS DISTINCT FROM $6) returning "__id" as "record_id", "__version" as "new_version", "matched"."old_version" as "old_version", "matched"."old_fldgggggggggggggggg" as "old_fldgggggggggggggggg"",
+        },
+        {
+          "parameters": [
+            "usr_test",
+            "tblbbbbbbbbbbbbbbbb",
+          ],
+          "sql": "update "public"."table_meta" set "last_modified_time" = CASE
+                WHEN "last_modified_time" IS NULL THEN CURRENT_TIMESTAMP
+                ELSE GREATEST(CURRENT_TIMESTAMP, "last_modified_time" + interval '1 millisecond')
+              END, "last_modified_by" = $1 where "id" = $2",
+        },
+      ]
+    `);
+
+    vi.useRealTimers();
+  });
+
+  it('generates update SQL for a non-link field', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2025-01-01T00:00:00.000Z'));
+
+    const baseId = BaseId.create(BASE_ID)._unsafeUnwrap();
+    const tableId = TableId.create(TABLE_ID)._unsafeUnwrap();
+    const nameFieldId = FieldId.create(NAME_FIELD_ID)._unsafeUnwrap();
+    const recordId = RecordId.create(RECORD_ID)._unsafeUnwrap();
+    const actorId = ActorId.create(ACTOR_ID)._unsafeUnwrap();
+
+    const builder = Table.builder()
+      .withId(tableId)
+      .withBaseId(baseId)
+      .withName(TableName.create('UpdateTable')._unsafeUnwrap());
+    builder
+      .field()
+      .singleLineText()
+      .withId(nameFieldId)
+      .withName(FieldName.create('Name')._unsafeUnwrap())
+      .primary()
+      .done();
+    builder.view().defaultGrid().done();
+
+    const table = builder.build()._unsafeUnwrap();
+    table
+      .getField((field) => field.id().equals(nameFieldId))
+      ._unsafeUnwrap()
+      .setDbFieldName(DbFieldName.rehydrate('col_name')._unsafeUnwrap())
+      ._unsafeUnwrap();
+
+    // Create fieldValues map for update
+    const fieldValues = new Map<string, unknown>([[NAME_FIELD_ID, 'Alice']]);
+
+    // Get mutation spec from table.updateRecord
+    const updateRecordResult = table.updateRecord(recordId, fieldValues);
+    expect(updateRecordResult.isOk()).toBe(true);
+    const { mutateSpec } = updateRecordResult._unsafeUnwrap();
+
+    const { db, driver } = createRecordingDb();
+    const repo = createRepository(db, table);
+
+    const result = await repo.updateOne({ actorId }, table, recordId, mutateSpec);
+    expect(result.isOk()).toBe(true);
+
+    expect(toSnapshot(driver.queries)).toMatchInlineSnapshot(`
+      [
+        {
+          "parameters": [
+            "2025-01-01T00:00:00.000Z",
+            "usr_test",
+            "Alice",
+            "rechhhhhhhhhhhhhhhh",
+            "Alice",
+          ],
+          "sql": "update "bseaaaaaaaaaaaaaaaa"."tblbbbbbbbbbbbbbbbb" set "__last_modified_time" = $1, "__last_modified_by" = $2, "__version" = "__version" + 1, "col_name" = $3 where "__id" = $4 and ("col_name" IS DISTINCT FROM $5) returning "col_name" as "changed_0"",
+        },
+        {
+          "parameters": [
+            "usr_test",
+            "tblbbbbbbbbbbbbbbbb",
+          ],
+          "sql": "update "public"."table_meta" set "last_modified_time" = CASE
+                WHEN "last_modified_time" IS NULL THEN CURRENT_TIMESTAMP
+                ELSE GREATEST(CURRENT_TIMESTAMP, "last_modified_time" + interval '1 millisecond')
+              END, "last_modified_by" = $1 where "id" = $2",
+        },
+      ]
+    `);
+
+    vi.useRealTimers();
+  });
+
+  it('uses resolved actor identity for lastModifiedBy snapshots on update', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2025-01-01T00:00:00.000Z'));
+
+    const baseId = BaseId.create(BASE_ID)._unsafeUnwrap();
+    const tableId = TableId.create(TABLE_ID)._unsafeUnwrap();
+    const nameFieldId = FieldId.create(NAME_FIELD_ID)._unsafeUnwrap();
+    const lastModifiedByFieldId = FieldId.create(LAST_MODIFIED_BY_FIELD_ID)._unsafeUnwrap();
+    const recordId = RecordId.create(RECORD_ID)._unsafeUnwrap();
+    const actorId = ActorId.create(ACTOR_ID)._unsafeUnwrap();
+
+    const builder = Table.builder()
+      .withId(tableId)
+      .withBaseId(baseId)
+      .withName(TableName.create('UpdateLastModifiedByTable')._unsafeUnwrap());
+    builder
+      .field()
+      .singleLineText()
+      .withId(nameFieldId)
+      .withName(FieldName.create('Name')._unsafeUnwrap())
+      .primary()
+      .done();
+    builder
+      .field()
+      .lastModifiedBy()
+      .withId(lastModifiedByFieldId)
+      .withName(FieldName.create('Last Modified By')._unsafeUnwrap())
+      .done();
+    builder.view().defaultGrid().done();
+
+    const table = builder.build()._unsafeUnwrap();
+    table
+      .getField((field) => field.id().equals(nameFieldId))
+      ._unsafeUnwrap()
+      .setDbFieldName(DbFieldName.rehydrate('col_name')._unsafeUnwrap())
+      ._unsafeUnwrap();
+    table
+      .getField((field) => field.id().equals(lastModifiedByFieldId))
+      ._unsafeUnwrap()
+      .setDbFieldName(DbFieldName.rehydrate('col_last_modified_by')._unsafeUnwrap())
+      ._unsafeUnwrap();
+
+    const mutateSpec = table
+      .updateRecord(recordId, new Map([[NAME_FIELD_ID, 'Alice']]))
+      ._unsafeUnwrap().mutateSpec;
+    const expectedSnapshot = JSON.stringify({
+      id: ACTOR_ID,
+      title: 'Resolved User',
+      email: 'resolved@example.com',
+    });
+
+    const { db, driver } = createRecordingDb((compiledQuery) => {
+      if (compiledQuery.sql.includes('FROM public.users')) {
+        return [{ name: 'Resolved User', email: 'resolved@example.com' }];
+      }
+      return [];
+    });
+    const repo = createRepository(db, table);
+
+    const result = await repo.updateOne({ actorId }, table, recordId, mutateSpec);
+    expect(result.isOk()).toBe(true);
+
+    const queries = toSnapshot(driver.queries);
+    expect(queries.some((query) => query.sql.includes('FROM public.users'))).toBe(true);
+    const updateQuery = queries.find(
+      (query) => query.sql.startsWith('update ') && query.sql.includes('col_last_modified_by')
+    );
+    expect(updateQuery).toBeDefined();
+    expect(updateQuery?.parameters).toContain(expectedSnapshot);
+    expect(updateQuery?.parameters).not.toContain(
+      JSON.stringify({
+        id: ACTOR_ID,
+        title: ACTOR_ID,
+        email: null,
+      })
+    );
+
+    vi.useRealTimers();
+  });
+
+  it('returns update snapshots captured from the undo log', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2025-01-01T00:00:00.000Z'));
+
+    const baseId = BaseId.create(BASE_ID)._unsafeUnwrap();
+    const tableId = TableId.create(TABLE_ID)._unsafeUnwrap();
+    const nameFieldId = FieldId.create(NAME_FIELD_ID)._unsafeUnwrap();
+    const recordId = RecordId.create(RECORD_ID)._unsafeUnwrap();
+    const actorId = ActorId.create(ACTOR_ID)._unsafeUnwrap();
+
+    const builder = Table.builder()
+      .withId(tableId)
+      .withBaseId(baseId)
+      .withName(TableName.create('UpdateTable')._unsafeUnwrap());
+    builder
+      .field()
+      .singleLineText()
+      .withId(nameFieldId)
+      .withName(FieldName.create('Name')._unsafeUnwrap())
+      .primary()
+      .done();
+    builder.view().defaultGrid().done();
+
+    const table = builder.build()._unsafeUnwrap();
+    table
+      .getField((field) => field.id().equals(nameFieldId))
+      ._unsafeUnwrap()
+      .setDbFieldName(DbFieldName.rehydrate('col_name')._unsafeUnwrap())
+      ._unsafeUnwrap();
+
+    const mutateSpec = table
+      .updateRecord(recordId, new Map([[NAME_FIELD_ID, 'Alice']]))
+      ._unsafeUnwrap().mutateSpec;
+
+    const { db } = createRecordingDb(
+      createUndoLogRowProvider([
+        {
+          operation: 'UPDATE',
+          record_id: recordId.toString(),
+          old_row: {
+            __id: recordId.toString(),
+            __version: 4,
+            col_name: 'Before',
+          },
+          new_row: {
+            __id: recordId.toString(),
+            __version: 5,
+            col_name: 'Alice',
+          },
+        },
+      ])
+    );
+    const repo = createRepository(db, table);
+
+    const result = await repo.updateOne({ actorId }, table, recordId, mutateSpec);
+    expect(result.isOk()).toBe(true);
+    expect(result._unsafeUnwrap().updateSnapshot).toEqual({
+      previous: {
+        recordId: recordId.toString(),
+        fields: {
+          [NAME_FIELD_ID]: 'Before',
+        },
+        version: 4,
+      },
+      current: {
+        recordId: recordId.toString(),
+        fields: {
+          [NAME_FIELD_ID]: 'Alice',
+        },
+        version: 5,
+      },
+      oldVersion: 4,
+      newVersion: 5,
+    });
+
+    vi.useRealTimers();
+  });
+
+  it('uses the last UPDATE undo row as the update snapshot after-image', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2025-01-01T00:00:00.000Z'));
+
+    const baseId = BaseId.create(BASE_ID)._unsafeUnwrap();
+    const tableId = TableId.create(TABLE_ID)._unsafeUnwrap();
+    const nameFieldId = FieldId.create(NAME_FIELD_ID)._unsafeUnwrap();
+    const recordId = RecordId.create(RECORD_ID)._unsafeUnwrap();
+    const actorId = ActorId.create(ACTOR_ID)._unsafeUnwrap();
+
+    const builder = Table.builder()
+      .withId(tableId)
+      .withBaseId(baseId)
+      .withName(TableName.create('UpdateTableCurrentRow')._unsafeUnwrap());
+    builder
+      .field()
+      .singleLineText()
+      .withId(nameFieldId)
+      .withName(FieldName.create('Name')._unsafeUnwrap())
+      .primary()
+      .done();
+    builder.view().defaultGrid().done();
+
+    const table = builder.build()._unsafeUnwrap();
+    table
+      .getField((field) => field.id().equals(nameFieldId))
+      ._unsafeUnwrap()
+      .setDbFieldName(DbFieldName.rehydrate('col_name')._unsafeUnwrap())
+      ._unsafeUnwrap();
+
+    const mutateSpec = table
+      .updateRecord(recordId, new Map([[NAME_FIELD_ID, 'Alice']]))
+      ._unsafeUnwrap().mutateSpec;
+
+    const { db } = createRecordingDb(
+      createUndoLogRowProvider([
+        {
+          operation: 'UPDATE',
+          record_id: recordId.toString(),
+          old_row: {
+            __id: recordId.toString(),
+            __version: 4,
+            col_name: 'Before',
+          },
+          new_row: {
+            __id: recordId.toString(),
+            __version: 5,
+            col_name: 'Alice',
+          },
+        },
+        {
+          operation: 'INSERT',
+          record_id: recordId.toString(),
+          old_row: null as never,
+          new_row: {
+            __id: recordId.toString(),
+            __version: 99,
+            col_name: 'Not The Update After Image',
+          },
+        },
+      ])
+    );
+    const repo = createRepository(db, table);
+
+    const result = await repo.updateOne({ actorId }, table, recordId, mutateSpec);
+    expect(result.isOk()).toBe(true);
+    expect(result._unsafeUnwrap().updateSnapshot?.current).toEqual({
+      recordId: recordId.toString(),
+      fields: {
+        [NAME_FIELD_ID]: 'Alice',
+      },
+      version: 5,
+    });
+
+    vi.useRealTimers();
+  });
+
+  it('returns Err when update snapshot capture is missing version metadata', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2025-01-01T00:00:00.000Z'));
+
+    const baseId = BaseId.create(BASE_ID)._unsafeUnwrap();
+    const tableId = TableId.create(TABLE_ID)._unsafeUnwrap();
+    const nameFieldId = FieldId.create(NAME_FIELD_ID)._unsafeUnwrap();
+    const recordId = RecordId.create(RECORD_ID)._unsafeUnwrap();
+    const actorId = ActorId.create(ACTOR_ID)._unsafeUnwrap();
+
+    const builder = Table.builder()
+      .withId(tableId)
+      .withBaseId(baseId)
+      .withName(TableName.create('UpdateTable')._unsafeUnwrap());
+    builder
+      .field()
+      .singleLineText()
+      .withId(nameFieldId)
+      .withName(FieldName.create('Name')._unsafeUnwrap())
+      .primary()
+      .done();
+    builder.view().defaultGrid().done();
+
+    const table = builder.build()._unsafeUnwrap();
+    table
+      .getField((field) => field.id().equals(nameFieldId))
+      ._unsafeUnwrap()
+      .setDbFieldName(DbFieldName.rehydrate('col_name')._unsafeUnwrap())
+      ._unsafeUnwrap();
+
+    const mutateSpec = table
+      .updateRecord(recordId, new Map([[NAME_FIELD_ID, 'Alice']]))
+      ._unsafeUnwrap().mutateSpec;
+
+    const { db } = createRecordingDb(
+      createUndoLogRowProvider([
+        {
+          operation: 'UPDATE',
+          record_id: recordId.toString(),
+          old_row: {
+            __id: recordId.toString(),
+            col_name: 'Before',
+          },
+          new_row: {
+            __id: recordId.toString(),
+            col_name: 'Alice',
+          },
+        },
+      ])
+    );
+    const repo = createRepository(db, table);
+
+    const result = await repo.updateOne({ actorId }, table, recordId, mutateSpec);
+    expect(result.isErr()).toBe(true);
+    expect(result._unsafeUnwrapErr().message).toContain('missing __version');
+
+    vi.useRealTimers();
+  });
+
+  it('passes required before-image values to conditional propagation planning', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2025-01-01T00:00:00.000Z'));
+
+    const baseId = BaseId.create(BASE_ID)._unsafeUnwrap();
+    const tableId = TableId.create(TABLE_ID)._unsafeUnwrap();
+    const textFieldId = FieldId.create(NAME_FIELD_ID)._unsafeUnwrap();
+    const numberFieldId = FieldId.create(`fld${'n'.repeat(16)}`)._unsafeUnwrap();
+    const recordId = RecordId.create(RECORD_ID)._unsafeUnwrap();
+    const actorId = ActorId.create(ACTOR_ID)._unsafeUnwrap();
+
+    const builder = Table.builder()
+      .withId(tableId)
+      .withBaseId(baseId)
+      .withName(TableName.create('UpdateTable')._unsafeUnwrap());
+    builder
+      .field()
+      .singleLineText()
+      .withId(textFieldId)
+      .withName(FieldName.create('Name')._unsafeUnwrap())
+      .primary()
+      .done();
+    builder
+      .field()
+      .number()
+      .withId(numberFieldId)
+      .withName(FieldName.create('Amount')._unsafeUnwrap())
+      .done();
+    builder.view().defaultGrid().done();
+
+    const table = builder.build()._unsafeUnwrap();
+    table
+      .getField((field) => field.id().equals(textFieldId))
+      ._unsafeUnwrap()
+      .setDbFieldName(DbFieldName.rehydrate('col_name')._unsafeUnwrap())
+      ._unsafeUnwrap();
+    table
+      .getField((field) => field.id().equals(numberFieldId))
+      ._unsafeUnwrap()
+      .setDbFieldName(DbFieldName.rehydrate('col_amount')._unsafeUnwrap())
+      ._unsafeUnwrap();
+
+    const mutateSpec = table
+      .updateRecord(recordId, new Map([[NAME_FIELD_ID, 'Alice']]))
+      ._unsafeUnwrap().mutateSpec;
+
+    const capturedPlanInputs: Array<Record<string, unknown>> = [];
+    const mockPlan = {
+      baseId: table.baseId(),
+      seedTableId: table.id(),
+      seedRecordIds: [recordId],
+      extraSeedRecords: [],
+      steps: [],
+      edges: [],
+      estimatedComplexity: 0,
+      changeType: 'update' as const,
+    };
+    const computedUpdatePlanner = {
+      plan: async () => ok(mockPlan),
+      planStage: async (input: Record<string, unknown>) => {
+        capturedPlanInputs.push(input);
+        return ok({
+          ...mockPlan,
+          beforeImageRecords: input.beforeImageRecords as never,
+        });
+      },
+      resolveBeforeImageRequirements: async () =>
+        ok({
+          needsBeforeImage: true,
+          requiredFieldIds: [numberFieldId],
+        }),
+    } as unknown as ComputedUpdatePlanner;
+
+    const { db } = createRecordingDb(
+      createUndoLogRowProvider([
+        {
+          operation: 'UPDATE',
+          record_id: recordId.toString(),
+          old_row: {
+            __id: recordId.toString(),
+            __version: 1,
+            col_name: 'Before',
+            col_amount: 7,
+          },
+          new_row: {
+            __id: recordId.toString(),
+            __version: 2,
+            col_name: 'Alice',
+            col_amount: 7,
+          },
+        },
+      ])
+    );
+    const repo = createRepository(db, table, computedUpdatePlanner);
+
+    const result = await repo.updateOne({ actorId }, table, recordId, mutateSpec);
+    expect(result.isOk()).toBe(true);
+
+    expect(capturedPlanInputs[0]?.beforeImageRecords).toEqual([
+      {
+        recordId,
+        fieldValuesByDbName: {
+          col_amount: 7,
+        },
+      },
+    ]);
+
+    vi.useRealTimers();
+  });
+
+  it('uses returned update ids for updateManyStream computed planning when RETURNING rows are incomplete', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2025-01-01T00:00:00.000Z'));
+
+    const baseId = BaseId.create(BASE_ID)._unsafeUnwrap();
+    const tableId = TableId.create(TABLE_ID)._unsafeUnwrap();
+    const textFieldId = FieldId.create(NAME_FIELD_ID)._unsafeUnwrap();
+    const recordIdA = RecordId.create(RECORD_ID)._unsafeUnwrap();
+    const recordIdB = RecordId.create(`rec${'z'.repeat(16)}`)._unsafeUnwrap();
+    const actorId = ActorId.create(ACTOR_ID)._unsafeUnwrap();
+
+    const builder = Table.builder()
+      .withId(tableId)
+      .withBaseId(baseId)
+      .withName(TableName.create('UpdateManyStreamTable')._unsafeUnwrap());
+    builder
+      .field()
+      .singleLineText()
+      .withId(textFieldId)
+      .withName(FieldName.create('Name')._unsafeUnwrap())
+      .primary()
+      .done();
+    builder.view().defaultGrid().done();
+
+    const table = builder.build()._unsafeUnwrap();
+    table
+      .getField((field) => field.id().equals(textFieldId))
+      ._unsafeUnwrap()
+      .setDbFieldName(DbFieldName.rehydrate('col_name')._unsafeUnwrap())
+      ._unsafeUnwrap();
+
+    const updateResultA = table
+      .updateRecord(recordIdA, new Map([[NAME_FIELD_ID, 'Alice']]))
+      ._unsafeUnwrap();
+    const updateResultB = table
+      .updateRecord(recordIdB, new Map([[NAME_FIELD_ID, 'Bob']]))
+      ._unsafeUnwrap();
+
+    const capturedPlanInputs: Array<Record<string, unknown>> = [];
+    const computedUpdatePlanner = {
+      plan: async () =>
+        ok({
+          baseId: table.baseId(),
+          seedTableId: table.id(),
+          seedRecordIds: [],
+          extraSeedRecords: [],
+          steps: [],
+          edges: [],
+          estimatedComplexity: 0,
+          changeType: 'update' as const,
+        }),
+      planStage: async (input: Record<string, unknown>) => {
+        capturedPlanInputs.push(input);
+        return ok({
+          baseId: table.baseId(),
+          seedTableId: table.id(),
+          seedRecordIds: input.seedRecordIds as RecordId[],
+          extraSeedRecords: [],
+          beforeImageRecords: [],
+          changedFieldIds: input.changedFieldIds as FieldId[],
+          steps: [],
+          edges: [],
+          estimatedComplexity: 0,
+          changeType: 'update' as const,
+        });
+      },
+      resolveBeforeImageRequirements: async () =>
+        ok({
+          needsBeforeImage: false,
+          requiredFieldIds: [],
+        }),
+    } as unknown as ComputedUpdatePlanner;
+
+    const tableName = `"bse${'a'.repeat(16)}"."tbl${'b'.repeat(16)}"`;
+    const { db } = createRecordingDb((compiledQuery) => {
+      if (
+        compiledQuery.sql.includes(`UPDATE ${tableName} AS t`) &&
+        compiledQuery.sql.includes('RETURNING')
+      ) {
+        return [
+          {
+            record_id: recordIdA.toString(),
+            new_version: 2,
+          },
+        ];
+      }
+      return [];
+    });
+    const repo = createRepository(db, table, computedUpdatePlanner);
+
+    function* batches() {
+      yield ok([updateResultA, updateResultB]);
+    }
+
+    const result = await repo.updateManyStream({ actorId }, table, batches());
+    expect(result.isOk()).toBe(true);
+    expect(result._unsafeUnwrap().updatedRecords).toEqual([
+      {
+        recordId: recordIdA,
+        oldVersion: 1,
+        newVersion: 2,
+        oldFieldValues: {},
+      },
+    ]);
+    expect(capturedPlanInputs[0]?.seedRecordIds).toEqual([recordIdA]);
+
+    vi.useRealTimers();
+  });
+
+  it('includes foreign extra seed records for updateManyStream link relation changes', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2025-01-01T00:00:00.000Z'));
+
+    const baseId = BaseId.create(BASE_ID)._unsafeUnwrap();
+    const tableId = TableId.create(TABLE_ID)._unsafeUnwrap();
+    const foreignTableId = TableId.create(FOREIGN_TABLE_ID)._unsafeUnwrap();
+    const lookupFieldId = FieldId.create(LOOKUP_FIELD_ID)._unsafeUnwrap();
+    const linkFieldId = FieldId.create(LINK_FIELD_ID)._unsafeUnwrap();
+    const symmetricFieldId = FieldId.create(SYMMETRIC_FIELD_ID)._unsafeUnwrap();
+    const nameFieldId = FieldId.create(NAME_FIELD_ID)._unsafeUnwrap();
+    const recordId = RecordId.create(RECORD_ID)._unsafeUnwrap();
+    const linkedRecordId = RecordId.create(LINKED_RECORD_A)._unsafeUnwrap();
+    const actorId = ActorId.create(ACTOR_ID)._unsafeUnwrap();
+
+    const linkConfig = LinkFieldConfig.create({
+      relationship: 'oneOne',
+      foreignTableId: foreignTableId.toString(),
+      lookupFieldId: lookupFieldId.toString(),
+      symmetricFieldId: symmetricFieldId.toString(),
+      isOneWay: false,
+    })._unsafeUnwrap();
+
+    const builder = Table.builder()
+      .withId(tableId)
+      .withBaseId(baseId)
+      .withName(TableName.create('BatchUpdateExtraSeedTable')._unsafeUnwrap());
+    builder
+      .field()
+      .singleLineText()
+      .withId(nameFieldId)
+      .withName(FieldName.create('Name')._unsafeUnwrap())
+      .primary()
+      .done();
+    builder
+      .field()
+      .link()
+      .withId(linkFieldId)
+      .withName(FieldName.create('Partner')._unsafeUnwrap())
+      .withConfig(linkConfig)
+      .done();
+    builder.view().defaultGrid().done();
+
+    const table = builder.build()._unsafeUnwrap();
+    table
+      .getField((field) => field.id().equals(nameFieldId))
+      ._unsafeUnwrap()
+      .setDbFieldName(DbFieldName.rehydrate('col_name')._unsafeUnwrap())
+      ._unsafeUnwrap();
+    hydrateLinkField({ table, fieldId: linkFieldId, baseId, tableId });
+
+    const updateRecordResult = table.updateRecord(
+      recordId,
+      new Map<string, unknown>([[LINK_FIELD_ID, { id: LINKED_RECORD_A }]])
+    );
+    expect(updateRecordResult.isOk()).toBe(true);
+
+    const capturedPlanInputs: Array<Record<string, unknown>> = [];
+    const computedUpdatePlanner = {
+      ...createNoopComputedPlanner(table),
+      planStage: async (input: Record<string, unknown>) => {
+        capturedPlanInputs.push(input);
+        return ok({
+          baseId: table.baseId(),
+          seedTableId: table.id(),
+          seedRecordIds: input.seedRecordIds as RecordId[],
+          extraSeedRecords: input.extraSeedRecords as Array<{
+            tableId: TableId;
+            recordIds: RecordId[];
+          }>,
+          beforeImageRecords: [],
+          changedFieldIds: input.changedFieldIds as FieldId[],
+          steps: [],
+          edges: [],
+          estimatedComplexity: 0,
+          changeType: 'update' as const,
+        });
+      },
+      resolveBeforeImageRequirements: async () =>
+        ok({
+          needsBeforeImage: false,
+          requiredFieldIds: [],
+        }),
+    } as unknown as ComputedUpdatePlanner;
+
+    const tableName = `"bse${'a'.repeat(16)}"."tbl${'b'.repeat(16)}"`;
+    const { db } = createRecordingDb((compiledQuery) => {
+      if (
+        compiledQuery.sql.includes(`UPDATE ${tableName} AS t`) &&
+        compiledQuery.sql.includes('RETURNING')
+      ) {
+        return [
+          {
+            record_id: recordId.toString(),
+            new_version: 2,
+          },
+        ];
+      }
+      return [];
+    });
+    const repo = createRepository(db, table, computedUpdatePlanner);
+
+    function* batches() {
+      yield ok([updateRecordResult._unsafeUnwrap()]);
+    }
+
+    const result = await runInRecordingTransaction(db, (transaction) =>
+      repo.updateManyStream({ actorId, transaction }, table, batches())
+    );
+    expect(result.isOk()).toBe(true);
+    expect(capturedPlanInputs[0]?.seedRecordIds).toEqual([recordId]);
+    expect(capturedPlanInputs[0]?.extraSeedRecords).toEqual([
+      {
+        tableId: foreignTableId,
+        recordIds: [linkedRecordId],
+      },
+    ]);
+    expect(capturedPlanInputs[0]?.impact).toEqual({
+      valueFieldIds: [linkFieldId],
+      linkFieldIds: [linkFieldId],
+    });
+
+    vi.useRealTimers();
+  });
+
+  it('skips existing link reads for restore-style updateManyStream batches', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2025-01-01T00:00:00.000Z'));
+
+    const baseId = BaseId.create(BASE_ID)._unsafeUnwrap();
+    const tableId = TableId.create(TABLE_ID)._unsafeUnwrap();
+    const foreignTableId = TableId.create(FOREIGN_TABLE_ID)._unsafeUnwrap();
+    const lookupFieldId = FieldId.create(LOOKUP_FIELD_ID)._unsafeUnwrap();
+    const linkFieldId = FieldId.create(LINK_FIELD_ID)._unsafeUnwrap();
+    const symmetricFieldId = FieldId.create(SYMMETRIC_FIELD_ID)._unsafeUnwrap();
+    const nameFieldId = FieldId.create(NAME_FIELD_ID)._unsafeUnwrap();
+    const recordId = RecordId.create(RECORD_ID)._unsafeUnwrap();
+    const actorId = ActorId.create(ACTOR_ID)._unsafeUnwrap();
+
+    const linkConfig = LinkFieldConfig.create({
+      relationship: 'oneMany',
+      foreignTableId: foreignTableId.toString(),
+      lookupFieldId: lookupFieldId.toString(),
+      symmetricFieldId: symmetricFieldId.toString(),
+    })._unsafeUnwrap();
+
+    const builder = Table.builder()
+      .withId(tableId)
+      .withBaseId(baseId)
+      .withName(TableName.create('RestoreLinkBatchUpdateTable')._unsafeUnwrap());
+    builder
+      .field()
+      .singleLineText()
+      .withId(nameFieldId)
+      .withName(FieldName.create('Name')._unsafeUnwrap())
+      .primary()
+      .done();
+    builder
+      .field()
+      .link()
+      .withId(linkFieldId)
+      .withName(FieldName.create('Links')._unsafeUnwrap())
+      .withConfig(linkConfig)
+      .done();
+    builder.view().defaultGrid().done();
+
+    const table = builder.build()._unsafeUnwrap();
+    table
+      .getField((field) => field.id().equals(nameFieldId))
+      ._unsafeUnwrap()
+      .setDbFieldName(DbFieldName.rehydrate('col_name')._unsafeUnwrap())
+      ._unsafeUnwrap();
+    hydrateLinkField({ table, fieldId: linkFieldId, baseId, tableId });
+
+    const updateRecordResult = table.updateRecord(
+      recordId,
+      new Map<string, unknown>([
+        [LINK_FIELD_ID, [{ id: LINKED_RECORD_A }, { id: LINKED_RECORD_B }]],
+      ])
+    );
+    expect(updateRecordResult.isOk()).toBe(true);
+
+    function* batches() {
+      yield ok([updateRecordResult._unsafeUnwrap()]);
+    }
+
+    const foreignKeyName = `__fk_${SYMMETRIC_FIELD_ID}`;
+    const linkedRecordIds = [LINKED_RECORD_A, LINKED_RECORD_B];
+    // Real capture distinguishes source updates from the foreign ownership changes.
+    // Both runs start with unowned targets and persist the same final ownership.
+    const rowProvider: RowProvider = (query) => {
+      if (query.sql.includes('FROM "__undo_log"')) {
+        return [
+          {
+            id: '1',
+            operation: 'UPDATE',
+            table_name: `${BASE_ID}.${TABLE_ID}`,
+            record_id: RECORD_ID,
+            old_row: { __id: RECORD_ID, __version: 1, col_links: null },
+            new_row: {
+              __id: RECORD_ID,
+              __version: 2,
+              col_links: linkedRecordIds.map((id) => ({ id })),
+            },
+          },
+          ...linkedRecordIds.map((id, index) => ({
+            id: String(index + 2),
+            operation: 'UPDATE',
+            table_name: `${BASE_ID}.${FOREIGN_TABLE_ID}`,
+            record_id: id,
+            old_row: { __id: id, [foreignKeyName]: null },
+            new_row: { __id: id, [foreignKeyName]: RECORD_ID },
+          })),
+        ];
+      }
+      if (
+        query.sql.includes(`from "${BASE_ID}"."${FOREIGN_TABLE_ID}"`) &&
+        query.sql.includes('as "linked_to"')
+      ) {
+        return linkedRecordIds.map((id) => ({ record_id: id, linked_to: RECORD_ID }));
+      }
+      return [];
+    };
+
+    const normalRun = createRecordingDb(rowProvider);
+    const normalRepo = createRepository(normalRun.db, table);
+    const normalResult = await runInRecordingTransaction(normalRun.db, (transaction) =>
+      normalRepo.updateManyStream({ actorId, transaction }, table, batches())
+    );
+    expect(normalResult.isOk()).toBe(true);
+    expect(
+      hasExistingForeignKeyLinkRead(toSnapshot(normalRun.driver.queries), SYMMETRIC_FIELD_ID)
+    ).toBe(true);
+
+    const restoreRun = createRecordingDb(rowProvider);
+    const restoreRepo = createRepository(restoreRun.db, table);
+    const restoreResult = await runInRecordingTransaction(restoreRun.db, (transaction) =>
+      restoreRepo.updateManyStream({ actorId, transaction }, table, batches(), {
+        skipComputedUpdates: true,
+        fillLinkTitles: true,
+        assumeEmptyLinkState: true,
+      })
+    );
+    expect(restoreResult.isOk()).toBe(true);
+
+    const queries = toSnapshot(restoreRun.driver.queries);
+    expect(hasExistingForeignKeyLinkRead(queries, SYMMETRIC_FIELD_ID)).toBe(false);
+
+    vi.useRealTimers();
+  });
+
+  it('returns Err when the insert stream throws a domain error', async () => {
+    const baseId = BaseId.create(BASE_ID)._unsafeUnwrap();
+    const tableId = TableId.create(TABLE_ID)._unsafeUnwrap();
+    const nameFieldId = FieldId.create(NAME_FIELD_ID)._unsafeUnwrap();
+    const actorId = ActorId.create(ACTOR_ID)._unsafeUnwrap();
+
+    const builder = Table.builder()
+      .withId(tableId)
+      .withBaseId(baseId)
+      .withName(TableName.create('InsertStreamErrorTable')._unsafeUnwrap());
+    builder
+      .field()
+      .singleLineText()
+      .withId(nameFieldId)
+      .withName(FieldName.create('Name')._unsafeUnwrap())
+      .primary()
+      .done();
+    builder.view().defaultGrid().done();
+
+    const table = builder.build()._unsafeUnwrap();
+    const { db } = createRecordingDb();
+    const repo = createRepository(db, table);
+
+    const sourceError = domainError.validation({ message: 'insert stream exploded' });
+    const close = vi.fn(async (): Promise<IteratorResult<ReadonlyArray<TableRecord>>> => {
+      throw new Error('source close failed');
+    });
+    const batches: AsyncIterable<ReadonlyArray<TableRecord>> = {
+      [Symbol.asyncIterator]() {
+        return {
+          next: async () => {
+            throw sourceError;
+          },
+          return: close,
+        };
+      },
+    };
+
+    const result = await repo.insertManyStream({ actorId }, table, batches);
+    expect(result._unsafeUnwrapErr()).toBe(sourceError);
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it('classifies a source stream failure with the progress it observed', async () => {
+    const baseId = BaseId.create(BASE_ID)._unsafeUnwrap();
+    const tableId = TableId.create(TABLE_ID)._unsafeUnwrap();
+    const nameFieldId = FieldId.create(NAME_FIELD_ID)._unsafeUnwrap();
+    const actorId = ActorId.create(ACTOR_ID)._unsafeUnwrap();
+
+    const builder = Table.builder()
+      .withId(tableId)
+      .withBaseId(baseId)
+      .withName(TableName.create('SourceInterruptedTable')._unsafeUnwrap());
+    builder
+      .field()
+      .singleLineText()
+      .withId(nameFieldId)
+      .withName(FieldName.create('Name')._unsafeUnwrap())
+      .primary()
+      .done();
+    builder.view().defaultGrid().done();
+
+    const table = builder.build()._unsafeUnwrap();
+    const { db } = createRecordingDb();
+    const repo = createRepository(db, table);
+    const record = TableRecord.fromRawFieldValues({
+      id: RECORD_ID,
+      tableId,
+      fields: { [nameFieldId.toString()]: 'Alice' },
+    })._unsafeUnwrap();
+    vi.spyOn(repo, 'insertMany').mockResolvedValue(ok({}));
+
+    const sourceError = new TypeError(
+      'fetch failed for https://bucket.example/source.csv?X-Amz-Signature=secret'
+    );
+    let served = 0;
+    const close = vi.fn(async (): Promise<IteratorResult<ReadonlyArray<TableRecord>>> => ({
+      done: true,
+      value: undefined,
+    }));
+    const batches: AsyncIterable<ReadonlyArray<TableRecord>> = {
+      [Symbol.asyncIterator]() {
+        return {
+          next: async (): Promise<IteratorResult<ReadonlyArray<TableRecord>>> => {
+            served += 1;
+            if (served === 1) return { done: false, value: [record] };
+            throw sourceError;
+          },
+          return: close,
+        };
+      },
+    };
+
+    const result = await repo.insertManyStream({ actorId }, table, batches);
+    const error = result._unsafeUnwrapErr();
+    expect(error.code).toBe('record.insert_many_stream.source_interrupted');
+    expect(error.tags).toContain('infrastructure');
+    expect(error.message).toContain('interrupted after 1 row(s) in 1 batch(es)');
+    expect(error.message).not.toContain('X-Amz-Signature');
+    expect(error.details).toMatchObject({
+      insertedRows: 1,
+      insertedBatches: 1,
+      retryable: true,
+    });
+    expect(error.details).not.toHaveProperty('cause');
+    expect(error.cause).toBe(sourceError);
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it('closes the stream once when a write fails and cleanup also throws', async () => {
+    const baseId = BaseId.create(BASE_ID)._unsafeUnwrap();
+    const tableId = TableId.create(TABLE_ID)._unsafeUnwrap();
+    const nameFieldId = FieldId.create(NAME_FIELD_ID)._unsafeUnwrap();
+    const actorId = ActorId.create(ACTOR_ID)._unsafeUnwrap();
+
+    const builder = Table.builder()
+      .withId(tableId)
+      .withBaseId(baseId)
+      .withName(TableName.create('WriteFailedTable')._unsafeUnwrap());
+    builder
+      .field()
+      .singleLineText()
+      .withId(nameFieldId)
+      .withName(FieldName.create('Name')._unsafeUnwrap())
+      .primary()
+      .done();
+    builder.view().defaultGrid().done();
+
+    const table = builder.build()._unsafeUnwrap();
+    const { db } = createRecordingDb();
+    const repo = createRepository(db, table);
+    const writeError = domainError.infrastructure({
+      code: 'record.write_failed',
+      message: 'write failed',
+    });
+    const insertMany = vi.spyOn(repo, 'insertMany').mockResolvedValue(err(writeError));
+    const close = vi.fn(async (): Promise<IteratorResult<ReadonlyArray<TableRecord>>> => {
+      throw new Error('source close failed');
+    });
+    const batches: AsyncIterable<ReadonlyArray<TableRecord>> = {
+      [Symbol.asyncIterator]() {
+        return {
+          next: async (): Promise<IteratorResult<ReadonlyArray<TableRecord>>> => ({
+            done: false,
+            value: [],
+          }),
+          return: close,
+        };
+      },
+    };
+
+    const result = await repo.insertManyStream({ actorId }, table, batches);
+    expect(result._unsafeUnwrapErr()).toBe(writeError);
+    expect(insertMany).toHaveBeenCalledTimes(1);
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports a thrown non-Error source failure instead of treating it as completion', async () => {
+    const baseId = BaseId.create(BASE_ID)._unsafeUnwrap();
+    const tableId = TableId.create(TABLE_ID)._unsafeUnwrap();
+    const nameFieldId = FieldId.create(NAME_FIELD_ID)._unsafeUnwrap();
+    const actorId = ActorId.create(ACTOR_ID)._unsafeUnwrap();
+
+    const builder = Table.builder()
+      .withId(tableId)
+      .withBaseId(baseId)
+      .withName(TableName.create('ValuelessSourceFailureTable')._unsafeUnwrap());
+    builder
+      .field()
+      .singleLineText()
+      .withId(nameFieldId)
+      .withName(FieldName.create('Name')._unsafeUnwrap())
+      .primary()
+      .done();
+    builder.view().defaultGrid().done();
+
+    const table = builder.build()._unsafeUnwrap();
+    const { db } = createRecordingDb();
+    const repo = createRepository(db, table);
+    const batches: AsyncIterable<ReadonlyArray<TableRecord>> = {
+      [Symbol.asyncIterator]() {
+        return {
+          next: async () => {
+            // An interrupted source is not required to throw an Error instance.
+            throw undefined;
+          },
+        };
+      },
+    };
+
+    const result = await repo.insertManyStream({ actorId }, table, batches);
+    const error = result._unsafeUnwrapErr();
+    expect(error.code).toBe('record.insert_many_stream.source_interrupted');
+    expect(error.details).toMatchObject({
+      insertedRows: 0,
+      insertedBatches: 0,
+      retryable: true,
+    });
+  });
+
+  it('skips changed-field returning for restore-style insert streams', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2025-01-01T00:00:00.000Z'));
+
+    const baseId = BaseId.create(BASE_ID)._unsafeUnwrap();
+    const tableId = TableId.create(TABLE_ID)._unsafeUnwrap();
+    const nameFieldId = FieldId.create(NAME_FIELD_ID)._unsafeUnwrap();
+    const actorId = ActorId.create(ACTOR_ID)._unsafeUnwrap();
+
+    const builder = Table.builder()
+      .withId(tableId)
+      .withBaseId(baseId)
+      .withName(TableName.create('RestoreInsertTable')._unsafeUnwrap())
+      .withDbTableName(DbTableName.rehydrate(`${BASE_ID}.${TABLE_ID}`)._unsafeUnwrap());
+    builder
+      .field()
+      .singleLineText()
+      .withId(nameFieldId)
+      .withName(FieldName.create('Name')._unsafeUnwrap())
+      .primary()
+      .done();
+    builder.view().defaultGrid().done();
+
+    const table = builder.build()._unsafeUnwrap();
+    table
+      .getField((field) => field.id().equals(nameFieldId))
+      ._unsafeUnwrap()
+      .setDbFieldName(DbFieldName.rehydrate('col_name')._unsafeUnwrap())
+      ._unsafeUnwrap();
+
+    const record = TableRecord.fromRawFieldValues({
+      id: RECORD_ID,
+      tableId,
+      fields: { [nameFieldId.toString()]: 'Alice' },
+    })._unsafeUnwrap();
+    const { db, driver } = createRecordingDb();
+    const repo = createRepository(db, table);
+
+    const result = await repo.insertManyStream(
+      { actorId },
+      table,
+      [
+        {
+          records: [record],
+          restoreRecordsById: new Map([[RECORD_ID, { autoNumber: 1 }]]),
+        },
+      ],
+      { skipChangedFields: true, skipComputedUpdates: true }
+    );
+
+    expect(result.isOk()).toBe(true);
+    const insertQuery = driver.queries.find((query) =>
+      query.sql.includes(`insert into "${BASE_ID}"."${TABLE_ID}"`)
+    );
+    expect(insertQuery?.sql).toBeDefined();
+    expect(insertQuery?.sql.toLowerCase()).not.toContain('returning');
+    expect(insertQuery?.sql).not.toContain('changed_');
+
+    vi.useRealTimers();
+  });
+
+  it('casts oneMany order column update to integer', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2025-01-01T00:00:00.000Z'));
+
+    const baseId = BaseId.create(BASE_ID)._unsafeUnwrap();
+    const tableId = TableId.create(TABLE_ID)._unsafeUnwrap();
+    const foreignTableId = TableId.create(FOREIGN_TABLE_ID)._unsafeUnwrap();
+    const lookupFieldId = FieldId.create(LOOKUP_FIELD_ID)._unsafeUnwrap();
+    const linkFieldId = FieldId.create(LINK_FIELD_ID)._unsafeUnwrap();
+    const symmetricFieldId = FieldId.create(SYMMETRIC_FIELD_ID)._unsafeUnwrap();
+    const nameFieldId = FieldId.create(NAME_FIELD_ID)._unsafeUnwrap();
+    const viewId = ViewId.create(VIEW_ID)._unsafeUnwrap();
+    const recordId = RecordId.create(RECORD_ID)._unsafeUnwrap();
+    const actorId = ActorId.create(ACTOR_ID)._unsafeUnwrap();
+
+    const fkHostTableName = `${BASE_ID}.${FOREIGN_TABLE_ID}`;
+    const selfKeyName = `__fk_${SYMMETRIC_FIELD_ID}`;
+    const orderColumnName = `${selfKeyName}_order`;
+
+    const dto: ITablePersistenceDTO = {
+      id: tableId.toString(),
+      baseId: baseId.toString(),
+      name: 'OrderColumnUpdateTable',
+      primaryFieldId: nameFieldId.toString(),
+      fields: [
+        {
+          id: nameFieldId.toString(),
+          name: 'Name',
+          type: 'singleLineText',
+          dbFieldName: 'col_name',
+        },
+        {
+          id: linkFieldId.toString(),
+          name: 'Links',
+          type: 'link',
+          dbFieldName: 'col_links',
+          meta: { hasOrderColumn: true },
+          options: {
+            relationship: 'oneMany',
+            foreignTableId: foreignTableId.toString(),
+            lookupFieldId: lookupFieldId.toString(),
+            fkHostTableName,
+            selfKeyName,
+            foreignKeyName: '__id',
+            symmetricFieldId: symmetricFieldId.toString(),
+          },
+        },
+      ],
+      views: [
+        {
+          id: viewId.toString(),
+          name: 'Grid',
+          type: 'grid',
+          columnMeta: {},
+        },
+      ],
+    };
+
+    const mapper = new DefaultTableMapper();
+    const table = mapper.toDomain(dto)._unsafeUnwrap();
+
+    const fieldValues = new Map<string, unknown>([
+      [linkFieldId.toString(), [{ id: LINKED_RECORD_A }, { id: LINKED_RECORD_B }]],
+    ]);
+
+    const updateRecordResult = table.updateRecord(recordId, fieldValues);
+    expect(updateRecordResult.isOk()).toBe(true);
+    const { mutateSpec } = updateRecordResult._unsafeUnwrap();
+
+    const { db } = createRecordingDb();
+    const now = new Date().toISOString();
+
+    const visitor = CellValueMutateVisitor.create(db, table, `${BASE_ID}.${TABLE_ID}`, {
+      recordId: recordId.toString(),
+      actorId: actorId.toString(),
+      now,
+    });
+
+    const acceptResult = mutateSpec.accept(visitor);
+    expect(acceptResult.isOk()).toBe(true);
+
+    const statements = visitor.build()._unsafeUnwrap();
+    const orderUpdate = statements.additionalStatements.find(
+      (q) => q.sql.includes(orderColumnName) && q.sql.includes('order_index')
+    );
+    expect(orderUpdate).toBeDefined();
+    expect(orderUpdate!.sql).toContain('::integer');
+
+    vi.useRealTimers();
+  });
+});
+
+// =============================================================================
+// Tests: hybrid/async computed update routing
+// =============================================================================
+
+const createHybridRepository = (
+  db: Kysely<DynamicDB>,
+  table: Table,
+  overrides: {
+    computedUpdatePlanner?: ComputedUpdatePlanner;
+    computedUpdateOutbox?: IComputedUpdateOutbox;
+    computedUpdateStrategy?: IUpdateStrategy;
+    eventBus?: IEventBus;
+  } = {}
+) => {
+  const logger = createLogger();
+  const computedFieldUpdater = {} as ComputedFieldUpdater;
+  const computedUpdatePlanner = overrides.computedUpdatePlanner ?? createNoopComputedPlanner(table);
+  const computedUpdateOutbox = overrides.computedUpdateOutbox ?? createNoopOutbox();
+  const computedUpdateStrategy = overrides.computedUpdateStrategy ?? {
+    mode: 'hybrid' as const,
+    name: 'hybrid',
+    execute: async () => ok(undefined),
+    scheduleDispatch: vi.fn(),
+  };
+  const hasher = createNoopHasher();
+
+  return new PostgresTableRecordRepository(
+    db as unknown as Kysely<V1TeableDatabase>,
+    logger,
+    createNoopRecordOrderCalculator(),
+    computedUpdatePlanner,
+    computedFieldUpdater,
+    computedUpdateStrategy,
+    computedUpdateOutbox,
+    new PostgresRecordMutationSnapshotCaptureService(
+      db as unknown as Kysely<V1TeableDatabase>,
+      logger
+    ),
+    overrides.eventBus ?? createNoopEventBus(),
+    hasher
+  );
+};
+
+describe('PostgresTableRecordRepository hybrid/async computed update', () => {
+  it('returns same-record computed changes inline for single-record hybrid updates', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2025-01-01T00:00:00.000Z'));
+
+    const baseId = BaseId.create(BASE_ID)._unsafeUnwrap();
+    const tableId = TableId.create(TABLE_ID)._unsafeUnwrap();
+    const textFieldId = FieldId.create(NAME_FIELD_ID)._unsafeUnwrap();
+    const computedFieldId = FieldId.create(`fld${'m'.repeat(16)}`)._unsafeUnwrap();
+    const recordId = RecordId.create(RECORD_ID)._unsafeUnwrap();
+    const actorId = ActorId.create(ACTOR_ID)._unsafeUnwrap();
+
+    const builder = Table.builder()
+      .withId(tableId)
+      .withBaseId(baseId)
+      .withName(TableName.create('HybridSingleUpdateTable')._unsafeUnwrap());
+    builder
+      .field()
+      .singleLineText()
+      .withId(textFieldId)
+      .withName(FieldName.create('Name')._unsafeUnwrap())
+      .primary()
+      .done();
+    builder
+      .field()
+      .formula()
+      .withId(computedFieldId)
+      .withName(FieldName.create('Commission')._unsafeUnwrap())
+      .withExpression(FormulaExpression.create(`{${textFieldId.toString()}} & ""`)._unsafeUnwrap())
+      .withDependencies([textFieldId])
+      .done();
+    builder.view().defaultGrid().done();
+
+    const table = builder.build()._unsafeUnwrap();
+    table
+      .getField((field) => field.id().equals(textFieldId))
+      ._unsafeUnwrap()
+      .setDbFieldName(DbFieldName.rehydrate('col_name')._unsafeUnwrap())
+      ._unsafeUnwrap();
+    table
+      .getField((field) => field.id().equals(computedFieldId))
+      ._unsafeUnwrap()
+      .setDbFieldName(DbFieldName.rehydrate('col_commission')._unsafeUnwrap())
+      ._unsafeUnwrap();
+
+    const planStageSpy = vi.fn().mockResolvedValue(
+      ok({
+        baseId: table.baseId(),
+        seedTableId: table.id(),
+        seedRecordIds: [recordId],
+        extraSeedRecords: [],
+        beforeImageRecords: [],
+        changedFieldIds: [textFieldId],
+        changeType: 'update' as const,
+        steps: [
+          {
+            tableId,
+            fieldIds: [computedFieldId],
+            level: 0,
+          },
+        ],
+        edges: [],
+        estimatedComplexity: 1,
+        sameTableBatches: [],
+      })
+    );
+    const enqueueSeedTaskSpy = vi.fn().mockResolvedValue(ok({ taskId: 'seed-1', merged: false }));
+    const executeSpy = vi.fn().mockResolvedValue(
+      ok({
+        changesByStep: [
+          {
+            tableId: tableId.toString(),
+            recordChanges: [
+              {
+                recordId: recordId.toString(),
+                oldVersion: 2,
+                changes: [
+                  {
+                    fieldId: computedFieldId.toString(),
+                    oldValue: 0,
+                    newValue: 72,
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      })
+    );
+
+    const computedUpdatePlanner = {
+      plan: async () => ok({ steps: [] }),
+      planStage: planStageSpy,
+      resolveBeforeImageRequirements: async () =>
+        ok({ needsBeforeImage: false, requiredFieldIds: [] }),
+    } as unknown as ComputedUpdatePlanner;
+
+    const computedUpdateOutbox = {
+      ...createNoopOutbox(),
+      enqueueSeedTask: enqueueSeedTaskSpy,
+    };
+
+    const computedUpdateStrategy = {
+      mode: 'hybrid' as const,
+      name: 'hybrid',
+      execute: executeSpy,
+      scheduleDispatch: vi.fn(),
+    };
+
+    const repo = createHybridRepository(createRecordingDb().db, table, {
+      computedUpdatePlanner,
+      computedUpdateOutbox,
+      computedUpdateStrategy,
+    });
+
+    const result = await (
+      repo as unknown as {
+        runComputedUpdateById(
+          context: { actorId: ActorId },
+          table: Table,
+          recordId: RecordId,
+          changeType: 'update',
+          impact: {
+            valueFieldIds: ReadonlyArray<FieldId>;
+            linkFieldIds: ReadonlyArray<FieldId>;
+          }
+        ): Promise<{
+          isOk(): boolean;
+          _unsafeUnwrap(): {
+            changesByStep: ReadonlyArray<{
+              recordChanges: ReadonlyArray<{
+                changes: ReadonlyArray<{ fieldId: string; newValue: unknown }>;
+              }>;
+            }>;
+          };
+        }>;
+      }
+    ).runComputedUpdateById({ actorId }, table, recordId, 'update', {
+      valueFieldIds: [textFieldId],
+      linkFieldIds: [],
+    });
+
+    expect(result.isOk()).toBe(true);
+    expect(planStageSpy).toHaveBeenCalledTimes(1);
+    expect(executeSpy).toHaveBeenCalledTimes(1);
+    expect(enqueueSeedTaskSpy).not.toHaveBeenCalled();
+    expect(result._unsafeUnwrap().changesByStep[0]?.recordChanges[0]?.changes[0]).toMatchObject({
+      fieldId: computedFieldId.toString(),
+      newValue: 72,
+    });
+
+    vi.useRealTimers();
+  });
+
+  it('skips computed before-image planning when computed updates are skipped in updateManyStream', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2025-01-01T00:00:00.000Z'));
+
+    const baseId = BaseId.create(BASE_ID)._unsafeUnwrap();
+    const tableId = TableId.create(TABLE_ID)._unsafeUnwrap();
+    const textFieldId = FieldId.create(NAME_FIELD_ID)._unsafeUnwrap();
+    const recordIdA = RecordId.create(RECORD_ID)._unsafeUnwrap();
+    const actorId = ActorId.create(ACTOR_ID)._unsafeUnwrap();
+
+    const builder = Table.builder()
+      .withId(tableId)
+      .withBaseId(baseId)
+      .withName(TableName.create('SkipComputedStreamTable')._unsafeUnwrap());
+    builder
+      .field()
+      .singleLineText()
+      .withId(textFieldId)
+      .withName(FieldName.create('Name')._unsafeUnwrap())
+      .primary()
+      .done();
+    builder.view().defaultGrid().done();
+
+    const table = builder.build()._unsafeUnwrap();
+    table
+      .getField((field) => field.id().equals(textFieldId))
+      ._unsafeUnwrap()
+      .setDbFieldName(DbFieldName.rehydrate('col_name')._unsafeUnwrap())
+      ._unsafeUnwrap();
+
+    const updateResult = table
+      .updateRecord(recordIdA, new Map([[NAME_FIELD_ID, 'Alice']]))
+      ._unsafeUnwrap();
+
+    const planStageSpy = vi.fn();
+    const resolveBeforeImageRequirementsSpy = vi
+      .fn()
+      .mockResolvedValue(ok({ needsBeforeImage: false, requiredFieldIds: [] }));
+
+    const computedUpdatePlanner = {
+      plan: async () => ok({ steps: [] }),
+      planStage: planStageSpy,
+      resolveBeforeImageRequirements: resolveBeforeImageRequirementsSpy,
+    } as unknown as ComputedUpdatePlanner;
+
+    const tableName = `"${BASE_ID}"."${TABLE_ID}"`;
+    const { db } = createRecordingDb((compiledQuery) => {
+      if (
+        compiledQuery.sql.includes(`UPDATE ${tableName} AS t`) &&
+        compiledQuery.sql.includes('RETURNING')
+      ) {
+        return [{ record_id: recordIdA.toString(), old_version: 1, new_version: 2 }];
+      }
+      return [];
+    });
+
+    const repo = createHybridRepository(db, table, {
+      computedUpdatePlanner,
+    });
+
+    function* batches() {
+      yield ok([updateResult]);
+    }
+
+    const result = await repo.updateManyStream({ actorId }, table, batches(), {
+      skipComputedUpdates: true,
+    });
+    expect(result.isOk()).toBe(true);
+
+    expect(resolveBeforeImageRequirementsSpy).not.toHaveBeenCalled();
+    expect(planStageSpy).not.toHaveBeenCalled();
+
+    vi.useRealTimers();
+  });
+
+  it('plans and executes hybrid policy for updateManyStream when work is not deferred', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2025-01-01T00:00:00.000Z'));
+
+    const baseId = BaseId.create(BASE_ID)._unsafeUnwrap();
+    const tableId = TableId.create(TABLE_ID)._unsafeUnwrap();
+    const textFieldId = FieldId.create(NAME_FIELD_ID)._unsafeUnwrap();
+    const computedFieldId = FieldId.create(`fld${'n'.repeat(16)}`)._unsafeUnwrap();
+    const recordIdA = RecordId.create(RECORD_ID)._unsafeUnwrap();
+    const actorId = ActorId.create(ACTOR_ID)._unsafeUnwrap();
+
+    const builder = Table.builder()
+      .withId(tableId)
+      .withBaseId(baseId)
+      .withName(TableName.create('HybridTable')._unsafeUnwrap());
+    builder
+      .field()
+      .singleLineText()
+      .withId(textFieldId)
+      .withName(FieldName.create('Name')._unsafeUnwrap())
+      .primary()
+      .done();
+    builder
+      .field()
+      .formula()
+      .withId(computedFieldId)
+      .withName(FieldName.create('Computed Name')._unsafeUnwrap())
+      .withExpression(FormulaExpression.create(`{${textFieldId.toString()}} & ""`)._unsafeUnwrap())
+      .withDependencies([textFieldId])
+      .done();
+    builder.view().defaultGrid().done();
+
+    const table = builder.build()._unsafeUnwrap();
+    table
+      .getField((field) => field.id().equals(textFieldId))
+      ._unsafeUnwrap()
+      .setDbFieldName(DbFieldName.rehydrate('col_name')._unsafeUnwrap())
+      ._unsafeUnwrap();
+    table
+      .getField((field) => field.id().equals(computedFieldId))
+      ._unsafeUnwrap()
+      .setDbFieldName(DbFieldName.rehydrate('col_computed_name')._unsafeUnwrap())
+      ._unsafeUnwrap();
+
+    const updateResult = table
+      .updateRecord(recordIdA, new Map([[NAME_FIELD_ID, 'Alice']]))
+      ._unsafeUnwrap();
+
+    const planStageSpy = vi.fn().mockResolvedValue(
+      ok({
+        baseId: table.baseId(),
+        seedTableId: table.id(),
+        seedRecordIds: [recordIdA],
+        extraSeedRecords: [],
+        beforeImageRecords: [],
+        changedFieldIds: [textFieldId],
+        changeType: 'update' as const,
+        steps: [{ tableId, fieldIds: [computedFieldId], level: 0 }],
+        edges: [],
+        estimatedComplexity: 1,
+        sameTableBatches: [],
+      })
+    );
+    const enqueueSeedTaskSpy = vi.fn().mockResolvedValue(ok({ taskId: 'seed-1', merged: false }));
+    const executeSpy = vi.fn().mockResolvedValue(ok({ changesByStep: [] }));
+    const scheduleDispatchSpy = vi.fn();
+
+    const computedUpdatePlanner = {
+      plan: async () => ok({ steps: [] }),
+      planStage: planStageSpy,
+      resolveBeforeImageRequirements: async () =>
+        ok({ needsBeforeImage: false, requiredFieldIds: [] }),
+    } as unknown as ComputedUpdatePlanner;
+
+    const computedUpdateOutbox = {
+      ...createNoopOutbox(),
+      enqueueSeedTask: enqueueSeedTaskSpy,
+    };
+
+    const computedUpdateStrategy = {
+      mode: 'hybrid' as const,
+      name: 'hybrid',
+      execute: executeSpy,
+      scheduleDispatch: scheduleDispatchSpy,
+    };
+
+    const tableName = `"${BASE_ID}"."${TABLE_ID}"`;
+    const { db } = createRecordingDb((compiledQuery) => {
+      if (
+        compiledQuery.sql.includes(`UPDATE ${tableName} AS t`) &&
+        compiledQuery.sql.includes('RETURNING')
+      ) {
+        return [{ record_id: recordIdA.toString(), new_version: 2 }];
+      }
+      return [];
+    });
+
+    const repo = createHybridRepository(db, table, {
+      computedUpdatePlanner,
+      computedUpdateOutbox,
+      computedUpdateStrategy,
+    });
+
+    function* batches() {
+      yield ok([updateResult]);
+    }
+
+    const result = await repo.updateManyStream({ actorId }, table, batches());
+    expect(result.isOk()).toBe(true);
+
+    expect(planStageSpy).toHaveBeenCalledTimes(1);
+    expect(executeSpy).toHaveBeenCalledTimes(1);
+    expect(enqueueSeedTaskSpy).not.toHaveBeenCalled();
+    expect(scheduleDispatchSpy).not.toHaveBeenCalled();
+
+    vi.useRealTimers();
+  });
+
+  it('keeps multi-record hybrid batches on the plan-free outbox path', async () => {
+    const baseId = BaseId.create(BASE_ID)._unsafeUnwrap();
+    const tableId = TableId.create(TABLE_ID)._unsafeUnwrap();
+    const textFieldId = FieldId.create(NAME_FIELD_ID)._unsafeUnwrap();
+    const recordIdA = RecordId.create(RECORD_ID)._unsafeUnwrap();
+    const recordIdB = RecordId.create(`rec${'b'.repeat(16)}`)._unsafeUnwrap();
+    const actorId = ActorId.create(ACTOR_ID)._unsafeUnwrap();
+
+    const builder = Table.builder()
+      .withId(tableId)
+      .withBaseId(baseId)
+      .withName(TableName.create('HybridMultiRecordTable')._unsafeUnwrap());
+    builder
+      .field()
+      .singleLineText()
+      .withId(textFieldId)
+      .withName(FieldName.create('Name')._unsafeUnwrap())
+      .primary()
+      .done();
+    builder.view().defaultGrid().done();
+    const table = builder.build()._unsafeUnwrap();
+
+    const planStageSpy = vi.fn();
+    const enqueueSeedTaskSpy = vi
+      .fn()
+      .mockResolvedValue(ok({ taskId: 'seed-many', merged: false }));
+    const scheduleDispatchSpy = vi.fn();
+    const computedUpdatePlanner = {
+      plan: async () => ok({ steps: [] }),
+      planStage: planStageSpy,
+      resolveBeforeImageRequirements: async () =>
+        ok({ needsBeforeImage: false, requiredFieldIds: [] }),
+      hasWritableComputedWork: () => true,
+    } as unknown as ComputedUpdatePlanner;
+    const computedUpdateOutbox = {
+      ...createNoopOutbox(),
+      enqueueSeedTask: enqueueSeedTaskSpy,
+    };
+    const repo = createHybridRepository(createRecordingDb().db, table, {
+      computedUpdatePlanner,
+      computedUpdateOutbox,
+      computedUpdateStrategy: {
+        mode: 'hybrid',
+        name: 'hybrid',
+        execute: vi.fn(),
+        scheduleDispatch: scheduleDispatchSpy,
+      },
+    });
+
+    const result = await (
+      repo as unknown as {
+        runComputedUpdateManyByIds(
+          context: { actorId: ActorId },
+          table: Table,
+          recordIds: ReadonlyArray<RecordId>,
+          impact: {
+            valueFieldIds: ReadonlyArray<FieldId>;
+            linkFieldIds: ReadonlyArray<FieldId>;
+          }
+        ): Promise<{ isOk(): boolean }>;
+      }
+    ).runComputedUpdateManyByIds({ actorId }, table, [recordIdA, recordIdB], {
+      valueFieldIds: [textFieldId],
+      linkFieldIds: [],
+    });
+
+    expect(result.isOk()).toBe(true);
+    expect(planStageSpy).not.toHaveBeenCalled();
+    expect(enqueueSeedTaskSpy).toHaveBeenCalledTimes(1);
+    expect(enqueueSeedTaskSpy.mock.calls[0][0].seedRecordIds).toEqual([
+      recordIdA.toString(),
+      recordIdB.toString(),
+    ]);
+    expect(scheduleDispatchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips plan-free hybrid seeds when the change has no computed work', async () => {
+    const baseId = BaseId.create(BASE_ID)._unsafeUnwrap();
+    const tableId = TableId.create(TABLE_ID)._unsafeUnwrap();
+    const textFieldId = FieldId.create(NAME_FIELD_ID)._unsafeUnwrap();
+    const recordIdA = RecordId.create(RECORD_ID)._unsafeUnwrap();
+    const recordIdB = RecordId.create(`rec${'b'.repeat(16)}`)._unsafeUnwrap();
+    const actorId = ActorId.create(ACTOR_ID)._unsafeUnwrap();
+
+    const builder = Table.builder()
+      .withId(tableId)
+      .withBaseId(baseId)
+      .withName(TableName.create('HybridNoComputedTable')._unsafeUnwrap());
+    builder
+      .field()
+      .singleLineText()
+      .withId(textFieldId)
+      .withName(FieldName.create('Name')._unsafeUnwrap())
+      .primary()
+      .done();
+    builder.view().defaultGrid().done();
+    const table = builder.build()._unsafeUnwrap();
+
+    const planStageSpy = vi.fn();
+    const enqueueSeedTaskSpy = vi
+      .fn()
+      .mockResolvedValue(ok({ taskId: 'seed-many', merged: false }));
+    const scheduleDispatchSpy = vi.fn();
+    const computedUpdatePlanner = {
+      plan: async () => ok({ steps: [] }),
+      planStage: planStageSpy,
+      resolveBeforeImageRequirements: async () =>
+        ok({ needsBeforeImage: false, requiredFieldIds: [] }),
+      hasWritableComputedWork: () => false,
+    } as unknown as ComputedUpdatePlanner;
+    const computedUpdateOutbox = {
+      ...createNoopOutbox(),
+      enqueueSeedTask: enqueueSeedTaskSpy,
+    };
+    const repo = createHybridRepository(createRecordingDb().db, table, {
+      computedUpdatePlanner,
+      computedUpdateOutbox,
+      computedUpdateStrategy: {
+        mode: 'hybrid',
+        name: 'hybrid',
+        execute: vi.fn(),
+        scheduleDispatch: scheduleDispatchSpy,
+      },
+    });
+
+    const result = await (
+      repo as unknown as {
+        runComputedUpdateManyByIds(
+          context: { actorId: ActorId },
+          table: Table,
+          recordIds: ReadonlyArray<RecordId>,
+          impact: {
+            valueFieldIds: ReadonlyArray<FieldId>;
+            linkFieldIds: ReadonlyArray<FieldId>;
+          }
+        ): Promise<{ isOk(): boolean }>;
+      }
+    ).runComputedUpdateManyByIds({ actorId }, table, [recordIdA, recordIdB], {
+      valueFieldIds: [textFieldId],
+      linkFieldIds: [],
+    });
+
+    expect(result.isOk()).toBe(true);
+    expect(planStageSpy).not.toHaveBeenCalled();
+    expect(enqueueSeedTaskSpy).not.toHaveBeenCalled();
+    expect(scheduleDispatchSpy).not.toHaveBeenCalled();
+  });
+
+  it('still calls planStage in sync mode for updateManyStream', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2025-01-01T00:00:00.000Z'));
+
+    const baseId = BaseId.create(BASE_ID)._unsafeUnwrap();
+    const tableId = TableId.create(TABLE_ID)._unsafeUnwrap();
+    const textFieldId = FieldId.create(NAME_FIELD_ID)._unsafeUnwrap();
+    const recordIdA = RecordId.create(RECORD_ID)._unsafeUnwrap();
+    const actorId = ActorId.create(ACTOR_ID)._unsafeUnwrap();
+
+    const builder = Table.builder()
+      .withId(tableId)
+      .withBaseId(baseId)
+      .withName(TableName.create('SyncTable')._unsafeUnwrap());
+    builder
+      .field()
+      .singleLineText()
+      .withId(textFieldId)
+      .withName(FieldName.create('Name')._unsafeUnwrap())
+      .primary()
+      .done();
+    builder.view().defaultGrid().done();
+
+    const table = builder.build()._unsafeUnwrap();
+    table
+      .getField((field) => field.id().equals(textFieldId))
+      ._unsafeUnwrap()
+      .setDbFieldName(DbFieldName.rehydrate('col_name')._unsafeUnwrap())
+      ._unsafeUnwrap();
+
+    const updateResult = table
+      .updateRecord(recordIdA, new Map([[NAME_FIELD_ID, 'Bob']]))
+      ._unsafeUnwrap();
+
+    const planStageSpy = vi.fn().mockResolvedValue(
+      ok({
+        baseId: table.baseId(),
+        seedTableId: table.id(),
+        seedRecordIds: [recordIdA],
+        extraSeedRecords: [],
+        steps: [],
+        edges: [],
+        estimatedComplexity: 0,
+        changeType: 'update' as const,
+      })
+    );
+    const enqueueSeedTaskSpy = vi.fn().mockResolvedValue(ok({ taskId: 'seed-1', merged: false }));
+
+    const computedUpdatePlanner = {
+      plan: async () => ok({ steps: [] }),
+      planStage: planStageSpy,
+      resolveBeforeImageRequirements: async () =>
+        ok({ needsBeforeImage: false, requiredFieldIds: [] }),
+    } as unknown as ComputedUpdatePlanner;
+
+    const computedUpdateOutbox = {
+      ...createNoopOutbox(),
+      enqueueSeedTask: enqueueSeedTaskSpy,
+    };
+
+    const syncStrategy = {
+      mode: 'sync' as const,
+      name: 'sync',
+      execute: async () => ok(undefined),
+      scheduleDispatch: vi.fn(),
+    };
+
+    const tableName = `"${BASE_ID}"."${TABLE_ID}"`;
+    const { db } = createRecordingDb((compiledQuery) => {
+      if (
+        compiledQuery.sql.includes(`UPDATE ${tableName} AS t`) &&
+        compiledQuery.sql.includes('RETURNING')
+      ) {
+        return [{ record_id: recordIdA.toString(), new_version: 2 }];
+      }
+      return [];
+    });
+
+    const repo = createHybridRepository(db, table, {
+      computedUpdatePlanner,
+      computedUpdateOutbox,
+      computedUpdateStrategy: syncStrategy,
+    });
+
+    function* batches() {
+      yield ok([updateResult]);
+    }
+
+    const result = await repo.updateManyStream({ actorId }, table, batches());
+    expect(result.isOk()).toBe(true);
+
+    // In sync mode, planStage MUST still be called
+    expect(planStageSpy).toHaveBeenCalledTimes(1);
+
+    // enqueueSeedTask must NOT be called in sync mode (plan had 0 steps)
+    expect(enqueueSeedTaskSpy).not.toHaveBeenCalled();
+
+    vi.useRealTimers();
+  });
+
+  it('publishes computed update events with old values in sync mode', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2025-01-01T00:00:00.000Z'));
+
+    const baseId = BaseId.create(BASE_ID)._unsafeUnwrap();
+    const tableId = TableId.create(TABLE_ID)._unsafeUnwrap();
+    const textFieldId = FieldId.create(NAME_FIELD_ID)._unsafeUnwrap();
+    const recordIdA = RecordId.create(RECORD_ID)._unsafeUnwrap();
+    const actorId = ActorId.create(ACTOR_ID)._unsafeUnwrap();
+
+    const builder = Table.builder()
+      .withId(tableId)
+      .withBaseId(baseId)
+      .withName(TableName.create('SyncComputedEventTable')._unsafeUnwrap());
+    builder
+      .field()
+      .singleLineText()
+      .withId(textFieldId)
+      .withName(FieldName.create('Name')._unsafeUnwrap())
+      .primary()
+      .done();
+    builder.view().defaultGrid().done();
+
+    const table = builder.build()._unsafeUnwrap();
+    table
+      .getField((field) => field.id().equals(textFieldId))
+      ._unsafeUnwrap()
+      .setDbFieldName(DbFieldName.rehydrate('col_name')._unsafeUnwrap())
+      ._unsafeUnwrap();
+
+    const updateResult = table
+      .updateRecord(recordIdA, new Map([[NAME_FIELD_ID, 'Bob']]))
+      ._unsafeUnwrap();
+
+    const planStageSpy = vi.fn().mockResolvedValue(
+      ok({
+        baseId: table.baseId(),
+        seedTableId: table.id(),
+        seedRecordIds: [recordIdA],
+        extraSeedRecords: [],
+        steps: [{ tableId, level: 0, fieldIds: [textFieldId] }],
+        edges: [],
+        estimatedComplexity: 1,
+        changeType: 'update' as const,
+      })
+    );
+
+    const computedUpdatePlanner = {
+      plan: async () => ok({ steps: [] }),
+      planStage: planStageSpy,
+      resolveBeforeImageRequirements: async () =>
+        ok({ needsBeforeImage: false, requiredFieldIds: [] }),
+    } as unknown as ComputedUpdatePlanner;
+
+    const syncStrategy = {
+      mode: 'sync' as const,
+      name: 'sync',
+      execute: async () =>
+        ok({
+          changesByStep: [
+            {
+              tableId: tableId.toString(),
+              recordChanges: [
+                {
+                  recordId: recordIdA.toString(),
+                  oldVersion: 7,
+                  changes: [
+                    {
+                      fieldId: textFieldId.toString(),
+                      oldValue: 'Plastic',
+                      newValue: 'Plastic',
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        }),
+      scheduleDispatch: vi.fn(),
+    };
+
+    const afterCommitHandlers: Array<() => void | Promise<void>> = [];
+    const transaction = {
+      kind: 'unitOfWorkTransaction' as const,
+      afterCommit: vi.fn((handler: () => void | Promise<void>) => {
+        afterCommitHandlers.push(handler);
+      }),
+    };
+    const publishedEvents: unknown[] = [];
+    const publishContexts: unknown[] = [];
+    const eventBus: IEventBus = {
+      publish: async (context, event) => {
+        publishContexts.push(context);
+        publishedEvents.push(event);
+        return createNoopEventBus().publish(context, event);
+      },
+      publishMany: async (context, events) => {
+        publishContexts.push(context);
+        publishedEvents.push(...events);
+        return ok(undefined);
+      },
+      subscribe: () => ({ unsubscribe: () => undefined }),
+    } as IEventBus;
+
+    const tableName = `"${BASE_ID}"."${TABLE_ID}"`;
+    const { db } = createRecordingDb((compiledQuery) => {
+      if (
+        compiledQuery.sql.includes(`UPDATE ${tableName} AS t`) &&
+        compiledQuery.sql.includes('RETURNING')
+      ) {
+        return [{ record_id: recordIdA.toString(), new_version: 2 }];
+      }
+      return [];
+    });
+
+    const repo = createHybridRepository(db, table, {
+      computedUpdatePlanner,
+      computedUpdateStrategy: syncStrategy,
+      eventBus,
+    });
+
+    function* batches() {
+      yield ok([updateResult]);
+    }
+
+    const result = await repo.updateManyStream({ actorId, transaction }, table, batches());
+    expect(result.isOk()).toBe(true);
+    expect(publishedEvents).toHaveLength(0);
+    expect(transaction.afterCommit).toHaveBeenCalledTimes(1);
+
+    await afterCommitHandlers[0]!();
+    const batchEvent = publishedEvents.find(
+      (event): event is RecordsBatchUpdated => event instanceof RecordsBatchUpdated
+    );
+    expect(batchEvent?.updates[0]?.changes[0]).toMatchObject({
+      fieldId: textFieldId.toString(),
+      oldValue: 'Plastic',
+      newValue: 'Plastic',
+    });
+    expect(publishContexts[0]).toMatchObject({ actorId });
+    expect(publishContexts[0]).not.toHaveProperty('transaction');
+
+    vi.useRealTimers();
+  });
+
+  it('plans hybrid updateMany and exits when there are no computed steps', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2025-01-01T00:00:00.000Z'));
+
+    const baseId = BaseId.create(BASE_ID)._unsafeUnwrap();
+    const tableId = TableId.create(TABLE_ID)._unsafeUnwrap();
+    const textFieldId = FieldId.create(NAME_FIELD_ID)._unsafeUnwrap();
+    const recordId = RecordId.create(RECORD_ID)._unsafeUnwrap();
+    const actorId = ActorId.create(ACTOR_ID)._unsafeUnwrap();
+
+    const builder = Table.builder()
+      .withId(tableId)
+      .withBaseId(baseId)
+      .withName(TableName.create('HybridBulkTable')._unsafeUnwrap());
+    builder
+      .field()
+      .singleLineText()
+      .withId(textFieldId)
+      .withName(FieldName.create('Status')._unsafeUnwrap())
+      .primary()
+      .done();
+    builder.view().defaultGrid().done();
+
+    const table = builder.build()._unsafeUnwrap();
+    table
+      .getField((field) => field.id().equals(textFieldId))
+      ._unsafeUnwrap()
+      .setDbFieldName(DbFieldName.rehydrate('col_status')._unsafeUnwrap())
+      ._unsafeUnwrap();
+
+    const mutateSpec = table
+      .updateRecord(recordId, new Map([[NAME_FIELD_ID, 'done']]))
+      ._unsafeUnwrap().mutateSpec;
+    const filterSpec = buildRecordConditionSpec(table, {
+      fieldId: textFieldId.toString(),
+      operator: 'is',
+      value: 'pending',
+    })._unsafeUnwrap();
+
+    const planStageSpy = vi.fn().mockResolvedValue(
+      ok({
+        baseId: table.baseId(),
+        seedTableId: table.id(),
+        seedRecordIds: [recordId],
+        extraSeedRecords: [],
+        beforeImageRecords: [],
+        changedFieldIds: [textFieldId],
+        changeType: 'update' as const,
+        steps: [],
+        edges: [],
+        estimatedComplexity: 0,
+        sameTableBatches: [],
+      })
+    );
+    const enqueueSeedTaskSpy = vi.fn().mockResolvedValue(ok({ taskId: 'seed-2', merged: false }));
+
+    const computedUpdatePlanner = {
+      plan: async () => ok({ steps: [] }),
+      planStage: planStageSpy,
+      resolveBeforeImageRequirements: async () =>
+        ok({ needsBeforeImage: false, requiredFieldIds: [] }),
+    } as unknown as ComputedUpdatePlanner;
+
+    const computedUpdateOutbox = {
+      ...createNoopOutbox(),
+      enqueueSeedTask: enqueueSeedTaskSpy,
+    };
+
+    const computedUpdateStrategy = {
+      mode: 'hybrid' as const,
+      name: 'hybrid',
+      execute: async () => ok(undefined),
+      scheduleDispatch: vi.fn(),
+    };
+
+    const { db } = createRecordingDb((compiledQuery) => {
+      if (compiledQuery.sql.includes('RETURNING')) {
+        return [{ record_id: recordId.toString(), new_version: 2, old_version: 1 }];
+      }
+      return [];
+    });
+
+    const repo = createHybridRepository(db, table, {
+      computedUpdatePlanner,
+      computedUpdateOutbox,
+      computedUpdateStrategy,
+    });
+
+    const result = await repo.updateMany({ actorId }, table, filterSpec, mutateSpec);
+    expect(result.isOk()).toBe(true);
+
+    expect(planStageSpy).toHaveBeenCalledTimes(1);
+    expect(enqueueSeedTaskSpy).not.toHaveBeenCalled();
+
+    vi.useRealTimers();
+  });
+});

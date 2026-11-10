@@ -1,33 +1,23 @@
-import { Check, Plus } from '@teable/icons';
-import {
-  Button,
-  Command,
-  CommandEmpty,
-  CommandGroup,
-  CommandInput,
-  CommandItem,
-  CommandList,
-  cn,
-  useCommandState,
-} from '@teable/ui-lib';
+import { Plus } from '@teable/icons';
+import { Command, CommandInput, CommandItem } from '@teable/ui-lib';
 import type { ForwardRefRenderFunction } from 'react';
-import { forwardRef, useCallback, useImperativeHandle, useRef, useState } from 'react';
+import { forwardRef, useCallback, useImperativeHandle, useMemo, useRef, useState } from 'react';
+import { useTranslation } from '../../../context/app/i18n';
+import { errorRequestHandler } from '../../../context/app/queryClient';
+import type { ISelectOption } from '../../cell-value';
 import type { ICellEditor, IEditorRef } from '../type';
-import { SelectTag } from './SelectTag';
+import { OptionList } from './components';
 
 export type ISelectValue<T extends boolean> = T extends true ? string[] : string;
 
 export interface ISelectEditorMain<T extends boolean> extends ICellEditor<ISelectValue<T>> {
-  options?: {
-    label: string;
-    value: string;
-    color?: string;
-    backgroundColor?: string;
-  }[];
+  preventAutoNewOptions?: boolean;
+  options?: ISelectOption[];
   isMultiple?: T;
   style?: React.CSSProperties;
   className?: string;
-  onOptionAdd?: (name: string) => Promise<void>;
+  onOptionAdd?: (optionName: string) => Promise<void>;
+  initialSearch?: string;
 }
 
 const getValue = (value?: string | string[]) => {
@@ -41,6 +31,7 @@ const SelectEditorMainBase: ForwardRefRenderFunction<
   ISelectEditorMain<boolean>
 > = (props, ref) => {
   const {
+    preventAutoNewOptions,
     value: originValue,
     options = [],
     isMultiple,
@@ -48,15 +39,17 @@ const SelectEditorMainBase: ForwardRefRenderFunction<
     className,
     onChange,
     onOptionAdd,
+    initialSearch,
   } = props;
 
   const [value, setValue] = useState<string[]>(getValue(originValue));
-  const [searchValue, setSearchValue] = useState('');
+  const [searchValue, setSearchValue] = useState(initialSearch ?? '');
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const addingOptionRef = useRef(false);
+  const { t } = useTranslation();
 
   useImperativeHandle(ref, () => ({
     focus: () => {
-      setSearchValue('');
       inputRef.current?.focus();
     },
     setValue: (value?: string | string[]) => {
@@ -64,13 +57,22 @@ const SelectEditorMainBase: ForwardRefRenderFunction<
     },
   }));
 
+  const filteredOptions = useMemo(() => {
+    if (!searchValue) return options;
+
+    return options.filter((v) => v.label.toLowerCase().includes(searchValue.toLowerCase()));
+  }, [options, searchValue]);
+
   const onSelect = (val: string) => {
     setSearchValue('');
     if (isMultiple) {
       const newValue = value.includes(val) ? value.filter((v) => v !== val) : value.concat(val);
+      setValue(newValue);
       return onChange?.(newValue);
     }
-    onChange?.(val === value[0] ? undefined : val);
+    const newValue = val === value[0] ? undefined : val;
+    setValue(getValue(newValue));
+    onChange?.(newValue);
   };
 
   const checkIsActive = useCallback(
@@ -81,92 +83,64 @@ const SelectEditorMainBase: ForwardRefRenderFunction<
   );
 
   const onOptionAddInner = async () => {
-    if (!searchValue) return;
-    setSearchValue('');
-    await onOptionAdd?.(searchValue);
+    if (!searchValue || preventAutoNewOptions || addingOptionRef.current) return;
+    const submittedName = searchValue;
+    addingOptionRef.current = true;
+    try {
+      await onOptionAdd?.(submittedName);
+    } catch (error) {
+      // Creating the choice is the caller's request (temporaryPaste) and it is a plain
+      // axios call, so no query/mutation cache reports it. The name stays in the input
+      // and never reaches onChange: the choice does not exist until the request succeeds.
+      errorRequestHandler(error, t);
+      return;
+    } finally {
+      addingOptionRef.current = false;
+    }
+    setSearchValue((current) => (current === submittedName ? '' : current));
     if (isMultiple) {
-      const newValue = value.concat(searchValue);
+      const newValue = value.concat(submittedName);
       setValue(newValue);
       return onChange?.(newValue);
     }
-    setValue([searchValue]);
-    onChange?.(searchValue);
+    setValue([submittedName]);
+    onChange?.(submittedName);
   };
 
-  const addOptionText = `Add an option '${searchValue}'`;
-  const optionAddable = searchValue && options.findIndex((v) => v.value === searchValue) === -1;
-
   return (
-    <Command className={className} style={style}>
-      <SearchInput
-        reRef={inputRef}
-        searchValue={searchValue}
-        setSearchValue={setSearchValue}
-        onOptionAdd={onOptionAddInner}
+    <Command className={className} style={style} shouldFilter={false}>
+      <CommandInput
+        className="h-8 text-[13px]"
+        ref={inputRef}
+        placeholder={t('common.search.placeholder')}
+        value={searchValue}
+        onValueChange={(value) => setSearchValue(value)}
+        onKeyDown={async (e) => {
+          if (e.key === 'Enter' && filteredOptions.length === 0) {
+            e.stopPropagation();
+            await onOptionAddInner();
+          }
+        }}
       />
-      <CommandList>
-        <CommandEmpty className="p-2">
-          <Button variant={'ghost'} size={'sm'} className="w-full text-sm">
-            <Plus className="size-4" />
-            <span className="ml-2">{addOptionText}</span>
-          </Button>
-        </CommandEmpty>
-        <CommandGroup aria-valuetext="name">
-          {options.map(({ label, value, backgroundColor, color }) => (
-            <CommandItem
-              className="justify-between"
-              key={value}
-              value={value}
-              onSelect={() => onSelect(value)}
-            >
-              <SelectTag
-                label={label || 'Untitled'}
-                backgroundColor={backgroundColor}
-                color={color}
-              />
-              {checkIsActive(value) && <Check className={'ml-2 size-4'} />}
-            </CommandItem>
-          ))}
-          <CommandItem
-            className={cn('items-center justify-center', !optionAddable && 'opacity-0 h-0 p-0')}
-            onSelect={onOptionAddInner}
-          >
+      <OptionList options={filteredOptions} onSelect={onSelect} checkIsActive={checkIsActive} />
+      {searchValue &&
+        !filteredOptions.some((v) => v.label === searchValue) &&
+        onOptionAdd &&
+        !preventAutoNewOptions && (
+          <CommandItem className="items-center justify-center" onSelect={onOptionAddInner}>
             <Plus className="size-4 shrink-0" />
-            <span className="ml-2 truncate">{addOptionText}</span>
+            <span className="ms-2 truncate text-[13px]">
+              {t('editor.select.addOption', { option: searchValue })}
+            </span>
           </CommandItem>
-        </CommandGroup>
-      </CommandList>
+        )}
+      {preventAutoNewOptions && filteredOptions.length === 0 && (
+        <CommandItem className="items-center justify-center">
+          <span className="ms-2 truncate text-[13px]">{t('common.empty')}</span>
+        </CommandItem>
+      )}
     </Command>
   );
 };
 
 export const SelectEditorMain = forwardRef(SelectEditorMainBase);
-
-const SearchInput = ({
-  reRef,
-  searchValue,
-  setSearchValue,
-  onOptionAdd,
-}: {
-  reRef: React.Ref<HTMLInputElement>;
-  searchValue: string;
-  setSearchValue: (value: string) => void;
-  onOptionAdd: () => Promise<void>;
-}) => {
-  const isEmpty = useCommandState((state) => state.filtered.count === 1);
-
-  return (
-    <CommandInput
-      ref={reRef}
-      placeholder="Search option"
-      value={searchValue}
-      onValueChange={(value) => setSearchValue(value)}
-      onKeyDown={async (e) => {
-        if (e.key === 'Enter' && isEmpty) {
-          e.stopPropagation();
-          await onOptionAdd();
-        }
-      }}
-    />
-  );
-};

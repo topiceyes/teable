@@ -1,16 +1,19 @@
 import type { RouteConfig } from '@asteasolutions/zod-to-openapi';
-import type { ITableListVo } from '@teable/core';
-import { tableListVoSchema } from '@teable/core';
 import { axios } from '../axios';
 import { registerRoute, urlBuilder } from '../utils';
 import { z } from '../zod';
+import { tableListVoSchema } from './create';
+
+export type ITableListVo = z.infer<typeof tableListVoSchema>;
 
 export const GET_TABLE_LIST = '/base/{baseId}/table';
 
 export const GetTableListRoute: RouteConfig = registerRoute({
   method: 'get',
   path: GET_TABLE_LIST,
-  description: 'Get table list',
+  summary: 'List tables',
+  description:
+    'Retrieve a list of all tables in the specified project, including their basic information and configurations.',
   request: {
     params: z.object({
       baseId: z.string(),
@@ -18,7 +21,7 @@ export const GetTableListRoute: RouteConfig = registerRoute({
   },
   responses: {
     200: {
-      description: 'Returns the list of table.',
+      description: 'Successfully retrieved the list of tables.',
       content: {
         'application/json': {
           schema: tableListVoSchema,

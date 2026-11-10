@@ -1,27 +1,31 @@
+/* eslint-disable sonarjs/cognitive-complexity */
 /* eslint-disable @typescript-eslint/no-non-null-assertion */
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { AbstractParseTreeVisitor } from 'antlr4ts/tree/AbstractParseTreeVisitor';
-import { CellValueType } from '../models/field/constant';
-import type { FieldCore } from '../models/field/field';
-import type { IRecord } from '../models/record/record.schema';
-import { FunctionName } from './functions/common';
-import type { FormulaFunc } from './functions/common';
-import { FUNCTIONS } from './functions/factory';
-import { FormulaBaseError } from './functions/logical';
 import type {
   BinaryOpContext,
   BooleanLiteralContext,
   BracketsContext,
   DecimalLiteralContext,
+  FieldReferenceCurlyContext,
   FunctionCallContext,
   IntegerLiteralContext,
   LeftWhitespaceOrCommentsContext,
   RightWhitespaceOrCommentsContext,
   RootContext,
   StringLiteralContext,
-  FieldReferenceCurlyContext,
-} from './parser/Formula';
-import type { FormulaVisitor } from './parser/FormulaVisitor';
+  UnaryOpContext,
+  FormulaVisitor,
+} from '@teable/formula';
+import { extractFieldReferenceId } from '@teable/formula';
+import { AbstractParseTreeVisitor } from 'antlr4ts/tree/AbstractParseTreeVisitor';
+import { CellValueType } from '../models/field/constant';
+import type { FieldCore } from '../models/field/field';
+import type { IRecord } from '../models/record';
+import { normalizeFunctionNameAlias } from './function-aliases';
+import { FunctionName } from './functions/common';
+import type { FormulaFunc } from './functions/common';
+import { FUNCTIONS } from './functions/factory';
+import { FormulaBaseError } from './functions/logical';
 import { TypedValue } from './typed-value';
 import { TypedValueConverter } from './typed-value-converter';
 
@@ -33,8 +37,9 @@ export class EvalVisitor
 {
   private readonly converter = new TypedValueConverter();
   constructor(
-    private dependencies: { [fieldId: string]: FieldCore },
-    private record?: IRecord
+    private readonly dependencies: { [fieldId: string]: FieldCore },
+    private readonly record?: IRecord,
+    private readonly timeZone = 'UTC'
   ) {
     super();
   }
@@ -45,19 +50,49 @@ export class EvalVisitor
 
   visitStringLiteral(ctx: StringLiteralContext): any {
     // Extract and return the string value without quotes
-    const value = ctx.text.slice(1, -1);
-    return new TypedValue(value, CellValueType.String);
+    const quotedString = ctx.text;
+    const rawString = quotedString.slice(1, -1);
+    // Handle escape characters
+    const unescapedString = this.unescapeString(rawString);
+    return new TypedValue(unescapedString, CellValueType.String);
+  }
+
+  private unescapeString(str: string): string {
+    return str.replace(/\\(.)/g, (_, char) => {
+      switch (char) {
+        case 'n':
+          return '\n';
+        case 'r':
+          return '\r';
+        case 't':
+          return '\t';
+        case 'b':
+          return '\b';
+        case 'f':
+          return '\f';
+        case 'v':
+          return '\v';
+        case '\\':
+          return '\\';
+        case '"':
+          return '"';
+        case "'":
+          return "'";
+        default:
+          return '\\' + char;
+      }
+    });
   }
 
   visitIntegerLiteral(ctx: IntegerLiteralContext): any {
     // Parse and return the integer value
-    const value = parseInt(ctx.text, 10);
+    const value = Number.parseInt(ctx.text, 10);
     return new TypedValue(value, CellValueType.Number);
   }
 
   visitDecimalLiteral(ctx: DecimalLiteralContext): any {
     // Parse and return the decimal value
-    const value = parseFloat(ctx.text);
+    const value = Number.parseFloat(ctx.text);
     return new TypedValue(value, CellValueType.Number);
   }
 
@@ -135,17 +170,9 @@ export class EvalVisitor
       ctx.LTE(),
       ctx.GT(),
       ctx.GTE(),
-    ].some((op) => Boolean(op));
+    ].some(Boolean);
 
     if (field.cellValueType === CellValueType.DateTime && isComparisonOperator) {
-      return typedValue;
-    }
-
-    if (
-      [CellValueType.Number, CellValueType.Boolean, CellValueType.String].includes(
-        field.cellValueType
-      )
-    ) {
       return typedValue;
     }
 
@@ -159,7 +186,43 @@ export class EvalVisitor
       return new TypedValue(Number(typedValue.value[0]), CellValueType.Number);
     }
 
+    if (
+      [CellValueType.Number, CellValueType.Boolean, CellValueType.String].includes(
+        field.cellValueType
+      )
+    ) {
+      return typedValue;
+    }
+
     return new TypedValue(field.cellValue2String(typedValue.value), CellValueType.String);
+  }
+
+  private transformUnaryNodeValue(typedValue: TypedValue) {
+    if (!typedValue.field) {
+      return typedValue;
+    }
+
+    const { cellValueType, isMultipleCellValue } = typedValue.field;
+
+    if (cellValueType !== CellValueType.Number) return null;
+
+    if (isMultipleCellValue) {
+      if (!typedValue.value?.length) return null;
+      if (typedValue.value.length > 1) {
+        throw new TypeError(
+          'Cannot perform mathematical calculations on an array with more than one numeric element.'
+        );
+      }
+      return new TypedValue(Number(typedValue.value[0]), CellValueType.Number);
+    }
+    return typedValue;
+  }
+
+  visitUnaryOp(ctx: UnaryOpContext) {
+    const expr = ctx.expr();
+    const typedValue = this.visit(expr);
+    const value = this.transformUnaryNodeValue(typedValue)?.value ?? null;
+    return new TypedValue(value ? -value : null, CellValueType.Number);
   }
 
   visitBinaryOp(ctx: BinaryOpContext) {
@@ -167,8 +230,8 @@ export class EvalVisitor
     const rightNode = ctx.expr(1);
     const left = this.visit(leftNode)!;
     const right = this.visit(rightNode)!;
-    const lv = this.transformNodeValue(left, ctx)?.value;
-    const rv = this.transformNodeValue(right, ctx)?.value;
+    const lv = this.transformNodeValue(left, ctx)?.value ?? null;
+    const rv = this.transformNodeValue(right, ctx)?.value ?? null;
 
     const valueType = this.getBinaryOpValueType(ctx, left, right);
     let value: any;
@@ -182,7 +245,13 @@ export class EvalVisitor
         break;
       }
       case Boolean(ctx.PLUS()): {
-        value = lv + rv;
+        if (valueType === CellValueType.Number) {
+          value = lv + rv;
+        } else {
+          const leftString = lv == null ? '' : lv;
+          const rightString = rv == null ? '' : rv;
+          value = String(leftString) + String(rightString);
+        }
         break;
       }
       case Boolean(ctx.PERCENT()): {
@@ -210,11 +279,11 @@ export class EvalVisitor
         break;
       }
       case Boolean(ctx.EQUAL()): {
-        value = lv == rv;
+        value = this.areValuesEqual(left, right, lv, rv);
         break;
       }
       case Boolean(ctx.BANG_EQUAL()): {
-        value = lv != rv;
+        value = this.areValuesNotEqual(left, right, lv, rv);
         break;
       }
       case Boolean(ctx.AMP()): {
@@ -235,9 +304,151 @@ export class EvalVisitor
     return new TypedValue(value, valueType);
   }
 
+  private areValuesEqual(
+    leftTypedValue: TypedValue,
+    rightTypedValue: TypedValue,
+    leftValue: unknown,
+    rightValue: unknown
+  ) {
+    const normalized = this.normalizeEqualityValues(
+      leftTypedValue,
+      rightTypedValue,
+      leftValue,
+      rightValue
+    );
+    if (this.shouldUseStrictBlankEquality(leftTypedValue, rightTypedValue, leftValue, rightValue)) {
+      return normalized.left === normalized.right;
+    }
+    return normalized.left == normalized.right;
+  }
+
+  private areValuesNotEqual(
+    leftTypedValue: TypedValue,
+    rightTypedValue: TypedValue,
+    leftValue: unknown,
+    rightValue: unknown
+  ) {
+    const { left: normalizedLeft, right: normalizedRight } = this.normalizeEqualityValues(
+      leftTypedValue,
+      rightTypedValue,
+      leftValue,
+      rightValue
+    );
+
+    if (this.shouldUseStrictBlankEquality(leftTypedValue, rightTypedValue, leftValue, rightValue)) {
+      return normalizedLeft !== normalizedRight;
+    }
+
+    return normalizedLeft != normalizedRight;
+  }
+
+  private shouldUseStrictBlankEquality(
+    leftTypedValue: TypedValue,
+    rightTypedValue: TypedValue,
+    leftValue: unknown,
+    rightValue: unknown
+  ) {
+    const hasNumericOperand =
+      this.isNumericLikeTypedValue(leftTypedValue) || this.isNumericLikeTypedValue(rightTypedValue);
+    if (!hasNumericOperand) {
+      return false;
+    }
+    return (
+      this.isBlankEqualityValue(leftTypedValue, leftValue) ||
+      this.isBlankEqualityValue(rightTypedValue, rightValue)
+    );
+  }
+
+  private isBlankEqualityValue(typedValue: TypedValue, value: unknown) {
+    if (typedValue.isBlank || value == null) {
+      return true;
+    }
+    return this.isStringLikeTypedValue(typedValue) && value === '';
+  }
+
+  private normalizeEqualityValues(
+    leftTypedValue: TypedValue,
+    rightTypedValue: TypedValue,
+    leftValue: unknown,
+    rightValue: unknown
+  ) {
+    if (!this.shouldNormalizeBlankEquality(leftTypedValue, rightTypedValue)) {
+      return {
+        left: leftValue,
+        right: rightValue,
+      };
+    }
+
+    return {
+      left: this.normalizeBlankEqualityValue(leftTypedValue, leftValue),
+      right: this.normalizeBlankEqualityValue(rightTypedValue, rightValue),
+    };
+  }
+
+  private shouldNormalizeBlankEquality(
+    leftTypedValue: TypedValue,
+    rightTypedValue: TypedValue
+  ): boolean {
+    return (
+      this.isStringLikeTypedValue(leftTypedValue) ||
+      this.isStringLikeTypedValue(rightTypedValue) ||
+      this.isNumericLikeTypedValue(leftTypedValue) ||
+      this.isNumericLikeTypedValue(rightTypedValue)
+    );
+  }
+
+  private normalizeBlankEqualityValue(typedValue: TypedValue, value: unknown) {
+    if (value == null && this.isStringLikeTypedValue(typedValue)) {
+      return '';
+    }
+
+    if (value == null && this.isNumericLikeTypedValue(typedValue)) {
+      return '';
+    }
+
+    return value;
+  }
+
+  private isStringLikeTypedValue(typedValue: TypedValue): boolean {
+    if (typedValue.type === CellValueType.String) {
+      return true;
+    }
+
+    if (typedValue.field?.cellValueType === CellValueType.String) {
+      return true;
+    }
+
+    return false;
+  }
+
+  private isNumericLikeTypedValue(typedValue: TypedValue): boolean {
+    if (typedValue.type === CellValueType.Number) {
+      return true;
+    }
+
+    if (typedValue.field?.cellValueType === CellValueType.Number) {
+      return true;
+    }
+
+    return false;
+  }
+
   private createTypedValueByField(field: FieldCore) {
     let value: any = this.record ? this.record.fields[field.id] : null;
-    if (value == null || field.cellValueType !== CellValueType.String) {
+
+    if (field.cellValueType === CellValueType.Number) {
+      return new TypedValue(
+        this.normalizeNumberCellValue(value, field.isMultipleCellValue),
+        field.cellValueType,
+        field.isMultipleCellValue,
+        field
+      );
+    }
+
+    if (
+      value == null ||
+      ![CellValueType.String, CellValueType.DateTime].includes(field.cellValueType)
+    ) {
       return new TypedValue(value, field.cellValueType, field.isMultipleCellValue, field);
     }
 
@@ -252,13 +463,28 @@ export class EvalVisitor
     return new TypedValue(value, field.cellValueType, field.isMultipleCellValue, field);
   }
 
-  visitFieldReferenceCurly(ctx: FieldReferenceCurlyContext) {
-    const fieldId = ctx.field_reference_curly().text;
-    if (fieldId == '') {
-      return new TypedValue('', CellValueType.String);
+  private normalizeNumberCellValue(value: any, isMultiple?: boolean) {
+    const normalize = (cellValue: any) => {
+      if (cellValue == null || cellValue === '') {
+        return null;
+      }
+      return typeof cellValue === 'number' ? cellValue : Number(cellValue);
+    };
+
+    if (isMultiple) {
+      return Array.isArray(value) ? value.map(normalize) : value;
     }
 
-    const field = this.dependencies[fieldId.slice(1, -1)];
+    return normalize(value);
+  }
+
+  visitFieldReferenceCurly(ctx: FieldReferenceCurlyContext) {
+    const fieldId = extractFieldReferenceId(ctx);
+    if (!fieldId) {
+      throw new Error('FieldId {} is a invalid field id');
+    }
+
+    const field = this.dependencies[fieldId];
     if (!field) {
       throw new Error(`FieldId ${fieldId} is a invalid field id`);
     }
@@ -273,10 +499,12 @@ export class EvalVisitor
   }
 
   visitFunctionCall(ctx: FunctionCallContext) {
-    const fnName = ctx.func_name().text.toUpperCase() as FunctionName;
+    const rawName = ctx.func_name().text.toUpperCase();
+    const normalized = normalizeFunctionNameAlias(rawName) as FunctionName;
+    const fnName = normalized;
     const func = FUNCTIONS[fnName];
     if (!func) {
-      throw new TypeError(`Function name ${func} is not found`);
+      throw new TypeError(`Function name ${rawName} is not found`);
     }
 
     if (fnName === FunctionName.Blank) {
@@ -304,6 +532,7 @@ export class EvalVisitor
     const value = func.eval(params as TypedValue<any>[], {
       record: this.record,
       dependencies: this.dependencies,
+      timeZone: this.timeZone,
     });
     return new TypedValue(value, type, isMultiple);
   }

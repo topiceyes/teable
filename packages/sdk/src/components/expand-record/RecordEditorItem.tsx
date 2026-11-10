@@ -1,7 +1,17 @@
-import classNames from 'classnames';
+import type { IAttachmentCellValue } from '@teable/core';
+import { isAiActionWritableField } from '@teable/core';
+import { Info } from '@teable/icons';
+import { cn } from '@teable/ui-lib';
+import { useContext } from 'react';
+import { TaskStatusCollectionContext } from '../../context';
+import type { IButtonClickStatusHook } from '../../hooks';
 import { useFieldStaticGetter } from '../../hooks';
+import { useContentDir } from '../../hooks/use-content-dir';
 import type { Field, Record } from '../../model';
-import { CellEditor } from '../cell-value-editor';
+import { normalizeCellValueForDisplay } from '../../utils/normalize-cell-value';
+import { AiFieldGenerateButton } from './AiFieldGenerateButton';
+import { CellEditorWrap } from './CellEditorWrap';
+import { TooltipWrap } from './TooltipWrap';
 
 export const RecordEditorItem = (props: {
   field: Field;
@@ -9,41 +19,132 @@ export const RecordEditorItem = (props: {
   vertical?: boolean;
   onChange?: (newValue: unknown, fieldId: string) => void;
   readonly?: boolean;
+  buttonClickStatusHook?: IButtonClickStatusHook;
+  onAttachmentDownload?: (attachments: IAttachmentCellValue) => void;
 }) => {
-  const { field, record, vertical, onChange, readonly } = props;
+  const {
+    field,
+    record,
+    vertical,
+    onChange,
+    readonly,
+    buttonClickStatusHook,
+    onAttachmentDownload,
+  } = props;
   const { type, isLookup } = field;
+  const contentDir = useContentDir();
+  const hasAiConfig = Boolean(field.aiConfig);
   const fieldStaticGetter = useFieldStaticGetter();
-  const { Icon } = fieldStaticGetter(type, isLookup);
-
-  const cellValue = record?.getCellValue(field.id);
+  const { Icon } = fieldStaticGetter(type, {
+    isLookup,
+    isConditionalLookup: field.isConditionalLookup,
+    hasAiConfig,
+  });
+  const taskStatusCollection = useContext(TaskStatusCollectionContext);
+  const isInTaskQueue =
+    taskStatusCollection?.cells?.some((c) => c.recordId === record?.id && c.fieldId === field.id) ??
+    false;
+  // Normalize against the display field, not record.getCellValue: the record's
+  // fieldMap can predate an isMultiple convert while the row's field instance is
+  // already the new shape (T7257), which leaves the editor with the old shape.
+  const cellValue = record
+    ? normalizeCellValueForDisplay(field, record.fields[field.id])
+    : undefined;
+  const compact = !vertical;
+  const showAiGenerateButton =
+    isAiActionWritableField(field) && Boolean(field.tableId && record && !readonly);
+  const aiGenerateButton = showAiGenerateButton && field.tableId && record && (
+    <AiFieldGenerateButton
+      tableId={field.tableId}
+      fieldId={field.id}
+      recordId={record.id}
+      isInTaskQueue={isInTaskQueue}
+    />
+  );
   const onChangeInner = (value: unknown) => {
-    if (cellValue === value) return;
+    // A create-record dialog starts every field absent, which editors render as empty and
+    // commit as null on blur. Treat absent and null as the same no-op so focusing a field
+    // without typing cannot turn it into an explicit clear and suppress its configured
+    // default. A field that held a value still reports the clear.
+    if (cellValue === value || (cellValue == null && value == null)) return;
     onChange?.(value, field.id);
   };
 
   return (
-    <div className={vertical ? 'flex space-x-2' : 'space-y-2'}>
-      <div className={classNames('w-36 flex items-top space-x-1', vertical ? 'pt-2' : 'w-full')}>
-        <div className="flex size-5 items-center">
-          <Icon />
+    <div
+      className={cn(
+        vertical ? 'flex space-x-4 rtl:space-x-reverse' : 'space-y-2',
+        'relative group/field-row'
+      )}
+    >
+      <div
+        className={cn(
+          'flex w-36 items-start gap-1',
+          vertical ? 'pt-1' : 'relative w-full items-center',
+          compact && aiGenerateButton && 'pe-8'
+        )}
+      >
+        <div className="me-1 flex size-4 items-center">
+          <Icon className="size-4" />
         </div>
         <div
-          className={classNames(
-            'text-sm flex-1 truncate',
-            vertical && 'break-words whitespace-normal'
+          className={cn(
+            'flex min-w-0 flex-1 gap-1 text-sm',
+            vertical ? 'items-start' : 'items-center'
           )}
         >
-          {field.name}
+          <span className="flex min-w-0">
+            <span
+              dir={contentDir}
+              className={cn('min-w-0 truncate', vertical && 'break-words whitespace-normal')}
+            >
+              {field.name}
+            </span>
+            {field.notNull && (
+              <span className="ms-0.5 shrink-0 text-red-500" aria-label="required">
+                *
+              </span>
+            )}
+          </span>
+          {field.description && (
+            <TooltipWrap description={field.description}>
+              <span
+                className={cn(
+                  'ms-0.5 inline-flex shrink-0 cursor-pointer text-muted-foreground',
+                  vertical && 'mt-[3px]'
+                )}
+              >
+                <Info className="size-4" />
+              </span>
+            </TooltipWrap>
+          )}
         </div>
+        {compact && aiGenerateButton && (
+          <div className="absolute end-0 top-1/2 -translate-y-1/2">{aiGenerateButton}</div>
+        )}
       </div>
-      <CellEditor
+      <CellEditorWrap
         wrapClassName="min-w-0 flex-1 p-0.5"
         cellValue={cellValue}
         onChange={onChangeInner}
         field={field}
         recordId={record?.id}
         readonly={!record || readonly}
+        record={record}
+        buttonClickStatusHook={buttonClickStatusHook}
+        onAttachmentDownload={onAttachmentDownload}
       />
+
+      {!compact && aiGenerateButton && (
+        <div
+          className={cn(
+            'absolute -end-8 top-1 opacity-0 transition-opacity group-hover/field-row:opacity-100',
+            isInTaskQueue && 'opacity-100'
+          )}
+        >
+          {aiGenerateButton}
+        </div>
+      )}
     </div>
   );
 };

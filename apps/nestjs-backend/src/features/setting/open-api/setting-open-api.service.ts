@@ -1,0 +1,1630 @@
+/* eslint-disable @typescript-eslint/naming-convention */
+/* eslint-disable sonarjs/no-duplicate-string */
+import { readFile } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
+import type { OpenAIProvider } from '@ai-sdk/openai';
+import { HttpException, Injectable, Logger } from '@nestjs/common';
+import { HttpErrorCode } from '@teable/core';
+import { PrismaService } from '@teable/db-main-prisma';
+import type {
+  ISetSettingMailTransportConfigRo,
+  IChatModelAbility,
+  IAbilityDetail,
+  ISettingVo,
+  IPublicSettingVo,
+  ITestLLMRo,
+  ITestLLMVo,
+  IBatchTestLLMRo,
+  IBatchTestLLMVo,
+  IModelTestResult,
+  LLMProvider,
+  ITestApiKeyRo,
+  ITestApiKeyVo,
+  ITestPublicAccessVo,
+  IImageSize,
+  IAIConfig,
+  IAppConfig,
+  IUpdateAiConfigRo,
+  IUpdateAiConfigVo,
+  IUpdateAppConfigRo,
+  IUpdateAppConfigVo,
+} from '@teable/openapi';
+import {
+  chatModelAbilityType,
+  DEFAULT_REALTIME_TRANSCRIPTION_MAX_SESSION_DURATION_SEC,
+  DEFAULT_REALTIME_TRANSCRIPTION_MODEL,
+  getImageModelConfig,
+  getImageModelConfigByGatewayId,
+  INSTANCE_PROVIDER_NAME,
+  UploadType,
+  LLMProviderType,
+  resolveOpenAITranscriptionEndpoint,
+  resolveRealtimeTranscriptionModel,
+  SettingKey,
+} from '@teable/openapi';
+import { getSafeAxiosAgents } from '@teable/v2-utils';
+import { APICallError, RetryError, createGateway, generateText, tool, generateImage } from 'ai';
+import type { LanguageModel, TextPart, FilePart } from 'ai';
+import axios from 'axios';
+import { ClsService } from 'nestjs-cls';
+import { z } from 'zod';
+import { BaseConfig, IBaseConfig } from '../../../configs/base.config';
+import { type IStorageConfig, StorageConfig } from '../../../configs/storage';
+import { CustomHttpException } from '../../../custom.exception';
+import type { IClsStore } from '../../../types/cls';
+import { resolveBuildVersion } from '../../../utils/build-version';
+import { assertUniqueProviderModels } from '../../ai/ai.service';
+import {
+  aiProviderFetch,
+  assertAiProviderBaseUrlsAllowed,
+  instanceAdminProviderFetch,
+  getAdaptedProviderOptions,
+  modelProviders,
+} from '../../ai/util';
+import { AttachmentsStorageService } from '../../attachments/attachments-storage.service';
+import StorageAdapter from '../../attachments/plugins/adapter';
+import { InjectStorageAdapter } from '../../attachments/plugins/storage';
+import { getPublicFullStorageUrl } from '../../attachments/plugins/utils';
+import { AuditScope } from '../../audit/audit-scope';
+import { EMAIL_LOGO_TOKEN } from '../../builtin-assets-init';
+import { verifyTransport } from '../../mail-sender/mail-helpers';
+import { collectChangedKeys, collectChangedPatchKeys } from '../changed-setting-keys';
+import { SettingService } from '../setting.service';
+
+const unknownErrorMsg = 'unknown error';
+
+/**
+ * What a failed provider test tells the caller. The raw error can carry a
+ * socket error or a response body from whatever host the base URL named,
+ * which would let a space owner probe the server's network through the test
+ * route (GHSA-r8m3-c4fh-jv5x), so only instance admins get it verbatim. Our
+ * own validation errors and the status a provider answered with stay.
+ */
+const describeProviderTestError = (error: unknown, exposeUpstreamErrors: boolean) => {
+  if (exposeUpstreamErrors || error instanceof HttpException) {
+    return error instanceof Error ? error.message : unknownErrorMsg;
+  }
+  const cause = RetryError.isInstance(error) ? error.lastError : error;
+  if (APICallError.isInstance(cause) && cause.statusCode) {
+    return `The provider responded with HTTP ${cause.statusCode}`;
+  }
+  return 'Could not get a valid response from the provider';
+};
+
+/**
+ * Our own AI Gateway image-test rejection keeps its specific copy when the
+ * test wraps it; any other failure gets the generic one.
+ */
+const getTestLLMFailedI18nKey = (error: unknown) =>
+  error instanceof CustomHttpException &&
+  error.data?.localization?.i18nKey === 'httpErrors.ai.imageTestUnsupportedForGateway'
+    ? ('httpErrors.ai.imageTestUnsupportedForGateway' as const)
+    : ('httpErrors.ai.testLLMFailed' as const);
+
+// Audit rows about instance settings are instance-scoped: no space/base, one fixed resource.
+const INSTANCE_AUDIT_RESOURCE_ID = 'instance';
+// Settings whose values are shown in the audit row (booleans are shown too): nothing secret.
+const SETTING_KEYS_WITH_AUDITED_VALUES = new Set<string>([
+  SettingKey.BRAND_NAME,
+  SettingKey.BANNED_EMAIL_DOMAINS,
+]);
+
+// Test file tokens from builtin-assets-init
+const actTestImageToken = 'actTestImage';
+const actTestPdfToken = 'actTestPDF';
+// Test file paths
+const testImagePath = 'static/test/test-image.png';
+const testPdfPath = 'static/test/test-pdf.pdf';
+// Expected letter in test files - use uppercase K for stricter matching
+const expectedLetter = 'k';
+const clearUndefinedPatchValues = <T extends Record<string, unknown>>(patch: T): Partial<T> => {
+  return Object.fromEntries(
+    Object.entries(patch)
+      .filter(([, value]) => value !== undefined)
+      .map(([key, value]) => [key, value === null ? undefined : value])
+  ) as Partial<T>;
+};
+
+const hasTranscriptionText = (value: unknown): boolean => {
+  if (!value || typeof value !== 'object') return false;
+  const data = value as { text?: unknown };
+  return typeof data.text === 'string';
+};
+
+const createSilentWavBuffer = () => {
+  const sampleRate = 16_000;
+  const sampleCount = Math.floor(sampleRate / 10);
+  const dataSize = sampleCount * 2;
+  const buffer = Buffer.alloc(44 + dataSize);
+  buffer.write('RIFF', 0);
+  buffer.writeUInt32LE(36 + dataSize, 4);
+  buffer.write('WAVE', 8);
+  buffer.write('fmt ', 12);
+  buffer.writeUInt32LE(16, 16);
+  buffer.writeUInt16LE(1, 20);
+  buffer.writeUInt16LE(1, 22);
+  buffer.writeUInt32LE(sampleRate, 24);
+  buffer.writeUInt32LE(sampleRate * 2, 28);
+  buffer.writeUInt16LE(2, 32);
+  buffer.writeUInt16LE(16, 34);
+  buffer.write('data', 36);
+  buffer.writeUInt32LE(dataSize, 40);
+  return buffer;
+};
+
+@Injectable()
+export class SettingOpenApiService {
+  private readonly logger = new Logger(SettingOpenApiService.name);
+
+  constructor(
+    private readonly prismaService: PrismaService,
+    @BaseConfig() private readonly baseConfig: IBaseConfig,
+    @StorageConfig() private readonly storageConfig: IStorageConfig,
+    @InjectStorageAdapter() readonly storageAdapter: StorageAdapter,
+    private readonly cls: ClsService<IClsStore>,
+    private readonly settingService: SettingService,
+    protected readonly attachmentsStorageService: AttachmentsStorageService,
+    protected readonly audit: AuditScope
+  ) {}
+
+  async getSetting(names?: string[]): Promise<ISettingVo> {
+    return this.settingService.getSetting(names);
+  }
+
+  async updateSetting(updateSettingRo: Partial<ISettingVo>): Promise<ISettingVo> {
+    // Instance providers must use "teable" as name so modelKeys end with @teable,
+    // allowing a simple suffix check to distinguish instance vs BYOK models.
+    if (updateSettingRo.aiConfig) {
+      this.normalizeInstanceProviderNames(updateSettingRo.aiConfig as Record<string, unknown>);
+      assertUniqueProviderModels(updateSettingRo.aiConfig.llmProviders);
+    }
+    const patch = updateSettingRo as Record<string, unknown>;
+    const keys = Object.keys(patch).filter((key) => patch[key] !== undefined);
+    const before = keys.length
+      ? ((await this.settingService.getSetting(keys)) as Record<string, unknown>)
+      : {};
+    const result = await this.settingService.updateSetting(updateSettingRo);
+    const changedKeys = collectChangedPatchKeys(before, patch);
+    if (changedKeys.length) {
+      // Values only for flags and plain display settings; the rest (AI keys, SMTP, IM) by key only.
+      const shownKeys = [...new Set(changedKeys.map((path) => path.split('.')[0]))].filter(
+        (key) => typeof patch[key] === 'boolean' || SETTING_KEYS_WITH_AUDITED_VALUES.has(key)
+      );
+      await this.audit.emitAtomic({
+        action: 'admin.setting.update',
+        resourceId: INSTANCE_AUDIT_RESOURCE_ID,
+        params: {
+          changedKeys,
+          ...(shownKeys.length
+            ? {
+                before: Object.fromEntries(shownKeys.map((key) => [key, before[key] ?? null])),
+                after: Object.fromEntries(shownKeys.map((key) => [key, patch[key] ?? null])),
+              }
+            : {}),
+        },
+      });
+    }
+    return result;
+  }
+
+  async updateAiConfig(updateAiConfigRo: IUpdateAiConfigRo): Promise<IUpdateAiConfigVo> {
+    const { aiConfig } = await this.settingService.getSetting([SettingKey.AI_CONFIG]);
+    const patch = clearUndefinedPatchValues(updateAiConfigRo.patch);
+    const nextAiConfig = {
+      ...aiConfig,
+      ...patch,
+    } as IAIConfig;
+    nextAiConfig.llmProviders ??= [];
+
+    this.normalizeInstanceProviderNames(nextAiConfig as Record<string, unknown>);
+    assertUniqueProviderModels(nextAiConfig.llmProviders);
+
+    await this.settingService.updateSetting({
+      [SettingKey.AI_CONFIG]: nextAiConfig,
+    } as Partial<ISettingVo>);
+    // Provider entries carry API keys: the row names the changed keys, never their values.
+    const changedKeys = Object.keys(patch).flatMap((key) =>
+      collectChangedKeys(
+        (aiConfig as Record<string, unknown> | undefined)?.[key],
+        nextAiConfig[key as keyof IAIConfig],
+        key
+      )
+    );
+    if (changedKeys.length) {
+      await this.audit.emitAtomic({
+        action: 'admin.setting.update-ai-config',
+        resourceId: INSTANCE_AUDIT_RESOURCE_ID,
+        params: { changedKeys },
+      });
+    }
+
+    return {
+      aiConfig: Object.fromEntries(
+        Object.keys(patch).map((key) => [key, nextAiConfig[key as keyof IAIConfig]])
+      ) as Partial<IAIConfig>,
+    };
+  }
+
+  async updateAppConfig(updateAppConfigRo: IUpdateAppConfigRo): Promise<IUpdateAppConfigVo> {
+    const { appConfig } = await this.settingService.getSetting([SettingKey.APP_CONFIG]);
+    const patch = clearUndefinedPatchValues(updateAppConfigRo.patch);
+    const nextAppConfig = {
+      ...appConfig,
+      ...patch,
+    } as IAppConfig;
+
+    await this.settingService.updateSetting({
+      [SettingKey.APP_CONFIG]: nextAppConfig,
+    } as Partial<ISettingVo>);
+    // The app builder config holds deploy tokens: keys only, never values.
+    const changedKeys = Object.keys(patch).flatMap((key) =>
+      collectChangedKeys(
+        (appConfig as Record<string, unknown> | undefined)?.[key],
+        nextAppConfig[key as keyof IAppConfig],
+        key
+      )
+    );
+    if (changedKeys.length) {
+      await this.audit.emitAtomic({
+        action: 'admin.setting.update-app-config',
+        resourceId: INSTANCE_AUDIT_RESOURCE_ID,
+        params: { changedKeys },
+      });
+    }
+
+    return {
+      appConfig: Object.fromEntries(
+        Object.keys(patch).map((key) => [key, nextAppConfig[key as keyof IAppConfig]])
+      ) as Partial<IAppConfig>,
+    };
+  }
+
+  /**
+   * Rewrite all provider names to "teable" and update chatModel keys accordingly.
+   * Admin-configured providers are always instance-level; the @teable suffix
+   * lets the rest of the system distinguish them from BYOK (space-level) providers.
+   */
+  private normalizeInstanceProviderNames(aiConfig: Record<string, unknown>): void {
+    const name = INSTANCE_PROVIDER_NAME;
+    const providers = aiConfig.llmProviders as Array<Record<string, unknown>> | undefined;
+    if (providers) {
+      for (const provider of providers) {
+        provider.name = name;
+      }
+    }
+    const chatModel = aiConfig.chatModel as Record<string, string | undefined> | undefined;
+    if (chatModel) {
+      for (const tier of ['xl', 'lg', 'md', 'sm']) {
+        const key = chatModel[tier];
+        if (key && key.includes('@')) {
+          const parts = key.split('@');
+          parts[parts.length - 1] = name;
+          chatModel[tier] = parts.join('@');
+        }
+      }
+    }
+  }
+
+  async getServerBrand(): Promise<{ brandName: string; brandLogo: string }> {
+    const logoPath = join(StorageAdapter.getDir(UploadType.Logo), EMAIL_LOGO_TOKEN);
+    return {
+      brandName: 'Teable',
+      brandLogo: getPublicFullStorageUrl(logoPath),
+    };
+  }
+
+  /**
+   * Returns the core public setting (without controller-only fields like turnstile/threshold).
+   * Overridable in EE to append platform-specific providers (e.g. Slack from DB config).
+   */
+  async getPublicSetting(): Promise<
+    Omit<
+      IPublicSettingVo,
+      | 'turnstileSiteKey'
+      | 'changeEmailSendCodeMailRate'
+      | 'resetPasswordSendMailRate'
+      | 'signupVerificationSendCodeMailRate'
+    >
+  > {
+    const setting = await this.getSetting([
+      SettingKey.INSTANCE_ID,
+      SettingKey.BRAND_NAME,
+      SettingKey.BRAND_LOGO,
+      SettingKey.DISALLOW_SIGN_UP,
+      SettingKey.DISALLOW_SPACE_CREATION,
+      SettingKey.DISALLOW_SPACE_INVITATION,
+      SettingKey.DISALLOW_DASHBOARD,
+      SettingKey.ENABLE_EMAIL_VERIFICATION,
+      SettingKey.ENABLE_WAITLIST,
+      SettingKey.ENABLE_CREDIT_REWARD,
+      SettingKey.AI_CONFIG,
+      SettingKey.APP_CONFIG,
+    ]);
+    const { aiConfig, appConfig, enableCreditReward, ...rest } = setting;
+    const availableIntegrationProviders = this.getAvailableIntegrationProviders();
+
+    return {
+      ...rest,
+      enableCreditReward: enableCreditReward ?? undefined,
+      aiConfig: {
+        enable: Boolean(aiConfig?.chatModel?.lg),
+        llmProviders:
+          aiConfig?.llmProviders?.map((provider) => ({
+            type: provider.type,
+            name: provider.name,
+            models: provider.models,
+            isInstance: true,
+            modelConfigs: provider.modelConfigs,
+          })) ?? [],
+        chatModel: aiConfig?.chatModel ?? undefined,
+        capabilities: aiConfig?.capabilities,
+        gatewayModels: aiConfig?.gatewayModels,
+        voiceInput: {
+          enabled: Boolean(
+            (aiConfig?.realtimeTranscription?.enabled ?? true) &&
+            (aiConfig?.realtimeTranscription?.apiKey ||
+              process.env.OPENAI_TRANSCRIPTION_API_KEY ||
+              process.env.OPENAI_REALTIME_API_KEY)
+          ),
+          model: resolveRealtimeTranscriptionModel(aiConfig?.realtimeTranscription?.model),
+          maxSessionDurationSec:
+            aiConfig?.realtimeTranscription?.maxSessionDurationSec ??
+            DEFAULT_REALTIME_TRANSCRIPTION_MAX_SESSION_DURATION_SEC,
+        },
+      },
+      appGenerationEnabled:
+        Boolean(appConfig?.vercelToken) ||
+        (appConfig?.deployProvider === 'docker-runtime' &&
+          Boolean(process.env.TEABLE_INFRA_API_URL && process.env.TEABLE_INFRA_API_KEY)),
+      availableIntegrationProviders,
+    };
+  }
+
+  private getAvailableIntegrationProviders(): string[] {
+    return [
+      ...(process.env.AIRTABLE_CLIENT_ID ? ['airtable'] : []),
+      // The OAuth client is shared with Google sign-in, so the Picker key is
+      // the variable that actually expresses "this instance opted into Sheets
+      // import" — gate on it so configuring login alone does not light the
+      // entry up. An incomplete OAuth setup still surfaces as a clear runtime
+      // error on connect.
+      ...(process.env.GOOGLE_SHEET_PICKER_API_KEY ? ['googleSheet'] : []),
+    ];
+  }
+
+  async uploadLogo(file: Express.Multer.File) {
+    const token = 'brand';
+    const path = join(StorageAdapter.getDir(UploadType.Logo), 'brand');
+    const bucket = StorageAdapter.getBucket(UploadType.Logo);
+
+    const { hash } = await this.storageAdapter.uploadFileWidthPath(bucket, path, file.path, {
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      'Content-Type': file.mimetype,
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      'Cache-Control': StorageAdapter.getCacheControl(UploadType.Logo),
+    });
+
+    const { size, mimetype } = file;
+    const userId = this.cls.get('user.id');
+
+    await this.prismaService.txClient().attachments.upsert({
+      create: {
+        hash,
+        size,
+        mimetype,
+        token,
+        path,
+        createdBy: userId,
+      },
+      update: {
+        hash,
+        size,
+        mimetype,
+        path,
+      },
+      where: {
+        token,
+        deletedTime: null,
+      },
+    });
+
+    // Straight to the store: the logo gets its own audit row, not an `admin.setting.update` one.
+    await this.settingService.updateSetting({ brandLogo: path });
+    await this.audit.emitAtomic({
+      action: 'admin.setting.update-logo',
+      resourceId: INSTANCE_AUDIT_RESOURCE_ID,
+      params: { mimetype, size },
+    });
+
+    return {
+      url: getPublicFullStorageUrl(path),
+    };
+  }
+
+  /**
+   * Test attachment support with a specific data source (URL or base64)
+   */
+  private async testAttachmentWithData(
+    modelInstance: LanguageModel,
+    data: string,
+    contentType: string
+  ): Promise<boolean> {
+    // Request AI to put the letter in quotes for strict validation
+    const testPrompt =
+      'What letter or character do you see in this image/file? ' +
+      'Please respond with ONLY the letter wrapped in double quotes, like "X". ' +
+      'Do not add any other text.';
+
+    try {
+      const textPart: TextPart = {
+        type: 'text',
+        text: testPrompt,
+      };
+
+      const filePart: FilePart = {
+        type: 'file' as const,
+        data,
+        mediaType: contentType,
+      };
+
+      const res = await generateText({
+        model: modelInstance,
+        messages: [
+          {
+            role: 'user',
+            content: [textPart, filePart],
+          },
+        ],
+        temperature: 0,
+      });
+
+      const responseText = res.text.trim();
+
+      // Log the full response for debugging
+      this.logger.log(
+        `[testAttachment] Full AI response: "${responseText}", data preview: "${data.substring(0, 100)}..."`
+      );
+
+      // Strict validation: expect exactly "K" or "k" in quotes
+      const quotedLetterMatch = /"([^"]+)"/.exec(responseText);
+      const letterInQuotes = quotedLetterMatch ? quotedLetterMatch[1].toLowerCase() : null;
+      const containsExpectedInQuotes = letterInQuotes === expectedLetter;
+
+      // Fallback: also check if response is just the letter (some models might not follow format)
+      const isJustTheLetter =
+        responseText.toLowerCase() === expectedLetter ||
+        responseText.toLowerCase() === expectedLetter.toUpperCase();
+
+      // Anti-hallucination checks:
+      // 1. Response should be short (< 30 chars) - a direct answer
+      const isShortResponse = responseText.length < 30;
+
+      // 2. Response should not indicate inability to see the file
+      const cannotSeeIndicators = [
+        'cannot see',
+        "can't see",
+        'unable to',
+        'no image',
+        'no file',
+        "don't see",
+        'not visible',
+        'not able to',
+        'sorry',
+        'error',
+      ];
+      const indicatesCannotSee = cannotSeeIndicators.some((indicator) =>
+        responseText.toLowerCase().includes(indicator)
+      );
+
+      const isValid =
+        (containsExpectedInQuotes || isJustTheLetter) && isShortResponse && !indicatesCannotSee;
+
+      this.logger.log(
+        `[testAttachment] Validation: letterInQuotes="${letterInQuotes}", ` +
+          `containsExpectedInQuotes=${containsExpectedInQuotes}, isJustTheLetter=${isJustTheLetter}, ` +
+          `isShortResponse=${isShortResponse}, indicatesCannotSee=${indicatesCannotSee}, ` +
+          `isValid=${isValid}`
+      );
+
+      return isValid;
+    } catch (error) {
+      this.logger.error(
+        `[testAttachment] Error: ${error instanceof Error ? error.message : unknownErrorMsg}`
+      );
+      return false;
+    }
+  }
+
+  /**
+   * Get signed URL for a test file
+   */
+  private async getTestFileSignedUrl(token: string): Promise<string | null> {
+    try {
+      const bucket = StorageAdapter.getBucket(UploadType.ChatFile);
+      const url = await this.attachmentsStorageService.getPreviewUrl(bucket, token);
+      return url || null;
+    } catch (error) {
+      this.logger.error(`Failed to get signed URL for ${token}: ${error}`);
+      return null;
+    }
+  }
+
+  /**
+   * Get test file buffer
+   */
+  private async getTestFileBuffer(filePath: string): Promise<Buffer | null> {
+    try {
+      const fullPath = resolve(process.cwd(), filePath);
+      return await readFile(fullPath);
+    } catch (error) {
+      this.logger.error(`Failed to read test file ${filePath}: ${error}`);
+      return null;
+    }
+  }
+
+  /**
+   * Get base64 data URL for a test file
+   */
+  private async getTestFileBase64(filePath: string, contentType: string): Promise<string | null> {
+    const fileBuffer = await this.getTestFileBuffer(filePath);
+    if (!fileBuffer) return null;
+
+    const base64 = fileBuffer.toString('base64');
+    return `data:${contentType};base64,${base64}`;
+  }
+
+  /**
+   * Test image or PDF support with both URL and base64 forms in parallel
+   * Returns detailed support info: { url: boolean, base64: boolean }
+   */
+  private async testAttachmentAbility(
+    modelInstance: LanguageModel,
+    token: string,
+    filePath: string,
+    contentType: string
+  ): Promise<IAbilityDetail> {
+    // Get both data sources in parallel
+    const [signedUrl, base64Data] = await Promise.all([
+      this.getTestFileSignedUrl(token),
+      this.getTestFileBase64(filePath, contentType),
+    ]);
+
+    // Run both tests in parallel
+    const [urlResult, base64Result] = await Promise.all([
+      signedUrl
+        ? this.testAttachmentWithData(modelInstance, signedUrl, contentType).then((r) => {
+            this.logger.log(`testAttachmentAbility URL test for ${token}: ${r}`);
+            return r;
+          })
+        : Promise.resolve(false),
+      base64Data
+        ? this.testAttachmentWithData(modelInstance, base64Data, contentType).then((r) => {
+            this.logger.log(`testAttachmentAbility base64 test for ${token}: ${r}`);
+            return r;
+          })
+        : Promise.resolve(false),
+    ]);
+
+    return { url: urlResult, base64: base64Result };
+  }
+
+  private async testToolCall(modelInstance: LanguageModel): Promise<boolean> {
+    try {
+      // Define tools inline with generateText for proper type inference
+      const result = await generateText({
+        model: modelInstance,
+        prompt: 'What is the weather in Tokyo? Please use the available tool.',
+        tools: {
+          get_weather: tool({
+            description: 'Get the current weather for a location',
+            inputSchema: z.object({
+              location: z.string().describe('The city name'),
+            }),
+            execute: async ({ location }) => `Weather in ${location}: Sunny, 25°C`,
+          }),
+        },
+      });
+
+      // Check multiple ways to detect tool calls
+      // 1. Check toolCalls directly on result
+      const hasDirectToolCall = result.toolCalls && result.toolCalls.length > 0;
+      // 2. Check steps for tool calls
+      const hasStepToolCall = result.steps?.some(
+        (step) => step.toolCalls && step.toolCalls.length > 0
+      );
+      // 3. Check toolResults
+      const hasToolResults = result.toolResults && result.toolResults.length > 0;
+
+      const hasToolCall = hasDirectToolCall || hasStepToolCall || hasToolResults;
+
+      this.logger.log(
+        `testToolCall result: hasDirectToolCall=${hasDirectToolCall}, hasStepToolCall=${hasStepToolCall}, hasToolResults=${hasToolResults}`
+      );
+      return hasToolCall;
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : unknownErrorMsg;
+      this.logger.error(`testToolCall error: ${errorMessage}`);
+
+      // Any error during tool call test means the model cannot properly use tools
+      // Even schema errors indicate the model/provider combination is not usable for tool calling
+      this.logger.log('testToolCall: Error during test, marking as unsupported');
+      return false;
+    }
+  }
+
+  private async testChatModelAbility(
+    modelInstance: LanguageModel,
+    ability: ITestLLMRo['ability']
+  ): Promise<IChatModelAbility> {
+    if (!ability?.length) {
+      return {};
+    }
+
+    const testAbilities = [...new Set(ability)];
+    const result: IChatModelAbility = {};
+
+    // Run all tests in parallel for better performance
+    const testPromises: Promise<void>[] = [];
+
+    if (testAbilities.includes(chatModelAbilityType.enum.image)) {
+      testPromises.push(
+        this.testAttachmentAbility(
+          modelInstance,
+          actTestImageToken,
+          testImagePath,
+          'image/png'
+        ).then((detail) => {
+          // Store detailed result - at least one form should work
+          result.image = detail;
+        })
+      );
+    }
+
+    if (testAbilities.includes(chatModelAbilityType.enum.pdf)) {
+      testPromises.push(
+        this.testAttachmentAbility(
+          modelInstance,
+          actTestPdfToken,
+          testPdfPath,
+          'application/pdf'
+        ).then((detail) => {
+          // Store detailed result - at least one form should work
+          result.pdf = detail;
+        })
+      );
+    }
+
+    if (testAbilities.includes(chatModelAbilityType.enum.toolCall)) {
+      testPromises.push(
+        this.testToolCall(modelInstance).then((supported) => {
+          result.toolCall = supported;
+        })
+      );
+    }
+
+    // Wait for all tests to complete
+    await Promise.all(testPromises);
+
+    return result;
+  }
+
+  private parseModelKey(modelKey: string) {
+    const [type, model, name] = modelKey.split('@');
+    return { type, model, name };
+  }
+
+  /**
+   * `asInstanceAdmin`: the instance admin's own test route. The admin configures
+   * the instance, so the base URL is not SSRF-checked and upstream errors come
+   * back verbatim; a space owner's test gets neither (see
+   * describeProviderTestError and aiProviderFetch).
+   */
+  async testLLM(
+    testLLMRo: ITestLLMRo,
+    { asInstanceAdmin = false }: { asInstanceAdmin?: boolean } = {}
+  ): Promise<ITestLLMVo> {
+    const {
+      type,
+      baseUrl,
+      apiKey,
+      models,
+      ability,
+      modelKey,
+      testImageGeneration,
+      testImageToImage,
+    } = testLLMRo;
+
+    // Outside the catch-all below so the owner sees the network-policy message
+    // rather than a generic "LLM test failed".
+    if (!asInstanceAdmin) {
+      await assertAiProviderBaseUrlsAllowed([{ baseUrl }]);
+    }
+    const providerFetch = asInstanceAdmin ? instanceAdminProviderFetch : aiProviderFetch;
+
+    try {
+      const modelArray = models.split(',');
+      const model = modelKey ? this.parseModelKey(modelKey).model : modelArray[0];
+
+      // Handle AI Gateway separately using createGateway from AI SDK
+      // See: https://ai-sdk.dev/providers/ai-sdk-providers/ai-gateway
+      if (type === LLMProviderType.AI_GATEWAY) {
+        const gatewayProvider = createGateway({
+          apiKey,
+          baseURL: baseUrl || undefined,
+          fetch: providerFetch,
+        });
+
+        // Handle image generation model testing
+        if (testImageGeneration) {
+          // Gemini image models via Gateway use generateText, not generateImage
+          throw new CustomHttpException(
+            'Image generation testing not supported for AI Gateway models yet',
+            HttpErrorCode.VALIDATION_ERROR,
+            { localization: { i18nKey: 'httpErrors.ai.imageTestUnsupportedForGateway' } }
+          );
+        }
+
+        // Standard text model testing
+        const testPrompt = 'Hello, please respond with "Connection successful!"';
+        const modelInstance = gatewayProvider(model) as unknown as LanguageModel;
+        const { text } = await generateText({
+          model: modelInstance,
+          prompt: testPrompt,
+          temperature: 1,
+        });
+        const supportAbilities = await this.testChatModelAbility(modelInstance, ability);
+        return {
+          success: true,
+          response: text,
+          ability: supportAbilities,
+        };
+      }
+
+      const shouldTestImageGeneration = this.shouldTestImageGenerationModel(
+        type,
+        model,
+        testImageGeneration
+      );
+      const provider = modelProviders[type as keyof typeof modelProviders];
+      const providerOptions = getAdaptedProviderOptions(type, {
+        name: model,
+        baseURL: baseUrl,
+        apiKey,
+      });
+      const modelProvider = provider({
+        ...providerOptions,
+        fetch: providerFetch,
+      } as never) as OpenAIProvider;
+
+      // Handle image generation model testing
+      if (shouldTestImageGeneration) {
+        return await this.testImageGenerationModel(
+          modelProvider,
+          model,
+          type,
+          testImageToImage,
+          asInstanceAdmin
+        );
+      }
+
+      // Standard text model testing
+      const testPrompt = 'Hello, please respond with "Connection successful!"';
+      const modelInstance = modelProvider(model) as unknown as LanguageModel;
+      const { text } = await generateText({
+        model: modelInstance,
+        prompt: testPrompt,
+        temperature: 1,
+      });
+      const supportAbilities = await this.testChatModelAbility(modelInstance, ability);
+      return {
+        success: true,
+        response: text,
+        ability: supportAbilities,
+      };
+    } catch (error) {
+      if (!asInstanceAdmin) {
+        this.logger.warn(`testLLM failed: ${error instanceof Error ? error.message : error}`);
+      }
+      const message = describeProviderTestError(error, asInstanceAdmin);
+      throw new CustomHttpException(
+        'LLM test failed with error: ' + message,
+        HttpErrorCode.VALIDATION_ERROR,
+        {
+          localization: {
+            i18nKey: getTestLLMFailedI18nKey(error),
+          },
+        }
+      );
+    }
+  }
+
+  private shouldTestImageGenerationModel(
+    providerType: LLMProviderType,
+    model: string,
+    testImageGeneration?: boolean
+  ): boolean {
+    if (testImageGeneration != null) return testImageGeneration;
+
+    const config =
+      providerType === LLMProviderType.AI_GATEWAY
+        ? getImageModelConfigByGatewayId(model)
+        : getImageModelConfig(providerType, model);
+    return config?.modelType === 'image';
+  }
+
+  private async testImageGenerationModel(
+    modelProvider: OpenAIProvider,
+    model: string,
+    providerType: LLMProviderType,
+    testImageToImage?: boolean,
+    exposeUpstreamErrors = false
+  ): Promise<ITestLLMVo> {
+    try {
+      // Google Gemini native image generation models use generateText with responseModalities
+      if (providerType === LLMProviderType.GOOGLE) {
+        return await this.testGoogleImageGeneration(modelProvider, model, testImageToImage);
+      }
+
+      // Images API generation (DALL-E, GPT Image, etc.), through the same entry the runtime uses
+      const imageModel = modelProvider.imageModel(model);
+      const size = this.getImageGenerationTestSize(providerType, model);
+      const sizeOptions = size ? { size } : {};
+
+      if (testImageToImage) {
+        const testImageBuffer = await this.getTestFileBuffer(testImagePath);
+        if (!testImageBuffer) {
+          return {
+            success: false,
+            response: 'Test image file not found',
+          };
+        }
+
+        // Test image-to-image: provide an image as input
+        // Note: Not all image models support this, so we catch errors gracefully
+        await generateImage({
+          model: imageModel,
+          prompt: {
+            text: 'Create a very simple variation of this image.',
+            images: [testImageBuffer],
+          },
+          n: 1,
+          ...sizeOptions,
+        });
+      } else {
+        // Test basic text-to-image generation
+        await generateImage({
+          model: imageModel,
+          prompt: 'A simple test: draw a small red circle',
+          n: 1,
+          ...sizeOptions,
+        });
+      }
+
+      return {
+        success: true,
+        response: testImageToImage
+          ? 'Image-to-image generation successful'
+          : 'Image generation successful',
+      };
+    } catch (error) {
+      this.logger.error('testImageGenerationModel Error', (error as Error)?.stack);
+      return {
+        success: false,
+        response: describeProviderTestError(error, exposeUpstreamErrors),
+      };
+    }
+  }
+
+  private getImageGenerationTestSize(
+    providerType: LLMProviderType,
+    model: string
+  ): IImageSize | undefined {
+    const config = getImageModelConfig(providerType, model);
+    if (!config || config.modelType !== 'image') return undefined;
+    return config.defaultSize ?? config.supportedSizes?.[0];
+  }
+
+  /**
+   * Test Google Gemini native image generation models
+   * These models use generateText with responseModalities: ['TEXT', 'IMAGE']
+   */
+  private async testGoogleImageGeneration(
+    modelProvider: OpenAIProvider,
+    model: string,
+    testImageToImage?: boolean
+  ): Promise<ITestLLMVo> {
+    try {
+      const modelInstance = modelProvider(model) as unknown as LanguageModel;
+
+      if (testImageToImage) {
+        // Test image-to-image with a simple 1x1 pixel image
+        const testImageBase64 =
+          'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+
+        const result = await generateText({
+          model: modelInstance,
+          messages: [
+            {
+              role: 'user',
+              content: [
+                {
+                  type: 'file',
+                  mediaType: 'image/png',
+                  data: `data:image/png;base64,${testImageBase64}`,
+                },
+                {
+                  type: 'text',
+                  text: 'Generate a variation of this image with a red circle',
+                },
+              ],
+            },
+          ],
+          providerOptions: {
+            google: {
+              responseModalities: ['TEXT', 'IMAGE'],
+            },
+          },
+        });
+
+        // Check if we got any response (text or image parts)
+        if (result.text || result.response) {
+          return {
+            success: true,
+            response: 'Image-to-image generation successful',
+          };
+        }
+      } else {
+        // Test text-to-image generation
+        const result = await generateText({
+          model: modelInstance,
+          prompt: 'Generate an image of a simple red circle on white background',
+          providerOptions: {
+            google: {
+              responseModalities: ['TEXT', 'IMAGE'],
+            },
+          },
+        });
+
+        // Check if we got any response
+        if (result.text || result.response) {
+          return {
+            success: true,
+            response: 'Image generation successful',
+          };
+        }
+      }
+
+      return {
+        success: false,
+        response: 'No image generated',
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Image generation failed';
+      return {
+        success: false,
+        response: message,
+      };
+    }
+  }
+
+  async setMailTransportConfig(setMailTransportConfigRo: ISetSettingMailTransportConfigRo) {
+    const { name, transportConfig } = setMailTransportConfigRo;
+    await verifyTransport(transportConfig);
+    const before = await this.settingService.getSetting([name]);
+    await this.settingService.updateSetting({
+      [name]: transportConfig,
+    });
+    // SMTP credentials: which fields changed (e.g. `auth.pass`), never their values.
+    const changedKeys = collectChangedKeys(
+      (before as Record<string, unknown>)[name],
+      transportConfig
+    );
+    if (changedKeys.length) {
+      await this.audit.emitAtomic({
+        action: 'admin.setting.update-mail-transport',
+        resourceId: INSTANCE_AUDIT_RESOURCE_ID,
+        params: { transporter: name, changedKeys },
+      });
+    }
+  }
+
+  /**
+   * Test a single model and return the result
+   * This is a non-throwing version for batch testing
+   */
+  private async testSingleModel(
+    provider: Required<LLMProvider>,
+    model: string
+  ): Promise<IModelTestResult> {
+    const { type, name: providerName, baseUrl, apiKey } = provider;
+    const modelKey = `${type}@${model}@${providerName}`;
+    const testPrompt = 'Hello, please respond with "Connection successful!"';
+
+    try {
+      let modelInstance: LanguageModel;
+
+      // Handle AI Gateway separately
+      if (type === LLMProviderType.AI_GATEWAY) {
+        const gatewayProvider = createGateway({
+          apiKey,
+          baseURL: baseUrl || undefined,
+          fetch: instanceAdminProviderFetch,
+        });
+        modelInstance = gatewayProvider(model) as unknown as LanguageModel;
+      } else {
+        const providerFactory = modelProviders[type as keyof typeof modelProviders];
+
+        if (!providerFactory) {
+          return {
+            modelKey,
+            providerName,
+            providerType: type,
+            model,
+            success: false,
+            error: `Unsupported provider type: ${type}`,
+          };
+        }
+
+        const providerOptions = getAdaptedProviderOptions(type, {
+          name: model,
+          baseURL: baseUrl,
+          apiKey,
+        });
+        const modelProvider = providerFactory({
+          ...providerOptions,
+          fetch: instanceAdminProviderFetch,
+        } as never) as OpenAIProvider;
+        modelInstance = modelProvider(model) as unknown as LanguageModel;
+      }
+
+      // Test basic generation
+      await generateText({
+        model: modelInstance,
+        prompt: testPrompt,
+        temperature: 1,
+      });
+
+      // Test image support (vision capability)
+      const ability = await this.testChatModelAbility(modelInstance, [
+        chatModelAbilityType.enum.image,
+      ]);
+
+      return {
+        modelKey,
+        providerName,
+        providerType: type,
+        model,
+        success: true,
+        ability,
+      };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : unknownErrorMsg;
+      this.logger.error(`Batch test failed for model ${modelKey}: ${errorMessage}`);
+
+      return {
+        modelKey,
+        providerName,
+        providerType: type,
+        model,
+        success: false,
+        error: errorMessage,
+      };
+    }
+  }
+
+  /**
+   * Batch test all configured LLM models
+   * Tests basic generation and image (attachment) support for each model
+   */
+  async batchTestLLM(batchTestLLMRo?: IBatchTestLLMRo): Promise<IBatchTestLLMVo> {
+    // Get providers from request or from settings
+    let providers: LLMProvider[];
+
+    if (batchTestLLMRo?.providers && batchTestLLMRo.providers.length > 0) {
+      providers = batchTestLLMRo.providers;
+    } else {
+      const setting = await this.getSetting();
+      providers = setting.aiConfig?.llmProviders ?? [];
+    }
+
+    if (providers.length === 0) {
+      return {
+        totalModels: 0,
+        testedModels: 0,
+        successCount: 0,
+        failedCount: 0,
+        results: [],
+      };
+    }
+
+    // Expand all models from all providers
+    const modelTests: { provider: Required<LLMProvider>; model: string }[] = [];
+
+    for (const provider of providers) {
+      if (!provider.apiKey || !provider.baseUrl || !provider.models) {
+        continue;
+      }
+
+      const models = provider.models
+        .split(',')
+        .map((m) => m.trim())
+        .filter(Boolean);
+      for (const model of models) {
+        modelTests.push({
+          provider: provider as Required<LLMProvider>,
+          model,
+        });
+      }
+    }
+
+    const totalModels = modelTests.length;
+
+    if (totalModels === 0) {
+      return {
+        totalModels: 0,
+        testedModels: 0,
+        successCount: 0,
+        failedCount: 0,
+        results: [],
+      };
+    }
+
+    // Run all tests in parallel with concurrency limit
+    // eslint-disable-next-line @typescript-eslint/naming-convention
+    const CONCURRENCY_LIMIT = 5;
+    const results: IModelTestResult[] = [];
+
+    for (let i = 0; i < modelTests.length; i += CONCURRENCY_LIMIT) {
+      const batch = modelTests.slice(i, i + CONCURRENCY_LIMIT);
+      const batchResults = await Promise.all(
+        batch.map(({ provider, model }) => this.testSingleModel(provider, model))
+      );
+      results.push(...batchResults);
+    }
+
+    const successCount = results.filter((r) => r.success).length;
+    const failedCount = results.filter((r) => !r.success).length;
+
+    return {
+      totalModels,
+      testedModels: results.length,
+      successCount,
+      failedCount,
+      results,
+    };
+  }
+
+  /**
+   * Test API key validity for AI Gateway
+   * Optionally also tests attachment transfer modes (URL and Base64)
+   * When testAttachment is true, results are automatically saved to appConfig
+   */
+  async testApiKey(testApiKeyRo: ITestApiKeyRo): Promise<ITestApiKeyVo> {
+    const { type, apiKey, baseUrl, testAttachment } = testApiKeyRo;
+
+    if (type === 'aiGateway') {
+      const keyResult = await this.testAiGatewayKey(apiKey, baseUrl);
+
+      // If key test failed or attachment test not requested, return early
+      if (!keyResult.success || !testAttachment) {
+        return keyResult;
+      }
+
+      // Key is valid, now test attachment transfer modes
+      const attachmentResult = await this.testAttachmentTransferModes(apiKey, baseUrl);
+
+      // Auto-save results and switch mode if needed
+      if (attachmentResult) {
+        await this.saveAttachmentTestResults(attachmentResult);
+      }
+
+      return {
+        ...keyResult,
+        attachmentTest: attachmentResult,
+      };
+    } else if (type === 'vercel') {
+      return this.testVercelToken(apiKey, baseUrl);
+    } else if (type === 'realtimeTranscription') {
+      return this.testRealtimeTranscriptionKey(apiKey, baseUrl);
+    }
+
+    return { success: false, error: { code: 'unknown', message: 'Unknown API type' } };
+  }
+
+  private static readonly URL_CHECKER_ENDPOINT = 'https://access-checker.teable.ai/check';
+  private static readonly URL_CHECKER_KEY = 'teable-checker-sk-2026xYz9Kw3mN7pQ';
+
+  private getStorageTestFileUrl(): string | undefined {
+    const { provider } = this.storageConfig;
+    if (provider === 'local') {
+      return undefined;
+    }
+    const logoPath = join(StorageAdapter.getDir(UploadType.Logo), EMAIL_LOGO_TOKEN);
+    return getPublicFullStorageUrl(logoPath);
+  }
+
+  private async checkUrlAccessible(
+    url: string,
+    setting: { instanceId?: string; createdTime?: string | number | Date }
+  ): Promise<{
+    success: boolean;
+    statusCode?: number;
+    error?: string;
+    checkedFrom?: string;
+  }> {
+    const deployedAt = String(setting.createdTime || '');
+    const resp = await axios.get<{
+      success: boolean;
+      statusCode?: number;
+      latencyMs: number;
+      error?: string;
+      checkedFrom: string;
+    }>(SettingOpenApiService.URL_CHECKER_ENDPOINT, {
+      timeout: 20000,
+      params: {
+        url,
+        instanceId: setting.instanceId || '',
+        version: resolveBuildVersion(),
+        deployedAt,
+      },
+      headers: {
+        Authorization: `Bearer ${SettingOpenApiService.URL_CHECKER_KEY}`,
+      },
+    });
+    return resp.data;
+  }
+
+  private async checkStorageAccess(setting: {
+    instanceId?: string;
+    createdTime?: string | number | Date;
+  }): Promise<ITestPublicAccessVo['storageCheck']> {
+    const storageUrl = this.getStorageTestFileUrl();
+    if (!storageUrl) {
+      return undefined;
+    }
+
+    try {
+      const data = await this.checkUrlAccessible(storageUrl, setting);
+      if (data.success) {
+        return { success: true, storageUrl };
+      }
+      return {
+        success: false,
+        storageUrl,
+        error: data.error || `Not reachable (HTTP ${data.statusCode}) from ${data.checkedFrom}`,
+      };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : 'Storage check failed';
+      this.logger.warn(`Storage access check failed: ${msg}`);
+      return { success: false, storageUrl, error: msg };
+    }
+  }
+
+  async testPublicAccess(): Promise<ITestPublicAccessVo> {
+    const publicOrigin = this.baseConfig.publicOrigin;
+
+    if (!publicOrigin) {
+      return { success: false, error: 'PUBLIC_ORIGIN not set' };
+    }
+
+    try {
+      const setting = await this.settingService.getSetting();
+
+      const originData = await this.checkUrlAccessible(`${publicOrigin}/health`, setting);
+      const originOk = originData.success;
+      const originError = originOk
+        ? undefined
+        : originData.error ||
+          `Not reachable (HTTP ${originData.statusCode}) from ${originData.checkedFrom}`;
+
+      const storageCheck = await this.checkStorageAccess(setting);
+      const allOk = originOk && (storageCheck?.success ?? true);
+
+      return { success: allOk, publicOrigin, error: originError, storageCheck };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Check failed';
+      this.logger.warn(`Public access check failed: ${message}`);
+      return { success: false, publicOrigin, error: message };
+    }
+  }
+
+  /**
+   * Save attachment test results to aiConfig and auto-switch mode if needed
+   */
+  private async saveAttachmentTestResults(
+    attachmentResult: NonNullable<ITestApiKeyVo['attachmentTest']>
+  ): Promise<void> {
+    try {
+      const { aiConfig } = await this.settingService.getSetting();
+      const currentMode = aiConfig?.attachmentTransferMode || 'url';
+
+      // Prepare the update
+      const update: {
+        attachmentTest: NonNullable<ITestApiKeyVo['attachmentTest']> & { testedAt: string };
+        attachmentTransferMode?: 'url' | 'base64';
+      } = {
+        attachmentTest: {
+          ...attachmentResult,
+          testedAt: new Date().toISOString(),
+        },
+      };
+
+      // Auto-switch mode if:
+      // 1. URL mode failed but Base64 succeeded -> switch to base64
+      // 2. Current mode is base64 but now URL works -> switch to url (optional, keep user choice)
+      const urlWorks = attachmentResult.urlMode?.success ?? false;
+      const base64Works = attachmentResult.base64Mode?.success ?? false;
+
+      if (!urlWorks && base64Works && currentMode === 'url') {
+        // URL doesn't work, switch to base64
+        update.attachmentTransferMode = 'base64';
+        this.logger.log('Auto-switching attachment transfer mode to base64 (URL mode failed)');
+      }
+      // Note: We don't auto-switch back to URL even if it now works,
+      // because the user might have intentionally chosen base64
+
+      await this.settingService.updateSetting({
+        aiConfig: {
+          ...aiConfig,
+          llmProviders: aiConfig?.llmProviders ?? [],
+          ...update,
+        },
+      });
+      this.logger.log('Saved attachment test results to aiConfig');
+    } catch (error) {
+      this.logger.error(`Failed to save attachment test results: ${error}`);
+      // Don't throw - this is a non-critical operation
+    }
+  }
+
+  /**
+   * Test attachment transfer modes (URL and Base64) in parallel
+   * Uses vision model to verify if AI can access attachments via each mode
+   */
+  private async testAttachmentTransferModes(
+    apiKey: string,
+    baseUrl?: string
+  ): Promise<ITestApiKeyVo['attachmentTest']> {
+    const testModel = 'openai/gpt-4o-mini';
+
+    try {
+      // Create gateway instance
+      const gatewayOptions: { apiKey: string; baseURL?: string } = { apiKey };
+      if (baseUrl) {
+        gatewayOptions.baseURL = baseUrl;
+      }
+      const gateway = createGateway({ ...gatewayOptions, fetch: instanceAdminProviderFetch });
+      const modelInstance = gateway(testModel);
+
+      // Test image with both URL and Base64 modes in parallel
+      const imageResult = await this.testAttachmentAbility(
+        modelInstance,
+        actTestImageToken,
+        testImagePath,
+        'image/png'
+      );
+
+      // Determine recommended mode based on test results
+      let recommendedMode: 'url' | 'base64' | undefined;
+      if (imageResult.url && imageResult.base64) {
+        recommendedMode = 'url'; // Both work, prefer URL for performance
+      } else if (!imageResult.url && imageResult.base64) {
+        recommendedMode = 'base64'; // Only Base64 works
+      } else if (imageResult.url && !imageResult.base64) {
+        recommendedMode = 'url'; // Only URL works (rare case)
+      }
+      // If both fail, recommendedMode remains undefined
+
+      return {
+        urlMode: {
+          success: imageResult.url ?? false,
+          errorMessage: imageResult.url ? undefined : 'AI service cannot access attachment URL',
+        },
+        base64Mode: {
+          success: imageResult.base64 ?? false,
+          errorMessage: imageResult.base64
+            ? undefined
+            : 'AI service cannot process base64 attachment',
+        },
+        recommendedMode,
+        testedOrigin: this.baseConfig.publicOrigin,
+      };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      this.logger.error(`testAttachmentTransferModes error: ${errorMessage}`);
+
+      return {
+        urlMode: { success: false, errorMessage },
+        base64Mode: { success: false, errorMessage },
+        testedOrigin: this.baseConfig.publicOrigin,
+      };
+    }
+  }
+
+  private async testAiGatewayKey(apiKey: string, baseUrl?: string): Promise<ITestApiKeyVo> {
+    try {
+      // Only set baseURL if user provided a custom one, otherwise use SDK default
+      // SDK default: https://ai-gateway.vercel.sh/v1/ai
+      const gatewayOptions: { apiKey: string; baseURL?: string } = { apiKey };
+      if (baseUrl) {
+        gatewayOptions.baseURL = baseUrl;
+      }
+      const gateway = createGateway({ ...gatewayOptions, fetch: instanceAdminProviderFetch });
+
+      // Use a minimal generateText call to verify the key
+      await generateText({
+        model: gateway('openai/gpt-4o-mini'),
+        prompt: 'hi',
+      });
+
+      return { success: true };
+    } catch (error) {
+      return this.parseApiKeyError(error, 'AI Gateway');
+    }
+  }
+
+  private async testRealtimeTranscriptionKey(
+    apiKey: string,
+    endpoint?: string
+  ): Promise<ITestApiKeyVo> {
+    try {
+      const transcriptionUrl = resolveOpenAITranscriptionEndpoint(endpoint);
+      const body = new FormData();
+      body.append(
+        'file',
+        new Blob([createSilentWavBuffer()], { type: 'audio/wav' }),
+        'teable-voice-test.wav'
+      );
+      body.append('model', DEFAULT_REALTIME_TRANSCRIPTION_MODEL);
+
+      const response = await instanceAdminProviderFetch(transcriptionUrl, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body,
+      });
+
+      if (!response.ok) {
+        const detail = await response.text();
+        return this.parseApiKeyError(
+          {
+            status: response.status,
+            message: detail || response.statusText,
+          },
+          'OpenAI transcription'
+        );
+      }
+
+      const data = (await response.json()) as unknown;
+      if (!hasTranscriptionText(data)) {
+        return {
+          success: false,
+          error: {
+            code: 'unknown',
+            message: 'OpenAI transcription response did not include text',
+          },
+        };
+      }
+
+      return { success: true };
+    } catch (error) {
+      return this.parseApiKeyError(error, 'OpenAI transcription');
+    }
+  }
+
+  private parseApiKeyError(error: unknown, service: string): ITestApiKeyVo {
+    const errorMessage = String(error).toLowerCase();
+    const rawMessage = String(error);
+    const errorObj = error as {
+      status?: number;
+      statusCode?: number;
+      message?: string;
+      cause?: { status?: number; message?: string };
+      data?: { error?: { type?: string; code?: string; message?: string } };
+    };
+
+    const status = errorObj.status || errorObj.statusCode || errorObj.cause?.status;
+    const detailedMessage = errorObj.data?.error?.message || errorObj.message || rawMessage;
+
+    this.logger.error(
+      '%s key test failed: status=%s, message=%s, raw=%s',
+      service,
+      status,
+      detailedMessage,
+      rawMessage
+    );
+
+    // Determine error code based on status and message
+    const code = this.getApiKeyErrorCode(status, errorMessage);
+    return { success: false, error: { code, message: detailedMessage } };
+  }
+
+  private getApiKeyErrorCode(
+    status: number | undefined,
+    errorMessage: string
+  ):
+    | 'unauthorized'
+    | 'forbidden'
+    | 'need_credit_card'
+    | 'insufficient_quota'
+    | 'network_error'
+    | 'unknown' {
+    // 401 unauthorized
+    if (
+      status === 401 ||
+      errorMessage.includes('401') ||
+      errorMessage.includes('unauthorized') ||
+      errorMessage.includes('invalid api key') ||
+      errorMessage.includes('invalid_api_key')
+    ) {
+      return 'unauthorized';
+    }
+
+    // 403 forbidden / credit card required
+    if (status === 403 || errorMessage.includes('403')) {
+      if (
+        errorMessage.includes('customer_verification_required') ||
+        errorMessage.includes('credit card')
+      ) {
+        return 'need_credit_card';
+      }
+      return 'forbidden';
+    }
+
+    // Insufficient quota
+    if (
+      errorMessage.includes('insufficient') ||
+      errorMessage.includes('quota') ||
+      errorMessage.includes('balance')
+    ) {
+      return 'insufficient_quota';
+    }
+
+    // Network errors
+    if (
+      errorMessage.includes('econnrefused') ||
+      errorMessage.includes('enotfound') ||
+      errorMessage.includes('timeout') ||
+      errorMessage.includes('fetch failed')
+    ) {
+      return 'network_error';
+    }
+
+    return 'unknown';
+  }
+
+  private async testVercelToken(token: string, baseUrl?: string): Promise<ITestApiKeyVo> {
+    const apiBase = baseUrl || 'https://api.vercel.com';
+
+    const url = `${apiBase}/v2/user`;
+    try {
+      // Same reach as the AI provider tests: private network yes, cloud metadata no.
+      await axios.get(url, {
+        headers: { Authorization: `Bearer ${token}` },
+        ...getSafeAxiosAgents({ allowPrivateNetwork: true }),
+      });
+      return { success: true };
+    } catch (error) {
+      if (!axios.isAxiosError(error)) {
+        return this.parseApiKeyError(error, 'vercel');
+      }
+
+      const status = error.response?.status;
+      const detailedMessage =
+        (error.response?.data as { error?: { message?: string } })?.error?.message || error.message;
+
+      this.logger.error('Vercel token test failed: status=%s, message=%s', status, detailedMessage);
+
+      if (!error.response) {
+        return { success: false, error: { code: 'network_error', message: detailedMessage } };
+      }
+
+      if (status === 401 || status === 403) {
+        return { success: false, error: { code: 'unauthorized', message: detailedMessage } };
+      }
+
+      return { success: false, error: { code: 'unknown', message: detailedMessage } };
+    }
+  }
+}

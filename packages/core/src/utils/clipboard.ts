@@ -1,10 +1,16 @@
 const delimiter = '\t';
 const newline = '\n';
+const windowsNewline = '\r\n';
 
 // eslint-disable-next-line sonarjs/cognitive-complexity
 export const parseClipboardText = (content: string) => {
+  const _newline = content.includes(windowsNewline) ? windowsNewline : newline;
+  // remove the last newline or windows newline
+  if (content.endsWith(_newline)) {
+    content = content.slice(0, -1 * _newline.length);
+  }
   if (!content.includes('"')) {
-    return content.split(newline).map((row) => row.split(delimiter));
+    return content.split(_newline).map((row) => row.split(delimiter));
   }
 
   const len = content.length;
@@ -20,7 +26,7 @@ export const parseClipboardText = (content: string) => {
       quoted = true;
     } else if (content[cursor] === delimiter) {
       endOfCell = true;
-    } else if (content[cursor] === newline) {
+    } else if (content[cursor] === _newline) {
       endOfCell = true;
       endOfRow = true;
     } else {
@@ -39,7 +45,7 @@ export const parseClipboardText = (content: string) => {
         if (content[cursor + 1] === '"') {
           cell += '"';
           cursor++;
-        } else if (cell.includes(delimiter) || cell.includes(newline)) {
+        } else if (cell.includes(delimiter) || cell.includes(_newline)) {
           quoted = false;
         } else {
           cell = `"${cell}"`;
@@ -52,12 +58,18 @@ export const parseClipboardText = (content: string) => {
           endOfCell = true;
           break;
         }
-      } else if (content[cursor] === newline) {
+      } else if (
+        content[cursor] === _newline ||
+        `${content[cursor]}${content[cursor + 1]}` === _newline
+      ) {
         if (quoted) {
-          cell += newline;
+          cell += _newline;
         } else {
           endOfCell = true;
           endOfRow = true;
+        }
+        if (`${content[cursor]}${content[cursor + 1]}` === _newline) {
+          cursor++;
         }
       } else {
         cell += content[cursor];
@@ -65,7 +77,6 @@ export const parseClipboardText = (content: string) => {
     }
     cursor++;
     row.push(cell);
-    console.log('row === ', row, cell, cursor);
     // Handling of the last column with no content, example: "text1"\t"text2"\t
     if (endOfCell && cursor >= len && content[cursor - 1] === '\t') {
       endOfRow = true;
@@ -87,7 +98,7 @@ export const stringifyClipboardText = (content: string[][]) => {
       row
         .map((cell) =>
           cell.includes(delimiter) || cell.includes(newline)
-            ? `"${cell.replace(/"/g, '""')}"`
+            ? `"${cell.replaceAll('"', '""')}"`
             : cell
         )
         .join(delimiter)

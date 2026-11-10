@@ -1,0 +1,1910 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
+/* eslint-disable sonarjs/no-duplicate-string */
+import crypto from 'node:crypto';
+import type { INestApplication } from '@nestjs/common';
+import { cliOAuthApp, HttpError, mcpOAuthScopes } from '@teable/core';
+import { PrismaService } from '@teable/db-main-prisma';
+import {
+  CREATE_BASE,
+  CREATE_SPACE,
+  CREATE_TABLE,
+  GET_TABLE_LIST,
+  GET_TRASH_ITEMS,
+  PERMANENT_DELETE_BASE,
+  PERMANENT_DELETE_SPACE,
+  REVOKE_TOKEN,
+  ResourceType,
+  generateOAuthSecret,
+  oauthCreate,
+  oauthDelete,
+  oauthUpdate,
+  revokeAccess,
+  urlBuilder,
+} from '@teable/openapi';
+import type {
+  ICreateBaseVo,
+  ICreateSpaceVo,
+  IGetBaseAllVo,
+  ITableListVo,
+  ITableVo,
+  ITrashVo,
+  OAuthCreateVo,
+} from '@teable/openapi';
+import type { AxiosInstance, AxiosResponse } from 'axios';
+import axiosInstance from 'axios';
+import { omit } from 'lodash';
+import { CacheService } from '../src/cache/cache.service';
+import { TeableJwtService } from '../src/features/auth/jwt/teable-jwt.service';
+import { createNewUserAxios } from './utils/axios-instance/new-user';
+import { getError } from './utils/get-error';
+import { initApp } from './utils/init-app';
+
+const oauthData = {
+  name: 'test',
+  redirectUris: ['http://localhost:3000/callback'],
+  scopes: ['user|email_read'],
+  homepage: 'http://localhost:3000',
+};
+
+const getAuthorize = async (axios: AxiosInstance, oauth: OAuthCreateVo, state?: string) => {
+  const res = await axios.get(
+    `/oauth/authorize?response_type=code&client_id=${oauth.clientId}&scope=${oauth.scopes?.join(' ')}${state ? '&state=' + state : ''}`,
+    {
+      maxRedirects: 0,
+    }
+  );
+
+  const url = new URL(res.headers.location, oauth.homepage);
+  return {
+    transactionID: url.searchParams.get('transaction_id') as string | null,
+    code: url.searchParams.get('code') as string | null,
+  };
+};
+
+const decision = async (axios: AxiosInstance, transactionID: string, cancel?: string) => {
+  return axios.post(
+    `/oauth/decision`,
+    {
+      transaction_id: transactionID,
+      cancel,
+    },
+    {
+      maxRedirects: 0,
+      headers: {
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+    }
+  );
+};
+const testEmail = `oauth-server+${Date.now()}-${Math.random().toString(36).slice(2, 8)}@example.com`;
+
+describe('OpenAPI OAuthController (e2e)', () => {
+  let app: INestApplication;
+  let oauth: OAuthCreateVo;
+  let axios: AxiosInstance;
+  let spaceId: string;
+  let baseId: string;
+  let anonymousAxios: AxiosInstance;
+
+  beforeAll(async () => {
+    const appCtx = await initApp();
+    app = appCtx.app;
+    const newUserAxios = await createNewUserAxios({
+      email: testEmail,
+      password: '12345678',
+    });
+    axios = axiosInstance.create({
+      baseURL: `${appCtx.appUrl}/api`,
+      headers: {
+        cookie: newUserAxios.defaults.headers.Cookie,
+      },
+      validateStatus: function (status) {
+        return (status >= 200 && status < 209) || status === 302;
+      },
+    });
+
+    anonymousAxios = axiosInstance.create({
+      baseURL: `${appCtx.appUrl}/api`,
+    });
+
+    const interceptorsRes = (response: AxiosResponse<any, any>) => {
+      return response;
+    };
+    const interceptorsError = (error: any) => {
+      const { data, status } = error?.response || {};
+      throw new HttpError(data || error?.message || 'no response from server', status || 500);
+    };
+
+    axios.interceptors.response.use(interceptorsRes, interceptorsError);
+    anonymousAxios.interceptors.response.use(interceptorsRes, interceptorsError);
+  });
+
+  beforeEach(async () => {
+    const res = await oauthCreate(oauthData);
+    oauth = res.data;
+    const spaceRes = await axios.post<ICreateSpaceVo>(CREATE_SPACE, {
+      name: 'test space',
+    });
+    spaceId = spaceRes.data.id;
+
+    const baseRes = await axios.post<ICreateBaseVo>(CREATE_BASE, {
+      name: 'test base',
+      spaceId,
+    });
+    baseId = baseRes.data.id;
+  });
+
+  afterEach(async () => {
+    await oauthDelete(oauth.clientId);
+    await axios.delete<null>(urlBuilder(PERMANENT_DELETE_BASE, { baseId }));
+    await axios.delete<null>(urlBuilder(PERMANENT_DELETE_SPACE, { spaceId }));
+  });
+
+  afterAll(async () => {
+    await app.close();
+  });
+
+  const exchange = async (target: OAuthCreateVo, code: string) => {
+    const secret = await generateOAuthSecret(target.clientId);
+    return anonymousAxios.post(
+      `/oauth/access_token`,
+      new URLSearchParams({
+        grant_type: 'authorization_code',
+        code,
+        client_id: target.clientId,
+        client_secret: secret.data.secret,
+        redirect_uri: target.redirectUris[0],
+      }),
+      {
+        maxRedirects: 0,
+        headers: {
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+      }
+    );
+  };
+
+  // The user approves on the consent screen and the app exchanges the code: it holds a token.
+  const approve = async (target: OAuthCreateVo) => {
+    const { transactionID } = await getAuthorize(axios, target);
+    const res = await decision(axios, transactionID!);
+    return exchange(target, new URL(res.headers.location).searchParams.get('code')!);
+  };
+
+  it('/api/oauth/authorize (GET)', async () => {
+    const res = await axios.get(
+      `/oauth/authorize?response_type=code&client_id=${oauth.clientId}&redirect_uri=${oauth.redirectUris[0]}&scope=${oauth.scopes?.join(' ')}`,
+      { maxRedirects: 0 }
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toContain(`/oauth/decision?transaction_id=`);
+  });
+
+  it('/api/oauth/authorize (GET) - redirect_uri invalid', async () => {
+    const error = await getError(() =>
+      axios.get(
+        `/oauth/authorize?response_type=code&client_id=${oauth.clientId}&redirect_uri=http://localhost:3000/callback-invalid&scope=user|email_read`,
+        { maxRedirects: 0 }
+      )
+    );
+    expect(error?.status).toBe(401);
+  });
+
+  it('/api/oauth/authorize (GET) - scope invalid', async () => {
+    const error = await getError(() =>
+      axios.get(
+        `/oauth/authorize?response_type=code&client_id=${oauth.clientId}&redirect_uri=${oauth.redirectUris[0]}&scope=dddd`,
+        { maxRedirects: 0 }
+      )
+    );
+    expect(error?.status).toBe(400);
+  });
+
+  it('/api/oauth/decision (POST)', async () => {
+    const { transactionID } = await getAuthorize(axios, oauth);
+    const ensure = await decision(axios, transactionID!);
+    expect(ensure.status).toBe(302);
+    expect(ensure.headers.location).toContain(`${oauth.redirectUris[0]}?code=`);
+    // Trust Authorized, once the app holds a token from the approval
+    await exchange(oauth, new URL(ensure.headers.location).searchParams.get('code')!);
+    const { code } = await getAuthorize(axios, oauth);
+    expect(code).not.toBeNull();
+  });
+
+  it('/api/oauth/decision (POST) - state', async () => {
+    const { transactionID } = await getAuthorize(axios, oauth, '123456');
+    const ensure = await decision(axios, transactionID!);
+    expect(ensure.status).toBe(302);
+    expect(ensure.headers.location).toContain(`${oauth.redirectUris[0]}?code=`);
+    const url = new URL(ensure.headers.location);
+    const state = url.searchParams.get('state');
+    expect(state).toBe('123456');
+  });
+
+  it('/api/oauth/decision (POST) - Deny', async () => {
+    const { transactionID } = await getAuthorize(axios, oauth);
+    const decisionRes = await decision(axios, transactionID!, 'Deny');
+    expect(decisionRes.status).toBe(302);
+    expect(decisionRes.headers.location).toContain(`${oauth.redirectUris[0]}?error=access_denied`);
+  });
+
+  it('/api/oauth/decision (POST) - transaction_id invalid', async () => {
+    const error = await getError(() => decision(axios, 'invalid'));
+    expect(error?.status).toBe(400);
+  });
+
+  it('/api/oauth/decision/:transactionId (GET)', async () => {
+    const { transactionID } = await getAuthorize(axios, oauth);
+
+    const res = await axios.get(`/oauth/decision/${transactionID}`);
+    expect(res.status).toBe(200);
+    expect(res.data).toEqual({
+      ...omit(oauthData, 'redirectUris'),
+      redirectUri: oauthData.redirectUris[0],
+    });
+  });
+
+  it('/api/oauth/decision/:transactionId (GET) - transaction_id invalid', async () => {
+    const error = await getError(() => axios.get(`/oauth/decision/invalid`));
+    expect(error?.status).toBe(400);
+  });
+
+  it('/api/oauth/decision/:transactionId (GET) - transaction_id invalid', async () => {
+    const error = await getError(() => axios.get(`/oauth/decision/invalid`));
+    expect(error?.status).toBe(400);
+  });
+
+  it('/api/oauth/decision/:transactionId (GET) - user mismatch', async () => {
+    // Mismatch between user and transaction_id
+    const user2Request = await createNewUserAxios({
+      email: 'oauth1@example.com',
+      password: '12345678',
+    });
+    const { transactionID } = await getAuthorize(axios, oauth);
+    const error = await getError(() => user2Request.get(`/oauth/decision/${transactionID}`));
+    expect(error?.status).toBe(400);
+    expect(error?.message).toBe('Invalid user');
+  });
+
+  it('/api/oauth/decision (POST) - user mismatch', async () => {
+    // A logged-in user must not be able to approve another user's authorization transaction
+    const intruder = await createNewUserAxios({
+      email: `oauth-decision-intruder+${Date.now()}@example.com`,
+      password: '12345678',
+    });
+    const { transactionID } = await getAuthorize(axios, oauth);
+    const error = await getError(() => decision(intruder, transactionID!));
+    expect(error?.status).toBe(400);
+    expect(error?.message).toBe('Invalid user');
+  });
+
+  it('/api/oauth/access_token (POST)', async () => {
+    const { transactionID } = await getAuthorize(axios, oauth);
+
+    const res = await decision(axios, transactionID!);
+
+    const url = new URL(res.headers.location);
+    const code = url.searchParams.get('code');
+    const secret = await generateOAuthSecret(oauth.clientId);
+
+    const tokenRes = await anonymousAxios.post(
+      `/oauth/access_token`,
+      new URLSearchParams({
+        grant_type: 'authorization_code',
+        code: code ?? '',
+        client_id: oauth.clientId,
+        client_secret: secret.data.secret,
+        redirect_uri: oauth.redirectUris[0],
+      }),
+      {
+        maxRedirects: 0,
+        headers: {
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+      }
+    );
+    expect(tokenRes.status).toBe(201);
+    expect(tokenRes.data).toEqual({
+      token_type: 'Bearer',
+      scopes: oauth.scopes,
+      access_token: expect.any(String),
+      refresh_token: expect.any(String),
+      expires_in: expect.any(Number),
+      refresh_expires_in: expect.any(Number),
+    });
+
+    const userInfo = await anonymousAxios.get(`/auth/user`, {
+      headers: {
+        Authorization: `${tokenRes.data.token_type} ${tokenRes.data.access_token}`,
+      },
+    });
+    expect(userInfo.data.email).toEqual(testEmail);
+  });
+
+  it('/api/oauth/access_token (POST) - code issued for another client should fail', async () => {
+    // A code minted for `oauth` must not be redeemable with a different client's credentials
+    const { transactionID } = await getAuthorize(axios, oauth);
+    const res = await decision(axios, transactionID!);
+    const code = new URL(res.headers.location).searchParams.get('code');
+
+    const otherClient = await oauthCreate(oauthData);
+    const otherSecret = await generateOAuthSecret(otherClient.data.clientId);
+
+    const error = await getError(() =>
+      anonymousAxios.post(
+        `/oauth/access_token`,
+        new URLSearchParams({
+          grant_type: 'authorization_code',
+          code: code ?? '',
+          client_id: otherClient.data.clientId,
+          client_secret: otherSecret.data.secret,
+          redirect_uri: oauth.redirectUris[0],
+        }),
+        {
+          maxRedirects: 0,
+          headers: {
+            // eslint-disable-next-line @typescript-eslint/naming-convention
+            'Content-Type': 'application/x-www-form-urlencoded',
+          },
+        }
+      )
+    );
+    expect(error?.status).toBe(401);
+    expect(error?.message).toBe('Invalid client');
+
+    await oauthDelete(otherClient.data.clientId);
+  });
+
+  it('/api/oauth/access_token (POST) - has decision', async () => {
+    await approve(oauth);
+    // approved, and the app holds a token for it: no consent screen this time
+    const { code } = await getAuthorize(axios, oauth);
+    expect(code).not.toBeNull();
+
+    const tokenRes = await exchange(oauth, code!);
+    expect(tokenRes.status).toBe(201);
+    expect(tokenRes.data).toEqual({
+      token_type: 'Bearer',
+      scopes: oauth.scopes,
+      access_token: expect.any(String),
+      refresh_token: expect.any(String),
+      expires_in: expect.any(Number),
+      refresh_expires_in: expect.any(Number),
+    });
+  });
+
+  it('/api/oauth/access_token (POST) - one code, concurrent exchanges, one token pair', async () => {
+    const { transactionID } = await getAuthorize(axios, oauth);
+    const res = await decision(axios, transactionID!);
+    const code = new URL(res.headers.location).searchParams.get('code');
+    expect(code).not.toBeNull();
+    const secret = await generateOAuthSecret(oauth.clientId);
+
+    // Every exchange races the same code (RFC 6749 §10.5: a code is single use).
+    const redeem = () =>
+      anonymousAxios.post(
+        `/oauth/access_token`,
+        new URLSearchParams({
+          grant_type: 'authorization_code',
+          code: code!,
+          client_id: oauth.clientId,
+          client_secret: secret.data.secret,
+          redirect_uri: oauth.redirectUris[0],
+        }),
+        {
+          maxRedirects: 0,
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          validateStatus: () => true,
+        }
+      );
+    const results = await Promise.all(Array.from({ length: 10 }, redeem));
+    const statuses = results.map((r) => r.status);
+    expect(statuses.filter((status) => status === 201)).toHaveLength(1);
+    expect(statuses.filter((status) => status === 401)).toHaveLength(9);
+  });
+
+  it('/api/oauth/authorize (GET) - asks again when the app got no token from the approval', async () => {
+    const { transactionID } = await getAuthorize(axios, oauth);
+    await decision(axios, transactionID!);
+    expect((await getAuthorize(axios, oauth)).code).toBeNull();
+  });
+
+  it('/api/oauth/authorize (GET) - asks again for scopes the app does not hold', async () => {
+    await approve(oauth);
+    // the same scopes again: the app holds them, no consent screen
+    expect((await getAuthorize(axios, oauth)).code).not.toBeNull();
+
+    // the app now asks for more: the user is shown the consent screen again
+    const moreScopes = ['user|email_read', 'user|spaces_read'];
+    await oauthUpdate(oauth.clientId, { ...oauthData, scopes: moreScopes });
+    const asksMore = { ...oauth, scopes: moreScopes };
+    const again = await getAuthorize(axios, asksMore);
+    expect(again.code).toBeNull();
+    const info = await axios.get(`/oauth/decision/${again.transactionID}`);
+    expect(info.data.scopes).toEqual(moreScopes);
+
+    const approved = await decision(axios, again.transactionID!);
+    await exchange(asksMore, new URL(approved.headers.location).searchParams.get('code')!);
+    expect((await getAuthorize(axios, asksMore)).code).not.toBeNull();
+    // asking for less than the app holds needs no new approval
+    expect((await getAuthorize(axios, oauth)).code).not.toBeNull();
+  });
+
+  it('/api/oauth/authorize (GET) - counts every token the app holds, approved one scope at a time', async () => {
+    await oauthUpdate(oauth.clientId, {
+      ...oauthData,
+      scopes: ['user|email_read', 'user|spaces_read'],
+    });
+    const emailOnly = { ...oauth, scopes: ['user|email_read'] };
+    const spacesOnly = { ...oauth, scopes: ['user|spaces_read'] };
+    await approve(emailOnly);
+
+    const spaces = await getAuthorize(axios, spacesOnly);
+    expect(spaces.code).toBeNull();
+    const approved = await decision(axios, spaces.transactionID!);
+    await exchange(spacesOnly, new URL(approved.headers.location).searchParams.get('code')!);
+
+    // both approved now, one at a time: neither asks again
+    expect((await getAuthorize(axios, emailOnly)).code).not.toBeNull();
+    expect(
+      (await getAuthorize(axios, { ...oauth, scopes: ['user|email_read', 'user|spaces_read'] }))
+        .code
+    ).not.toBeNull();
+  });
+
+  it('/api/oauth/access_token (POST) - scope [no email]', async () => {
+    const oauthRes = await oauthCreate({
+      ...oauthData,
+      scopes: ['table|read'],
+    });
+    const { transactionID } = await getAuthorize(axios, oauthRes.data);
+
+    const res = await decision(axios, transactionID!);
+    const url = new URL(res.headers.location);
+    const code = url.searchParams.get('code');
+    const secret = await generateOAuthSecret(oauthRes.data.clientId);
+
+    const tokenRes = await anonymousAxios.post(
+      `/oauth/access_token`,
+      new URLSearchParams({
+        grant_type: 'authorization_code',
+        code: code ?? '',
+        client_id: oauthRes.data.clientId,
+        client_secret: secret.data.secret,
+        redirect_uri: oauthRes.data.redirectUris[0],
+      }),
+      {
+        maxRedirects: 0,
+        headers: {
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+      }
+    );
+    const userInfo = await anonymousAxios.get(`/auth/user`, {
+      headers: {
+        Authorization: `${tokenRes.data.token_type} ${tokenRes.data.access_token}`,
+      },
+    });
+    expect(userInfo.data.email).toBeUndefined();
+    const tableListRes = await anonymousAxios.get<ITableListVo>(
+      urlBuilder(GET_TABLE_LIST, { baseId }),
+      {
+        headers: {
+          Authorization: `${tokenRes.data.token_type} ${tokenRes.data.access_token}`,
+        },
+      }
+    );
+    expect(tableListRes.status).toBe(200);
+    expect(tableListRes.data).toEqual(expect.any(Array));
+
+    // no scope table|create
+    const error = await getError(() =>
+      anonymousAxios.post(
+        `/base/${baseId}/table`,
+        {},
+        {
+          headers: {
+            Authorization: `${tokenRes.data.token_type} ${tokenRes.data.access_token}`,
+          },
+        }
+      )
+    );
+    expect(error?.status).toBe(403);
+    // base|read_all must NOT be granted implicitly: this token only consented
+    // to table|read, so /base/access/all (requires base|read_all) is denied.
+    // (Regression guard for GHSA-c57x — previously read_all was auto-added.)
+    const baseListError = await getError(() =>
+      anonymousAxios.get<IGetBaseAllVo>(`/base/access/all`, {
+        headers: {
+          Authorization: `${tokenRes.data.token_type} ${tokenRes.data.access_token}`,
+        },
+      })
+    );
+    expect(baseListError?.status).toBe(403);
+  });
+
+  it('/api/oauth/access_token (POST) - base|read_all only granted when consented', async () => {
+    const oauthRes = await oauthCreate({
+      ...oauthData,
+      scopes: ['base|read_all'],
+    });
+    const { transactionID } = await getAuthorize(axios, oauthRes.data);
+
+    const res = await decision(axios, transactionID!);
+    const url = new URL(res.headers.location);
+    const code = url.searchParams.get('code');
+    const secret = await generateOAuthSecret(oauthRes.data.clientId);
+
+    const tokenRes = await anonymousAxios.post(
+      `/oauth/access_token`,
+      new URLSearchParams({
+        grant_type: 'authorization_code',
+        code: code ?? '',
+        client_id: oauthRes.data.clientId,
+        client_secret: secret.data.secret,
+        redirect_uri: oauthRes.data.redirectUris[0],
+      }),
+      {
+        maxRedirects: 0,
+        headers: {
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+      }
+    );
+
+    // With base|read_all consented, /base/access/all succeeds.
+    const baseListRes = await anonymousAxios.get<IGetBaseAllVo>(`/base/access/all`, {
+      headers: {
+        Authorization: `${tokenRes.data.token_type} ${tokenRes.data.access_token}`,
+      },
+    });
+    expect(baseListRes.status).toBe(200);
+    expect(baseListRes.data).toEqual(expect.any(Array));
+  });
+
+  it('/api/oauth/access_token (POST) - scope [trash]', async () => {
+    const oauthRes = await oauthCreate({
+      ...oauthData,
+      scopes: ['table|trash_read'],
+    });
+    const { transactionID } = await getAuthorize(axios, oauthRes.data);
+
+    const res = await decision(axios, transactionID!);
+    const url = new URL(res.headers.location);
+    const code = url.searchParams.get('code');
+    const secret = await generateOAuthSecret(oauthRes.data.clientId);
+
+    const tokenRes = await anonymousAxios.post(
+      `/oauth/access_token`,
+      new URLSearchParams({
+        grant_type: 'authorization_code',
+        code: code ?? '',
+        client_id: oauthRes.data.clientId,
+        client_secret: secret.data.secret,
+        redirect_uri: oauthRes.data.redirectUris[0],
+      }),
+      {
+        maxRedirects: 0,
+        headers: {
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+      }
+    );
+    const table = await axios
+      .post<ITableVo>(urlBuilder(CREATE_TABLE, { baseId }), {
+        name: 'test table',
+        records: [
+          {
+            fields: {},
+          },
+          {
+            fields: {},
+          },
+          {
+            fields: {},
+          },
+        ],
+      })
+      .then((res) => res.data);
+
+    const trashItemsRes = await anonymousAxios.get<ITrashVo>(GET_TRASH_ITEMS, {
+      params: {
+        resourceId: table.id,
+        resourceType: ResourceType.Table,
+      },
+      headers: {
+        Authorization: `${tokenRes.data.token_type} ${tokenRes.data.access_token}`,
+      },
+    });
+    expect(trashItemsRes.status).toBe(200);
+  });
+
+  it('/api/oauth/access_token (POST) - refresh token', async () => {
+    const { transactionID } = await getAuthorize(axios, oauth);
+
+    const res = await decision(axios, transactionID!);
+
+    const url = new URL(res.headers.location);
+    const code = url.searchParams.get('code');
+    const secret = await generateOAuthSecret(oauth.clientId);
+
+    const tokenRes = await anonymousAxios.post(
+      `/oauth/access_token`,
+      new URLSearchParams({
+        grant_type: 'authorization_code',
+        code: code ?? '',
+        client_id: oauth.clientId,
+        client_secret: secret.data.secret,
+        redirect_uri: oauth.redirectUris[0],
+      }),
+      {
+        maxRedirects: 0,
+        headers: {
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+      }
+    );
+
+    const refreshTokenRes = await anonymousAxios.post(
+      `/oauth/access_token`,
+      new URLSearchParams({
+        grant_type: 'refresh_token',
+        refresh_token: `${tokenRes.data.refresh_token}`,
+        client_id: oauth.clientId,
+        client_secret: secret.data.secret,
+      }),
+      {
+        maxRedirects: 0,
+        headers: {
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+      }
+    );
+    expect(refreshTokenRes.status).toBe(201);
+    expect(refreshTokenRes.data).toEqual({
+      token_type: 'Bearer',
+      scopes: oauth.scopes,
+      access_token: expect.any(String),
+      refresh_token: expect.any(String),
+      expires_in: expect.any(Number),
+      refresh_expires_in: expect.any(Number),
+    });
+
+    // previous refresh token should be invalid
+    const error = await getError(() =>
+      anonymousAxios.post(
+        `/oauth/access_token`,
+        new URLSearchParams({
+          grant_type: 'refresh_token',
+          refresh_token: `${tokenRes.data.refresh_token}`,
+          client_id: oauth.clientId,
+          client_secret: secret.data.secret,
+        }),
+        {
+          maxRedirects: 0,
+          headers: {
+            // eslint-disable-next-line @typescript-eslint/naming-convention
+            'Content-Type': 'application/x-www-form-urlencoded',
+          },
+        }
+      )
+    );
+    expect(error?.status).toBe(401);
+  });
+
+  it('/api/oauth/access_token (POST) - confidential refresh token missing client_secret should fail', async () => {
+    const { transactionID } = await getAuthorize(axios, oauth);
+    const res = await decision(axios, transactionID!);
+    const url = new URL(res.headers.location);
+    const code = url.searchParams.get('code');
+    const secret = await generateOAuthSecret(oauth.clientId);
+
+    const tokenRes = await anonymousAxios.post(
+      `/oauth/access_token`,
+      new URLSearchParams({
+        grant_type: 'authorization_code',
+        code: code ?? '',
+        client_id: oauth.clientId,
+        client_secret: secret.data.secret,
+        redirect_uri: oauth.redirectUris[0],
+      }),
+      {
+        maxRedirects: 0,
+        headers: {
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+      }
+    );
+    expect(tokenRes.status).toBe(201);
+
+    const error = await getError(() =>
+      anonymousAxios.post(
+        `/oauth/access_token`,
+        new URLSearchParams({
+          grant_type: 'refresh_token',
+          refresh_token: `${tokenRes.data.refresh_token}`,
+          client_id: oauth.clientId,
+        }),
+        {
+          maxRedirects: 0,
+          headers: {
+            // eslint-disable-next-line @typescript-eslint/naming-convention
+            'Content-Type': 'application/x-www-form-urlencoded',
+          },
+        }
+      )
+    );
+    expect(error?.status).toBe(401);
+  });
+
+  it('/api/oauth/access_token (POST) - confidential refresh token wrong client_secret should fail', async () => {
+    const { transactionID } = await getAuthorize(axios, oauth);
+    const res = await decision(axios, transactionID!);
+    const url = new URL(res.headers.location);
+    const code = url.searchParams.get('code');
+    const secret = await generateOAuthSecret(oauth.clientId);
+
+    const tokenRes = await anonymousAxios.post(
+      `/oauth/access_token`,
+      new URLSearchParams({
+        grant_type: 'authorization_code',
+        code: code ?? '',
+        client_id: oauth.clientId,
+        client_secret: secret.data.secret,
+        redirect_uri: oauth.redirectUris[0],
+      }),
+      {
+        maxRedirects: 0,
+        headers: {
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+      }
+    );
+    expect(tokenRes.status).toBe(201);
+
+    const error = await getError(() =>
+      anonymousAxios.post(
+        `/oauth/access_token`,
+        new URLSearchParams({
+          grant_type: 'refresh_token',
+          refresh_token: `${tokenRes.data.refresh_token}`,
+          client_id: oauth.clientId,
+          client_secret: 'invalid-secret',
+        }),
+        {
+          maxRedirects: 0,
+          headers: {
+            // eslint-disable-next-line @typescript-eslint/naming-convention
+            'Content-Type': 'application/x-www-form-urlencoded',
+          },
+        }
+      )
+    );
+    expect(error?.status).toBe(401);
+  });
+
+  it('/api/oauth/access_token (POST) - confidential refresh token with only client_id should fail', async () => {
+    const { transactionID } = await getAuthorize(axios, oauth);
+    const res = await decision(axios, transactionID!);
+    const url = new URL(res.headers.location);
+    const code = url.searchParams.get('code');
+    const secret = await generateOAuthSecret(oauth.clientId);
+
+    const tokenRes = await anonymousAxios.post(
+      `/oauth/access_token`,
+      new URLSearchParams({
+        grant_type: 'authorization_code',
+        code: code ?? '',
+        client_id: oauth.clientId,
+        client_secret: secret.data.secret,
+        redirect_uri: oauth.redirectUris[0],
+      }),
+      {
+        maxRedirects: 0,
+        headers: {
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+      }
+    );
+    expect(tokenRes.status).toBe(201);
+
+    const error = await getError(() =>
+      anonymousAxios.post(
+        `/oauth/access_token`,
+        new URLSearchParams({
+          grant_type: 'refresh_token',
+          refresh_token: `${tokenRes.data.refresh_token}`,
+          client_id: oauth.clientId,
+        }),
+        {
+          maxRedirects: 0,
+          headers: {
+            // eslint-disable-next-line @typescript-eslint/naming-convention
+            'Content-Type': 'application/x-www-form-urlencoded',
+          },
+        }
+      )
+    );
+    expect(error?.status).toBe(401);
+  });
+
+  it('/api/oauth/access_token (POST) - refresh token failing verification answers 401', async () => {
+    const secret = await generateOAuthSecret(oauth.clientId);
+    const { transactionID } = await getAuthorize(axios, oauth);
+    const res = await decision(axios, transactionID!);
+    const code = new URL(res.headers.location).searchParams.get('code');
+
+    const tokenRes = await anonymousAxios.post(
+      `/oauth/access_token`,
+      new URLSearchParams({
+        grant_type: 'authorization_code',
+        code: code ?? '',
+        client_id: oauth.clientId,
+        client_secret: secret.data.secret,
+        redirect_uri: oauth.redirectUris[0],
+      }),
+      {
+        maxRedirects: 0,
+        headers: {
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+      }
+    );
+
+    // A well-formed JWT whose signature matches no instance secret, e.g. a refresh
+    // token minted by another environment or corrupted on the client.
+    const [header, payload] = tokenRes.data.refresh_token.split('.');
+    const badSignature = await getError(() =>
+      anonymousAxios.post(
+        `/oauth/access_token`,
+        new URLSearchParams({
+          grant_type: 'refresh_token',
+          refresh_token: `${header}.${payload}.${'A'.repeat(43)}`,
+          client_id: oauth.clientId,
+          client_secret: secret.data.secret,
+        }),
+        {
+          maxRedirects: 0,
+          headers: {
+            // eslint-disable-next-line @typescript-eslint/naming-convention
+            'Content-Type': 'application/x-www-form-urlencoded',
+          },
+        }
+      )
+    );
+    expect(badSignature?.status).toBe(401);
+
+    // jsonwebtoken rejects an expired token before any lookup; expiry is still a
+    // client credential error, not a server fault.
+    const expired = app
+      .get(TeableJwtService)
+      .sign(
+        { clientId: oauth.clientId, accessTokenId: 'actexpired', sign: 'expired' },
+        { expiresIn: '-10s' }
+      );
+    const expiredError = await getError(() =>
+      anonymousAxios.post(
+        `/oauth/access_token`,
+        new URLSearchParams({
+          grant_type: 'refresh_token',
+          refresh_token: expired,
+          client_id: oauth.clientId,
+          client_secret: secret.data.secret,
+        }),
+        {
+          maxRedirects: 0,
+          headers: {
+            // eslint-disable-next-line @typescript-eslint/naming-convention
+            'Content-Type': 'application/x-www-form-urlencoded',
+          },
+        }
+      )
+    );
+    expect(expiredError?.status).toBe(401);
+  });
+
+  describe('PKCE flow', () => {
+    const generateCodeVerifier = () => {
+      return crypto.randomBytes(32).toString('base64url');
+    };
+
+    const generateCodeChallenge = (verifier: string) => {
+      return crypto.createHash('sha256').update(verifier).digest('base64url');
+    };
+
+    const getAuthorizeWithPkce = async (
+      ax: AxiosInstance,
+      oa: OAuthCreateVo,
+      codeChallenge: string,
+      codeChallengeMethod = 'S256',
+      state?: string
+    ) => {
+      const res = await ax.get(
+        `/oauth/authorize?response_type=code&client_id=${oa.clientId}&scope=${oa.scopes?.join(' ')}&code_challenge=${codeChallenge}&code_challenge_method=${codeChallengeMethod}${state ? '&state=' + state : ''}`,
+        { maxRedirects: 0 }
+      );
+
+      const url = new URL(res.headers.location, oa.homepage);
+      return {
+        transactionID: url.searchParams.get('transaction_id') as string | null,
+        code: url.searchParams.get('code') as string | null,
+      };
+    };
+
+    it('/api/oauth/authorize (GET) - with PKCE params', async () => {
+      const codeVerifier = generateCodeVerifier();
+      const codeChallenge = generateCodeChallenge(codeVerifier);
+
+      const res = await axios.get(
+        `/oauth/authorize?response_type=code&client_id=${oauth.clientId}&redirect_uri=${oauth.redirectUris[0]}&scope=${oauth.scopes?.join(' ')}&code_challenge=${codeChallenge}&code_challenge_method=S256`,
+        { maxRedirects: 0 }
+      );
+      expect(res.status).toBe(302);
+      expect(res.headers.location).toContain(`/oauth/decision?transaction_id=`);
+    });
+
+    it('/api/oauth/authorize (GET) - invalid code_challenge_method', async () => {
+      const error = await getError(() =>
+        axios.get(
+          `/oauth/authorize?response_type=code&client_id=${oauth.clientId}&redirect_uri=${oauth.redirectUris[0]}&scope=${oauth.scopes?.join(' ')}&code_challenge=abc&code_challenge_method=plain`,
+          { maxRedirects: 0 }
+        )
+      );
+      expect(error?.status).toBe(400);
+    });
+
+    it('/api/oauth/authorize (GET) - code_challenge without method', async () => {
+      const codeVerifier = generateCodeVerifier();
+      const codeChallenge = generateCodeChallenge(codeVerifier);
+
+      const error = await getError(() =>
+        axios.get(
+          `/oauth/authorize?response_type=code&client_id=${oauth.clientId}&redirect_uri=${oauth.redirectUris[0]}&scope=${oauth.scopes?.join(' ')}&code_challenge=${codeChallenge}`,
+          { maxRedirects: 0 }
+        )
+      );
+      expect(error?.status).toBe(400);
+    });
+
+    it('/api/oauth/access_token (POST) - PKCE token exchange', async () => {
+      const codeVerifier = generateCodeVerifier();
+      const codeChallenge = generateCodeChallenge(codeVerifier);
+
+      const { transactionID } = await getAuthorizeWithPkce(axios, oauth, codeChallenge);
+      const res = await decision(axios, transactionID!);
+
+      const url = new URL(res.headers.location);
+      const code = url.searchParams.get('code');
+
+      const tokenRes = await anonymousAxios.post(
+        `/oauth/access_token`,
+        new URLSearchParams({
+          grant_type: 'authorization_code',
+          code: code ?? '',
+          client_id: oauth.clientId,
+          code_verifier: codeVerifier,
+          redirect_uri: oauth.redirectUris[0],
+        }),
+        {
+          maxRedirects: 0,
+          headers: {
+            // eslint-disable-next-line @typescript-eslint/naming-convention
+            'Content-Type': 'application/x-www-form-urlencoded',
+          },
+        }
+      );
+      expect(tokenRes.status).toBe(201);
+      expect(tokenRes.data).toEqual({
+        token_type: 'Bearer',
+        scopes: oauth.scopes,
+        access_token: expect.any(String),
+        refresh_token: expect.any(String),
+        expires_in: expect.any(Number),
+        refresh_expires_in: expect.any(Number),
+      });
+
+      const userInfo = await anonymousAxios.get(`/auth/user`, {
+        headers: {
+          Authorization: `${tokenRes.data.token_type} ${tokenRes.data.access_token}`,
+        },
+      });
+      expect(userInfo.data.email).toEqual(testEmail);
+    });
+
+    it('/api/oauth/access_token (POST) - PKCE with trusted authorization', async () => {
+      const codeVerifier1 = generateCodeVerifier();
+      const codeChallenge1 = generateCodeChallenge(codeVerifier1);
+
+      // First authorization - user approves
+      const { transactionID } = await getAuthorizeWithPkce(
+        axios,
+        oauth,
+        codeChallenge1,
+        'S256',
+        '123456'
+      );
+      const approved = await decision(axios, transactionID!);
+      // the app exchanges the code: it now holds a token with the approved scopes
+      await anonymousAxios.post(
+        `/oauth/access_token`,
+        new URLSearchParams({
+          grant_type: 'authorization_code',
+          code: new URL(approved.headers.location).searchParams.get('code') ?? '',
+          client_id: oauth.clientId,
+          code_verifier: codeVerifier1,
+          redirect_uri: oauth.redirectUris[0],
+        }),
+        {
+          maxRedirects: 0,
+          headers: {
+            // eslint-disable-next-line @typescript-eslint/naming-convention
+            'Content-Type': 'application/x-www-form-urlencoded',
+          },
+        }
+      );
+
+      // Second authorization - should be trusted (immediate)
+      const codeVerifier2 = generateCodeVerifier();
+      const codeChallenge2 = generateCodeChallenge(codeVerifier2);
+      const { code } = await getAuthorizeWithPkce(axios, oauth, codeChallenge2);
+      expect(code).not.toBeNull();
+
+      const tokenRes = await anonymousAxios.post(
+        `/oauth/access_token`,
+        new URLSearchParams({
+          grant_type: 'authorization_code',
+          code: code ?? '',
+          client_id: oauth.clientId,
+          code_verifier: codeVerifier2,
+          redirect_uri: oauth.redirectUris[0],
+        }),
+        {
+          maxRedirects: 0,
+          headers: {
+            // eslint-disable-next-line @typescript-eslint/naming-convention
+            'Content-Type': 'application/x-www-form-urlencoded',
+          },
+        }
+      );
+      expect(tokenRes.status).toBe(201);
+      expect(tokenRes.data.access_token).toBeDefined();
+    });
+
+    it('/api/oauth/access_token (POST) - PKCE wrong code_verifier', async () => {
+      const codeVerifier = generateCodeVerifier();
+      const codeChallenge = generateCodeChallenge(codeVerifier);
+
+      const { transactionID } = await getAuthorizeWithPkce(axios, oauth, codeChallenge);
+      const res = await decision(axios, transactionID!);
+
+      const url = new URL(res.headers.location);
+      const code = url.searchParams.get('code');
+
+      const wrongVerifier = generateCodeVerifier(); // different verifier
+
+      const error = await getError(() =>
+        anonymousAxios.post(
+          `/oauth/access_token`,
+          new URLSearchParams({
+            grant_type: 'authorization_code',
+            code: code ?? '',
+            client_id: oauth.clientId,
+            code_verifier: wrongVerifier,
+            redirect_uri: oauth.redirectUris[0],
+          }),
+          {
+            maxRedirects: 0,
+            headers: {
+              // eslint-disable-next-line @typescript-eslint/naming-convention
+              'Content-Type': 'application/x-www-form-urlencoded',
+            },
+          }
+        )
+      );
+      expect(error?.status).toBe(401);
+    });
+
+    it('/api/oauth/access_token (POST) - PKCE missing code_verifier', async () => {
+      const codeVerifier = generateCodeVerifier();
+      const codeChallenge = generateCodeChallenge(codeVerifier);
+
+      const { transactionID } = await getAuthorizeWithPkce(axios, oauth, codeChallenge);
+      const res = await decision(axios, transactionID!);
+
+      const url = new URL(res.headers.location);
+      const code = url.searchParams.get('code');
+
+      // Exchange without code_verifier but with client_secret — should fail because code_challenge was set
+      const secret = await generateOAuthSecret(oauth.clientId);
+      const error = await getError(() =>
+        anonymousAxios.post(
+          `/oauth/access_token`,
+          new URLSearchParams({
+            grant_type: 'authorization_code',
+            code: code ?? '',
+            client_id: oauth.clientId,
+            client_secret: secret.data.secret,
+            redirect_uri: oauth.redirectUris[0],
+          }),
+          {
+            maxRedirects: 0,
+            headers: {
+              // eslint-disable-next-line @typescript-eslint/naming-convention
+              'Content-Type': 'application/x-www-form-urlencoded',
+            },
+          }
+        )
+      );
+      expect(error?.status).toBe(400);
+    });
+
+    it('/api/oauth/access_token (POST) - client_secret together with PKCE', async () => {
+      const codeVerifier = generateCodeVerifier();
+      const codeChallenge = generateCodeChallenge(codeVerifier);
+
+      const { transactionID } = await getAuthorizeWithPkce(axios, oauth, codeChallenge);
+      const res = await decision(axios, transactionID!);
+      const code = new URL(res.headers.location).searchParams.get('code');
+
+      // OAuth 2.1 wants PKCE from confidential clients too: both are checked.
+      const secret = await generateOAuthSecret(oauth.clientId);
+      const tokenRes = await anonymousAxios.post(
+        `/oauth/access_token`,
+        new URLSearchParams({
+          grant_type: 'authorization_code',
+          code: code ?? '',
+          client_id: oauth.clientId,
+          client_secret: secret.data.secret,
+          code_verifier: codeVerifier,
+          redirect_uri: oauth.redirectUris[0],
+        }),
+        {
+          maxRedirects: 0,
+          headers: {
+            // eslint-disable-next-line @typescript-eslint/naming-convention
+            'Content-Type': 'application/x-www-form-urlencoded',
+          },
+        }
+      );
+      expect(tokenRes.status).toBe(201);
+      expect(tokenRes.data.access_token).toBeTruthy();
+    });
+
+    it('/api/oauth/access_token (POST) - PKCE refresh token', async () => {
+      const codeVerifier = generateCodeVerifier();
+      const codeChallenge = generateCodeChallenge(codeVerifier);
+
+      const { transactionID } = await getAuthorizeWithPkce(axios, oauth, codeChallenge);
+      const res = await decision(axios, transactionID!);
+
+      const url = new URL(res.headers.location);
+      const code = url.searchParams.get('code');
+
+      const tokenRes = await anonymousAxios.post(
+        `/oauth/access_token`,
+        new URLSearchParams({
+          grant_type: 'authorization_code',
+          code: code ?? '',
+          client_id: oauth.clientId,
+          code_verifier: codeVerifier,
+          redirect_uri: oauth.redirectUris[0],
+        }),
+        {
+          maxRedirects: 0,
+          headers: {
+            // eslint-disable-next-line @typescript-eslint/naming-convention
+            'Content-Type': 'application/x-www-form-urlencoded',
+          },
+        }
+      );
+      expect(tokenRes.status).toBe(201);
+
+      // Refresh token using PKCE (no client_secret)
+      const refreshTokenRes = await anonymousAxios.post(
+        `/oauth/access_token`,
+        new URLSearchParams({
+          grant_type: 'refresh_token',
+          refresh_token: tokenRes.data.refresh_token,
+          client_id: oauth.clientId,
+        }),
+        {
+          maxRedirects: 0,
+          headers: {
+            // eslint-disable-next-line @typescript-eslint/naming-convention
+            'Content-Type': 'application/x-www-form-urlencoded',
+          },
+        }
+      );
+      expect(refreshTokenRes.status).toBe(201);
+      expect(refreshTokenRes.data).toEqual({
+        token_type: 'Bearer',
+        scopes: oauth.scopes,
+        access_token: expect.any(String),
+        refresh_token: expect.any(String),
+        expires_in: expect.any(Number),
+        refresh_expires_in: expect.any(Number),
+      });
+
+      // Old refresh token should be invalid
+      const error = await getError(() =>
+        anonymousAxios.post(
+          `/oauth/access_token`,
+          new URLSearchParams({
+            grant_type: 'refresh_token',
+            refresh_token: tokenRes.data.refresh_token,
+            client_id: oauth.clientId,
+            code_verifier: codeVerifier,
+          }),
+          {
+            maxRedirects: 0,
+            headers: {
+              // eslint-disable-next-line @typescript-eslint/naming-convention
+              'Content-Type': 'application/x-www-form-urlencoded',
+            },
+          }
+        )
+      );
+      expect(error?.status).toBe(401);
+    });
+
+    it('/api/oauth/access_token (POST) - non-PKCE code with only client_id should fail', async () => {
+      const { transactionID } = await getAuthorize(axios, oauth);
+      const res = await decision(axios, transactionID!);
+
+      const url = new URL(res.headers.location);
+      const code = url.searchParams.get('code');
+
+      const error = await getError(() =>
+        anonymousAxios.post(
+          `/oauth/access_token`,
+          new URLSearchParams({
+            grant_type: 'authorization_code',
+            code: code ?? '',
+            client_id: oauth.clientId,
+            redirect_uri: oauth.redirectUris[0],
+          }),
+          {
+            maxRedirects: 0,
+            headers: {
+              // eslint-disable-next-line @typescript-eslint/naming-convention
+              'Content-Type': 'application/x-www-form-urlencoded',
+            },
+          }
+        )
+      );
+      expect(error?.status).toBe(400);
+    });
+
+    it('/api/oauth/access_token (POST) - non-PKCE code with code_verifier should fail', async () => {
+      const { transactionID } = await getAuthorize(axios, oauth);
+      const res = await decision(axios, transactionID!);
+
+      const url = new URL(res.headers.location);
+      const code = url.searchParams.get('code');
+      const codeVerifier = generateCodeVerifier();
+
+      const error = await getError(() =>
+        anonymousAxios.post(
+          `/oauth/access_token`,
+          new URLSearchParams({
+            grant_type: 'authorization_code',
+            code: code ?? '',
+            client_id: oauth.clientId,
+            code_verifier: codeVerifier,
+            redirect_uri: oauth.redirectUris[0],
+          }),
+          {
+            maxRedirects: 0,
+            headers: {
+              // eslint-disable-next-line @typescript-eslint/naming-convention
+              'Content-Type': 'application/x-www-form-urlencoded',
+            },
+          }
+        )
+      );
+      expect(error?.status).toBe(400);
+    });
+
+    it('/api/oauth/access_token (POST) - PKCE revoke access', async () => {
+      const codeVerifier = generateCodeVerifier();
+      const codeChallenge = generateCodeChallenge(codeVerifier);
+
+      const { transactionID } = await getAuthorizeWithPkce(axios, oauth, codeChallenge);
+      const res = await decision(axios, transactionID!);
+
+      const url = new URL(res.headers.location);
+      const code = url.searchParams.get('code');
+
+      const tokenRes = await anonymousAxios.post(
+        `/oauth/access_token`,
+        new URLSearchParams({
+          grant_type: 'authorization_code',
+          code: code ?? '',
+          client_id: oauth.clientId,
+          code_verifier: codeVerifier,
+          redirect_uri: oauth.redirectUris[0],
+        }),
+        {
+          maxRedirects: 0,
+          headers: {
+            // eslint-disable-next-line @typescript-eslint/naming-convention
+            'Content-Type': 'application/x-www-form-urlencoded',
+          },
+        }
+      );
+
+      const revokeRes = await anonymousAxios.get(`/oauth/client/${oauth.clientId}/revoke-token`, {
+        headers: {
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          'Content-Type': 'application/x-www-form-urlencoded',
+          Authorization: `Bearer ${tokenRes.data.access_token}`,
+        },
+      });
+      expect(revokeRes.status).toBe(200);
+
+      const error = await getError(() =>
+        anonymousAxios.get(`/auth/user`, {
+          headers: {
+            Authorization: `Bearer ${tokenRes.data.access_token}`,
+          },
+        })
+      );
+      expect(error?.status).toBe(401);
+    });
+  });
+
+  describe('revoke access', () => {
+    let accessToken: string;
+
+    beforeEach(async () => {
+      const { transactionID } = await getAuthorize(axios, oauth);
+
+      const res = await decision(axios, transactionID!);
+
+      const url = new URL(res.headers.location);
+      const code = url.searchParams.get('code');
+      const secret = await generateOAuthSecret(oauth.clientId);
+
+      const tokenRes = await anonymousAxios.post(
+        `/oauth/access_token`,
+        new URLSearchParams({
+          grant_type: 'authorization_code',
+          code: code ?? '',
+          client_id: oauth.clientId,
+          client_secret: secret.data.secret,
+          redirect_uri: oauth.redirectUris[0],
+        }),
+        {
+          maxRedirects: 0,
+          headers: {
+            // eslint-disable-next-line @typescript-eslint/naming-convention
+            'Content-Type': 'application/x-www-form-urlencoded',
+          },
+        }
+      );
+      accessToken = tokenRes.data.access_token;
+    });
+
+    it('/api/oauth/client/:clientId/revoke-access (GET)', async () => {
+      const revokeRes = await anonymousAxios.get(`/oauth/client/${oauth.clientId}/revoke-token`, {
+        headers: {
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          'Content-Type': 'application/x-www-form-urlencoded',
+          Authorization: `Bearer ${accessToken}`,
+        },
+      });
+
+      expect(revokeRes.status).toBe(200);
+
+      const error = await getError(() =>
+        anonymousAxios.get(`/auth/user`, {
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+          },
+        })
+      );
+      expect(error?.status).toBe(401);
+    });
+
+    it('/api/oauth/client/:clientId/revoke-access (POST)', async () => {
+      const revokeRes = await revokeAccess(oauth.clientId);
+      expect(revokeRes.status).toBe(200);
+
+      const error = await getError(() =>
+        anonymousAxios.get(`/auth/user`, {
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+          },
+        })
+      );
+      expect(error?.status).toBe(401);
+    });
+
+    it('/api/oauth/client/:clientId/revoke-token (POST)', async () => {
+      const userRes = await anonymousAxios.get(`/auth/user`, {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+      });
+      expect(userRes.status).toBe(200);
+
+      const revokeRes = await axios.post<void>(
+        urlBuilder(REVOKE_TOKEN, { clientId: oauth.clientId })
+      );
+      expect(revokeRes.status).toBe(200);
+
+      const error = await getError(() =>
+        anonymousAxios.get(`/auth/user`, {
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+          },
+        })
+      );
+      expect(error?.status).toBe(401);
+    });
+  });
+
+  /**
+   * RFC 8628 device authorization grant, end to end on the real cache store.
+   * Deliberately not unit-level: the flow's cross-request state lives in
+   * Redis, and its unit specs run on an idealized in-memory cache — a
+   * key-layout drift in CacheService (setnx/get split) once 404'd every
+   * user-code lookup while all unit tests stayed green. This file is the
+   * canary for that class of bug.
+   */
+  describe('device authorization grant', () => {
+    const deviceGrantType = 'urn:ietf:params:oauth:grant-type:device_code';
+    const urlencoded = {
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      validateStatus: () => true,
+    };
+
+    const requestDeviceCode = (body: Record<string, string>) =>
+      anonymousAxios.post('/oauth/device/code', new URLSearchParams(body).toString(), urlencoded);
+
+    const pollToken = (deviceCode: string, clientId = cliOAuthApp.clientId) =>
+      anonymousAxios.post(
+        '/oauth/access_token',
+        new URLSearchParams({
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          grant_type: deviceGrantType,
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          device_code: deviceCode,
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          client_id: clientId,
+        }).toString(),
+        urlencoded
+      );
+
+    beforeAll(async () => {
+      // The endpoint rate limits per IP; repeated local runs inside one window
+      // would otherwise start flaking on the 429.
+      const cacheService = app.get(CacheService);
+      for (const ip of ['127.0.0.1', '::1', '::ffff:127.0.0.1']) {
+        await cacheService.del(`oauth:device-rate:${ip}`);
+      }
+    });
+
+    it('walks the whole flow: code, approval page, decision, tokens, spent replay', async () => {
+      const device = await requestDeviceCode({
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        client_id: cliOAuthApp.clientId,
+      });
+      expect(device.status).toBe(200);
+      expect(device.data).toMatchObject({
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        user_code: expect.stringMatching(/^[A-Z]{4}-[A-Z]{4}$/),
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        expires_in: expect.any(Number),
+        interval: expect.any(Number),
+      });
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      const { device_code, user_code } = device.data;
+
+      // The approval page accepts the code the way people type it.
+      const appInfo = await axios.get(`/oauth/device/${user_code.toLowerCase().replace('-', '')}`);
+      expect(appInfo.data).toMatchObject({ name: cliOAuthApp.name });
+      expect(appInfo.data.scopes.length).toBeGreaterThan(0);
+
+      await axios.post('/oauth/device/decision', { userCode: user_code, approve: true });
+
+      const tokens = await pollToken(device_code);
+      expect(tokens.status).toBe(200);
+      expect(tokens.data).toMatchObject({
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        token_type: 'Bearer',
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        access_token: expect.any(String),
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        refresh_token: expect.any(String),
+      });
+
+      // The token belongs to whoever approved in the browser.
+      const userInfo = await anonymousAxios.get(`/auth/user`, {
+        headers: { Authorization: `Bearer ${tokens.data.access_token}` },
+      });
+      expect(userInfo.data.email).toEqual(testEmail);
+
+      // Single use: the spent code reads as expired.
+      const replay = await pollToken(device_code);
+      expect(replay.status).toBe(400);
+      expect(replay.data).toEqual({ error: 'expired_token' });
+    });
+
+    it('answers authorization_pending, then slow_down to a hasty poll', async () => {
+      const device = await requestDeviceCode({
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        client_id: cliOAuthApp.clientId,
+      });
+
+      const pending = await pollToken(device.data.device_code);
+      expect(pending.status).toBe(400);
+      expect(pending.data).toEqual({ error: 'authorization_pending' });
+
+      const hasty = await pollToken(device.data.device_code);
+      expect(hasty.status).toBe(400);
+      expect(hasty.data).toEqual({ error: 'slow_down' });
+    });
+
+    it('reports a denial once, then forgets the code', async () => {
+      const device = await requestDeviceCode({
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        client_id: cliOAuthApp.clientId,
+      });
+
+      await axios.post('/oauth/device/decision', {
+        userCode: device.data.user_code,
+        approve: false,
+      });
+
+      const denied = await pollToken(device.data.device_code);
+      expect(denied.data).toEqual({ error: 'access_denied' });
+      const gone = await pollToken(device.data.device_code);
+      expect(gone.data).toEqual({ error: 'expired_token' });
+    });
+
+    it('speaks RFC 8628 error codes on the device authorization endpoint', async () => {
+      const missing = await requestDeviceCode({});
+      expect(missing.status).toBe(400);
+      expect(missing.data.error).toBe('invalid_request');
+
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      const unknown = await requestDeviceCode({ client_id: 'no-such-client' });
+      expect(unknown.data.error).toBe('invalid_client');
+
+      // `oauth` is created fresh per test and never opted in to the device flow.
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      const notOptedIn = await requestDeviceCode({ client_id: oauth.clientId });
+      expect(notOptedIn.data.error).toBe('unauthorized_client');
+
+      const badScope = await requestDeviceCode({
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        client_id: cliOAuthApp.clientId,
+        scope: 'not|granted',
+      });
+      expect(badScope.data.error).toBe('invalid_scope');
+    });
+
+    it('refuses the approval page for a code nobody issued', async () => {
+      const error = await getError(() => axios.get(`/oauth/device/ZZZZ-ZZZZ`));
+      expect(error?.status).toBe(404);
+    });
+  });
+
+  describe('dynamic client registration (RFC 7591)', () => {
+    const clientName = `dcr-${Date.now()}`;
+    const register = (body: Record<string, unknown>) =>
+      anonymousAxios.post('/oauth/register', body, { validateStatus: () => true });
+
+    afterAll(async () => {
+      await app.get(PrismaService).oAuthApp.deleteMany({
+        where: { dynamicRegistration: true, name: clientName },
+      });
+    });
+
+    it('registers a public client and answers with RFC 7591 metadata', async () => {
+      const res = await register({
+        client_name: clientName,
+        redirect_uris: ['http://localhost:51234/callback', 'cursor://anysphere.cursor/oauth'],
+        token_endpoint_auth_method: 'none',
+        grant_types: ['authorization_code', 'refresh_token'],
+        response_types: ['code'],
+      });
+      expect(res.status).toBe(201);
+      expect(res.data.client_id).toMatch(/^cl/);
+      expect(res.data.client_secret).toBeUndefined();
+      expect(res.data.token_endpoint_auth_method).toBe('none');
+      expect(res.data.redirect_uris).toEqual([
+        'http://localhost:51234/callback',
+        'cursor://anysphere.cursor/oauth',
+      ]);
+      expect(res.data.scope).toBe(mcpOAuthScopes.join(' '));
+      expect(typeof res.data.client_id_issued_at).toBe('number');
+    });
+
+    it('rejects metadata it cannot honor with RFC error objects', async () => {
+      const cases: [Record<string, unknown>, string][] = [
+        [{ client_name: clientName }, 'invalid_redirect_uri'],
+        [{ client_name: clientName, redirect_uris: [] }, 'invalid_redirect_uri'],
+        [{ client_name: clientName, redirect_uris: ['not a url'] }, 'invalid_redirect_uri'],
+        [
+          { client_name: clientName, redirect_uris: ['http://evil.example/callback'] },
+          'invalid_redirect_uri',
+        ],
+        [
+          { client_name: clientName, redirect_uris: ['https://app.example/cb#frag'] },
+          'invalid_redirect_uri',
+        ],
+        [
+          {
+            client_name: clientName,
+            redirect_uris: ['https://app.example/cb'],
+            token_endpoint_auth_method: 'client_secret_basic',
+          },
+          'invalid_client_metadata',
+        ],
+        [
+          {
+            client_name: clientName,
+            redirect_uris: ['https://app.example/cb'],
+            scope: 'base|read nope|read',
+          },
+          'invalid_client_metadata',
+        ],
+        [
+          {
+            client_name: clientName,
+            redirect_uris: ['https://app.example/cb'],
+            scope: 'user|integrations',
+          },
+          'invalid_client_metadata',
+        ],
+        [
+          { client_name: clientName, redirect_uris: ['https://app.teable.ai@evil.example/cb'] },
+          'invalid_redirect_uri',
+        ],
+        [
+          { client_name: clientName, redirect_uris: ['mailto:x@evil.example'] },
+          'invalid_redirect_uri',
+        ],
+        [
+          {
+            client_name: clientName,
+            redirect_uris: ['https://app.example/cb'],
+            grant_types: ['client_credentials'],
+          },
+          'invalid_client_metadata',
+        ],
+      ];
+      for (const [body, error] of cases) {
+        const res = await register(body);
+        expect(res.status).toBe(400);
+        expect(res.data.error).toBe(error);
+        expect(typeof res.data.error_description).toBe('string');
+      }
+    });
+
+    it('lets a self-registered client ask for any supported scope, not just its registered default', async () => {
+      const redirectUri = 'http://127.0.0.1:52001/callback';
+      const registered = await register({
+        client_name: clientName,
+        redirect_uris: [redirectUri],
+        scope: 'base|read',
+      });
+      const clientId = registered.data.client_id as string;
+      const codeChallenge = crypto
+        .createHash('sha256')
+        .update(crypto.randomBytes(32).toString('base64url'))
+        .digest('base64url');
+      const authorize = (scope: string) =>
+        axios.get(
+          `/oauth/authorize?response_type=code&client_id=${clientId}&redirect_uri=${encodeURIComponent(
+            redirectUri
+          )}&scope=${encodeURIComponent(scope)}&code_challenge=${codeChallenge}&code_challenge_method=S256`,
+          { maxRedirects: 0, validateStatus: () => true }
+        );
+
+      // Outside the registered default but inside the MCP set: fine.
+      expect((await authorize('base|read automation|read')).status).toBe(302);
+      // Not a scope this server knows at all: still rejected.
+      expect((await authorize('base|read nope|read')).status).toBe(400);
+      // User-level scopes (stored integration credentials, notifications) are
+      // never available to a self-registered client, whatever it asks for.
+      expect((await authorize('base|read user|integrations')).status).toBe(400);
+      expect((await authorize('user|notifications_send')).status).toBe(400);
+    });
+
+    it('runs the claude.ai flow: a self-registered confidential client proves both secret and PKCE', async () => {
+      const redirectUri = 'https://claude.ai/api/mcp/auth_callback';
+      const registered = await register({
+        client_name: clientName,
+        redirect_uris: [redirectUri],
+        token_endpoint_auth_method: 'client_secret_post',
+        grant_types: ['authorization_code', 'refresh_token'],
+        response_types: ['code'],
+        application_type: 'web',
+      });
+      expect(registered.status).toBe(201);
+      expect(registered.data.token_endpoint_auth_method).toBe('client_secret_post');
+      expect(registered.data.client_secret_expires_at).toBe(0);
+      const clientId = registered.data.client_id as string;
+      const clientSecret = registered.data.client_secret as string;
+      expect(clientSecret).toBeTruthy();
+
+      const authorizeCode = async (codeChallenge: string) => {
+        const authorizeRes = await axios.get(
+          `/oauth/authorize?response_type=code&client_id=${clientId}&redirect_uri=${encodeURIComponent(
+            redirectUri
+          )}&scope=${encodeURIComponent('base|read')}&code_challenge=${codeChallenge}&code_challenge_method=S256`,
+          { maxRedirects: 0 }
+        );
+        const transactionId = new URL(authorizeRes.headers.location, redirectUri).searchParams.get(
+          'transaction_id'
+        );
+        const decisionRes = await decision(axios, transactionId!);
+        return new URL(decisionRes.headers.location).searchParams.get('code')!;
+      };
+      const exchange = (body: Record<string, string>) =>
+        anonymousAxios.post('/oauth/access_token', new URLSearchParams(body), {
+          maxRedirects: 0,
+          validateStatus: () => true,
+          headers: {
+            // eslint-disable-next-line @typescript-eslint/naming-convention
+            'Content-Type': 'application/x-www-form-urlencoded',
+          },
+        });
+
+      const codeVerifier = crypto.randomBytes(32).toString('base64url');
+      const codeChallenge = crypto.createHash('sha256').update(codeVerifier).digest('base64url');
+
+      // The secret alone does not stand in for the verifier, nor a wrong one.
+      const withoutVerifier = await exchange({
+        grant_type: 'authorization_code',
+        code: await authorizeCode(codeChallenge),
+        client_id: clientId,
+        client_secret: clientSecret,
+        redirect_uri: redirectUri,
+      });
+      expect(withoutVerifier.status).toBe(400);
+      const wrongVerifier = await exchange({
+        grant_type: 'authorization_code',
+        code: await authorizeCode(codeChallenge),
+        client_id: clientId,
+        client_secret: clientSecret,
+        code_verifier: crypto.randomBytes(32).toString('base64url'),
+        redirect_uri: redirectUri,
+      });
+      expect(wrongVerifier.status).toBe(401);
+      const wrongSecret = await exchange({
+        grant_type: 'authorization_code',
+        code: await authorizeCode(codeChallenge),
+        client_id: clientId,
+        client_secret: 'not-the-secret',
+        code_verifier: codeVerifier,
+        redirect_uri: redirectUri,
+      });
+      expect(wrongSecret.status).toBe(401);
+
+      const tokenRes = await exchange({
+        grant_type: 'authorization_code',
+        code: await authorizeCode(codeChallenge),
+        client_id: clientId,
+        client_secret: clientSecret,
+        code_verifier: codeVerifier,
+        redirect_uri: redirectUri,
+      });
+      expect(tokenRes.status).toBe(201);
+      expect(tokenRes.data.access_token).toBeTruthy();
+      const baseRes = await anonymousAxios.get(`/base/${baseId}`, {
+        headers: { Authorization: `Bearer ${tokenRes.data.access_token}` },
+      });
+      expect(baseRes.data.id).toBe(baseId);
+
+      // The refresh token is bound to the secret: refreshing without it fails.
+      const refreshWithoutSecret = await exchange({
+        grant_type: 'refresh_token',
+        refresh_token: tokenRes.data.refresh_token,
+        client_id: clientId,
+      });
+      expect(refreshWithoutSecret.status).toBeGreaterThanOrEqual(400);
+      const refreshed = await exchange({
+        grant_type: 'refresh_token',
+        refresh_token: tokenRes.data.refresh_token,
+        client_id: clientId,
+        client_secret: clientSecret,
+      });
+      expect(refreshed.status).toBe(201);
+      expect(refreshed.data.access_token).toBeTruthy();
+    });
+
+    it('runs the whole PKCE flow for a self-registered client, and the user sees it as such', async () => {
+      const redirectUri = 'http://127.0.0.1:52000/callback';
+      const registered = await register({ client_name: clientName, redirect_uris: [redirectUri] });
+      expect(registered.status).toBe(201);
+      const clientId = registered.data.client_id as string;
+
+      const codeVerifier = crypto.randomBytes(32).toString('base64url');
+      const codeChallenge = crypto.createHash('sha256').update(codeVerifier).digest('base64url');
+      const authorizeRes = await axios.get(
+        `/oauth/authorize?response_type=code&client_id=${clientId}&redirect_uri=${encodeURIComponent(
+          redirectUri
+        )}&scope=${encodeURIComponent('base|read')}&code_challenge=${codeChallenge}&code_challenge_method=S256&resource=${encodeURIComponent(
+          'https://example.test/api/mcp'
+        )}`,
+        { maxRedirects: 0 }
+      );
+      const transactionId = new URL(authorizeRes.headers.location, redirectUri).searchParams.get(
+        'transaction_id'
+      );
+      expect(transactionId).toBeTruthy();
+
+      // The consent page has a name but no homepage to point at.
+      const info = await axios.get(`/oauth/decision/${transactionId}`);
+      expect(info.data.name).toBe(clientName);
+      expect(info.data.homepage).toBeUndefined();
+      expect(info.data.dynamicRegistration).toBe(true);
+      expect(info.data.redirectUri).toBe(redirectUri);
+      expect(info.data.scopes).toEqual(['base|read']);
+
+      const decisionRes = await decision(axios, transactionId!);
+      const code = new URL(decisionRes.headers.location).searchParams.get('code');
+      expect(code).toBeTruthy();
+
+      const tokenRes = await anonymousAxios.post(
+        '/oauth/access_token',
+        new URLSearchParams({
+          grant_type: 'authorization_code',
+          code: code!,
+          client_id: clientId,
+          code_verifier: codeVerifier,
+          redirect_uri: redirectUri,
+          resource: 'https://example.test/api/mcp',
+        }),
+        {
+          maxRedirects: 0,
+          headers: {
+            // eslint-disable-next-line @typescript-eslint/naming-convention
+            'Content-Type': 'application/x-www-form-urlencoded',
+          },
+        }
+      );
+      expect(tokenRes.status).toBe(201);
+      expect(tokenRes.data.access_token).toBeTruthy();
+      expect(tokenRes.data.refresh_token).toBeTruthy();
+
+      const baseRes = await anonymousAxios.get(`/base/${baseId}`, {
+        headers: { Authorization: `Bearer ${tokenRes.data.access_token}` },
+      });
+      expect(baseRes.data.id).toBe(baseId);
+
+      const authorizedList = await axios.get('/oauth/client/authorized/list');
+      const entry = authorizedList.data.find((a: { clientId: string }) => a.clientId === clientId);
+      expect(entry).toBeTruthy();
+      expect(entry.dynamicRegistration).toBe(true);
+      // Settings → MCP shows when the client was first connected and last used;
+      // the call above with the access token counts as a use.
+      expect(typeof entry.authorizedTime).toBe('string');
+      expect(typeof entry.lastUsedTime).toBe('string');
+
+      // It is nobody's app to manage from the developer side.
+      const developerList = await axios.get('/oauth/client');
+      expect(developerList.data.some((a: { clientId: string }) => a.clientId === clientId)).toBe(
+        false
+      );
+    });
+  });
+});

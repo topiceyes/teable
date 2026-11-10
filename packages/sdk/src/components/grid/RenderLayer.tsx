@@ -1,5 +1,5 @@
 import type { FC } from 'react';
-import { useRef, useEffect, useMemo } from 'react';
+import { useRef, useLayoutEffect, useMemo } from 'react';
 import type { IVisibleRegion } from './hooks';
 import type { IInteractionLayerProps } from './InteractionLayer';
 import { RegionType } from './interface';
@@ -17,27 +17,33 @@ import type {
 import type { CombinedSelection } from './managers';
 import { drawGrid } from './renderers';
 
-export interface IRenderLayerProps
-  extends Pick<
-    IInteractionLayerProps,
-    | 'theme'
-    | 'width'
-    | 'height'
-    | 'columns'
-    | 'rowControls'
-    | 'imageManager'
-    | 'spriteManager'
-    | 'scrollState'
-    | 'coordInstance'
-    | 'columnStatistics'
-    | 'groupCollection'
-    | 'rowIndexVisible'
-    | 'collaborators'
-    | 'columnHeaderVisible'
-    | 'isMultiSelectionEnable'
-    | 'getCellContent'
-  > {
+export interface IRenderLayerProps extends Pick<
+  IInteractionLayerProps,
+  | 'theme'
+  | 'width'
+  | 'height'
+  | 'columns'
+  | 'commentCountMap'
+  | 'rowControls'
+  | 'rowControlPaddingX'
+  | 'imageManager'
+  | 'spriteManager'
+  | 'scrollState'
+  | 'coordInstance'
+  | 'columnStatistics'
+  | 'groupCollection'
+  | 'rowIndexVisible'
+  | 'searchCursor'
+  | 'searchHitIndex'
+  | 'highlightedRowIndex'
+  | 'collaborators'
+  | 'columnHeaderHeight'
+  | 'isMultiSelectionEnable'
+  | 'getCellContent'
+> {
   isEditing?: boolean;
+  isFilling?: boolean;
+  isFillEnabled?: boolean;
   visibleRegion: IVisibleRegion;
   activeCell: ICellItem | null;
   activeCellBound: IActiveCellBound | null;
@@ -66,14 +72,19 @@ export const RenderLayer: FC<React.PropsWithChildren<IRenderLayerProps>> = (prop
     width,
     height,
     columns,
+    commentCountMap,
     isEditing,
     rowControls,
+    rowControlPaddingX,
     visibleRegion,
     imageManager,
     spriteManager,
     activeCell,
     activeCellBound,
     collaborators,
+    searchCursor,
+    searchHitIndex,
+    highlightedRowIndex,
     dragState,
     scrollState,
     columnFreezeState,
@@ -88,7 +99,7 @@ export const RenderLayer: FC<React.PropsWithChildren<IRenderLayerProps>> = (prop
     rowIndexVisible,
     columnStatistics,
     columnResizeState,
-    columnHeaderVisible,
+    columnHeaderHeight,
     hoveredColumnResizeIndex,
     isColumnFreezable,
     isRowAppendEnable,
@@ -99,13 +110,15 @@ export const RenderLayer: FC<React.PropsWithChildren<IRenderLayerProps>> = (prop
     getCellContent,
     real2RowIndex,
     getLinearRow,
+    isFilling,
+    isFillEnabled,
   } = props;
   const { containerWidth } = coordInstance;
   const { x, y, columnIndex, rowIndex, type, isOutOfBounds } = originMouseState;
   const isInteracting = _isInteracting || type === RegionType.ColumnFreezeHandler;
 
   const mainCanvasRef = useRef<HTMLCanvasElement | null>(null);
-  const lastPropsRef = useRef<IRenderLayerProps>();
+  const lastPropsRef = useRef<IRenderLayerProps>(undefined);
 
   const cacheCanvas = useMemo(() => {
     const canvas = document.createElement('canvas');
@@ -130,7 +143,9 @@ export const RenderLayer: FC<React.PropsWithChildren<IRenderLayerProps>> = (prop
     return { x, y };
   }, [x, y, isInteracting]);
 
-  useEffect(() => {
+  // Draw before paint so the canvas always matches the DOM overlays (editor, selection) of
+  // the same commit. A passive effect can let one frame show a hidden editor's stale cell.
+  useLayoutEffect(() => {
     const mainCanvas = mainCanvasRef.current;
     if (mainCanvas == null) return;
     const lastProps = lastPropsRef.current;
@@ -139,20 +154,27 @@ export const RenderLayer: FC<React.PropsWithChildren<IRenderLayerProps>> = (prop
       width,
       height,
       columns,
+      commentCountMap,
       isEditing,
       rowControls,
+      rowControlPaddingX,
       visibleRegion,
       imageManager,
       spriteManager,
       activeCell,
       activeCellBound,
       collaborators,
+      searchCursor,
+      searchHitIndex,
+      highlightedRowIndex,
       dragState,
       scrollState,
       columnFreezeState,
       hoverCellPosition,
       mouseState: mousePosition ? { ...mouseState, ...mousePosition } : mouseState,
       selection,
+      isFilling,
+      isFillEnabled,
       isSelecting,
       isInteracting,
       coordInstance,
@@ -161,7 +183,7 @@ export const RenderLayer: FC<React.PropsWithChildren<IRenderLayerProps>> = (prop
       rowIndexVisible,
       columnStatistics,
       columnResizeState,
-      columnHeaderVisible,
+      columnHeaderHeight,
       hoveredColumnResizeIndex,
       isColumnFreezable,
       isRowAppendEnable,
@@ -180,20 +202,27 @@ export const RenderLayer: FC<React.PropsWithChildren<IRenderLayerProps>> = (prop
     width,
     height,
     columns,
+    commentCountMap,
     isEditing,
     rowControls,
+    rowControlPaddingX,
     visibleRegion,
     imageManager,
     spriteManager,
     activeCell,
     activeCellBound,
     collaborators,
+    searchCursor,
+    searchHitIndex,
+    highlightedRowIndex,
     dragState,
     mouseState,
     scrollState,
     columnFreezeState,
     mousePosition,
     selection,
+    isFilling,
+    isFillEnabled,
     isSelecting,
     isInteracting,
     coordInstance,
@@ -202,7 +231,7 @@ export const RenderLayer: FC<React.PropsWithChildren<IRenderLayerProps>> = (prop
     rowIndexVisible,
     columnStatistics,
     columnResizeState,
-    columnHeaderVisible,
+    columnHeaderHeight,
     hoverCellPosition,
     hoveredColumnResizeIndex,
     isColumnFreezable,

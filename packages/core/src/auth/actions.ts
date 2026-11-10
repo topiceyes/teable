@@ -8,64 +8,188 @@ export enum ActionPrefix {
   View = 'view',
   Record = 'record',
   Field = 'field',
+  Automation = 'automation',
+  Routine = 'routine',
+  App = 'app',
+  User = 'user',
+  TableRecordHistory = 'table_record_history',
+  Instance = 'instance',
+  Enterprise = 'enterprise',
 }
 
-const defaultActionsSchema = z.enum(['create', 'update', 'delete', 'read']);
+export const spaceActions = [
+  'space|create',
+  'space|delete',
+  'space|read',
+  'space|update',
+  'space|invite_email',
+  'space|invite_link',
+  'space|grant_role',
+] as const;
+export const spaceActionSchema = z.enum(spaceActions);
+export type SpaceAction = z.infer<typeof spaceActionSchema>;
 
-export const spaceActionsSchema = defaultActionsSchema.or(
-  z.enum(['invite_email', 'invite_link', 'grant_role'])
-);
+export const baseActions = [
+  'base|create',
+  'base|delete',
+  'base|read',
+  'base|read_all',
+  'base|update',
+  'base|invite_email',
+  'base|invite_link',
+  'base|table_import',
+  'base|table_export',
+  'base|authority_matrix_config',
+  'base|query_data',
+] as const;
+export const baseActionSchema = z.enum(baseActions);
+export type BaseAction = z.infer<typeof baseActionSchema>;
 
-export type SpaceActions = `${ActionPrefix.Space}|${z.infer<typeof spaceActionsSchema>}`;
+export const tableActions = [
+  'table|create',
+  'table|delete',
+  'table|read',
+  'table|update',
+  'table|import',
+  'table|export',
+  'table|trash_read',
+  'table|trash_update',
+  'table|trash_reset',
+  'table|archive_read',
+  'table|archive_manage',
+] as const;
+export const tableActionSchema = z.enum(tableActions);
+export type TableAction = z.infer<typeof tableActionSchema>;
 
-export const baseActionsSchema = defaultActionsSchema.or(z.enum(['invite_email', 'invite_link']));
+export const viewActions = [
+  'view|create',
+  'view|delete',
+  'view|read',
+  'view|update',
+  'view|share',
+] as const;
+export const viewActionSchema = z.enum(viewActions);
+export type ViewAction = z.infer<typeof viewActionSchema>;
 
-export type BaseActions = `${ActionPrefix.Base}|${z.infer<typeof baseActionsSchema>}`;
+export const fieldActions = ['field|create', 'field|delete', 'field|read', 'field|update'] as const;
+export const fieldActionSchema = z.enum(fieldActions);
+export type FieldAction = z.infer<typeof fieldActionSchema>;
 
-export const tableActionsSchema = defaultActionsSchema.or(z.enum(['import']));
+export const recordActions = [
+  'record|create',
+  'record|delete',
+  'record|read',
+  'record|update',
+  'record|comment',
+  'record|copy',
+  'record|archive',
+] as const;
+export const recordActionSchema = z.enum(recordActions);
+export type RecordAction = z.infer<typeof recordActionSchema>;
 
-export type TableActions = `${ActionPrefix.Table}|${z.infer<typeof tableActionsSchema>}`;
+export const automationActions = [
+  'automation|create',
+  'automation|delete',
+  'automation|read',
+  'automation|update',
+] as const;
+export const automationActionSchema = z.enum(automationActions);
+export type AutomationAction = z.infer<typeof automationActionSchema>;
 
-export const viewActionsSchema = defaultActionsSchema;
+export const routineActions = [
+  'routine|create',
+  'routine|delete',
+  'routine|read',
+  'routine|update',
+] as const;
+export const routineActionSchema = z.enum(routineActions);
+export type RoutineAction = z.infer<typeof routineActionSchema>;
 
-export type ViewActions = `${ActionPrefix.View}|${z.infer<typeof viewActionsSchema>}`;
+export const appActions = ['app|create', 'app|delete', 'app|read', 'app|update'] as const;
+export const appActionSchema = z.enum(appActions);
+export type AppAction = z.infer<typeof appActionSchema>;
 
-export const fieldActionsSchema = defaultActionsSchema;
+export const userActions = [
+  'user|email_read',
+  'user|integrations',
+  'user|spaces_read',
+  'user|self_hosted_licenses_read',
+  'user|notifications_send',
+] as const;
+export const userActionSchema = z.enum(userActions);
+export type UserAction = z.infer<typeof userActionSchema>;
 
-export type FieldActions = `${ActionPrefix.Field}|${z.infer<typeof fieldActionsSchema>}`;
+export const tableRecordHistoryActions = ['table_record_history|read'] as const;
+export const tableRecordHistoryActionSchema = z.enum(tableRecordHistoryActions);
+export type TableRecordHistoryAction = z.infer<typeof tableRecordHistoryActionSchema>;
 
-export const recordActionsSchema = defaultActionsSchema.or(z.enum(['comment']));
+export const instanceActions = ['instance|read', 'instance|update'] as const;
+export const instanceActionSchema = z.enum(instanceActions);
+export type InstanceAction = z.infer<typeof instanceActionSchema>;
 
-export type RecordActions = `${ActionPrefix.Record}|${z.infer<typeof recordActionsSchema>}`;
+export const enterpriseActions = ['enterprise|read', 'enterprise|update'] as const;
+export const enterpriseActionSchema = z.enum(enterpriseActions);
+export type EnterpriseAction = z.infer<typeof enterpriseActionSchema>;
 
-export type AllActions =
-  | SpaceActions
-  | BaseActions
-  | TableActions
-  | ViewActions
-  | FieldActions
-  | RecordActions;
+export type Action =
+  | SpaceAction
+  | BaseAction
+  | TableAction
+  | ViewAction
+  | FieldAction
+  | RecordAction
+  | AutomationAction
+  | RoutineAction
+  | AppAction
+  | UserAction
+  | TableRecordHistoryAction
+  | InstanceAction
+  | EnterpriseAction;
 
 export type ActionPrefixMap = {
-  [ActionPrefix.Space]: SpaceActions[];
-  [ActionPrefix.Base]: BaseActions[];
-  [ActionPrefix.Table]: TableActions[];
-  [ActionPrefix.View]: ViewActions[];
-  [ActionPrefix.Field]: FieldActions[];
-  [ActionPrefix.Record]: RecordActions[];
+  [ActionPrefix.Space]: SpaceAction[];
+  [ActionPrefix.Base]: BaseAction[];
+  [ActionPrefix.Table]: TableAction[];
+  [ActionPrefix.View]: ViewAction[];
+  [ActionPrefix.Field]: FieldAction[];
+  [ActionPrefix.Record]: RecordAction[];
+  [ActionPrefix.TableRecordHistory]: TableRecordHistoryAction[];
+  [ActionPrefix.Automation]: AutomationAction[];
+  [ActionPrefix.Routine]: RoutineAction[];
+  [ActionPrefix.App]: AppAction[];
+  [ActionPrefix.User]: UserAction[];
+  [ActionPrefix.Instance]: InstanceAction[];
+  [ActionPrefix.Enterprise]: EnterpriseAction[];
 };
 
+export const allActions: readonly Action[] = [
+  ...spaceActions,
+  ...baseActions,
+  ...tableActions,
+  ...viewActions,
+  ...fieldActions,
+  ...recordActions,
+  ...tableRecordHistoryActions,
+  ...automationActions,
+  ...routineActions,
+  ...appActions,
+  ...userActions,
+  ...instanceActions,
+  ...enterpriseActions,
+];
+
 export const actionPrefixMap: ActionPrefixMap = {
-  [ActionPrefix.Space]: ['space|create', 'space|delete', 'space|read', 'space|update'],
-  [ActionPrefix.Base]: ['base|create', 'base|delete', 'base|read', 'base|update'],
-  [ActionPrefix.Table]: ['table|create', 'table|delete', 'table|read', 'table|update'],
-  [ActionPrefix.View]: ['view|create', 'view|delete', 'view|read', 'view|update'],
-  [ActionPrefix.Field]: ['field|create', 'field|delete', 'field|read', 'field|update'],
-  [ActionPrefix.Record]: [
-    'record|comment',
-    'record|create',
-    'record|delete',
-    'record|read',
-    'record|update',
-  ],
+  [ActionPrefix.Space]: [...spaceActions],
+  [ActionPrefix.Base]: [...baseActions],
+  [ActionPrefix.Table]: [...tableActions],
+  [ActionPrefix.View]: [...viewActions],
+  [ActionPrefix.Field]: [...fieldActions],
+  [ActionPrefix.Record]: [...recordActions],
+  [ActionPrefix.TableRecordHistory]: [...tableRecordHistoryActions],
+  [ActionPrefix.Automation]: [...automationActions],
+  [ActionPrefix.Routine]: [...routineActions],
+  [ActionPrefix.App]: [...appActions],
+  [ActionPrefix.User]: [...userActions],
+  [ActionPrefix.Instance]: [...instanceActions],
+  [ActionPrefix.Enterprise]: [...enterpriseActions],
 };

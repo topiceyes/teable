@@ -1,27 +1,59 @@
-import { FieldType } from '@teable/core';
 import type { Knex } from 'knex';
+import { isUserOrLink } from '../../../../utils/is-user-or-link';
 import { SortFunctionPostgres } from '../sort-query.function';
 
 export class JsonSortAdapter extends SortFunctionPostgres {
   asc(builderClient: Knex.QueryBuilder): Knex.QueryBuilder {
+    if (!this.columnName) {
+      return builderClient;
+    }
     const { type } = this.field;
 
-    if (type === FieldType.Link || type === FieldType.User) {
-      builderClient.orderByRaw(`??::jsonb ->> 'title' ASC NULLS FIRST`, [this.columnName]);
+    if (isUserOrLink(type)) {
+      builderClient.orderByRaw(`${this.columnName}::jsonb ->> 'title' ASC NULLS FIRST`);
     } else {
-      builderClient.orderByRaw(`??::jsonb ASC NULLS FIRST`, [this.columnName]);
+      builderClient.orderByRaw(`${this.columnName}::jsonb ASC NULLS FIRST`);
     }
     return builderClient;
   }
 
   desc(builderClient: Knex.QueryBuilder): Knex.QueryBuilder {
+    if (!this.columnName) {
+      return builderClient;
+    }
     const { type } = this.field;
 
-    if (type === FieldType.Link || type === FieldType.User) {
-      builderClient.orderByRaw(`??::jsonb ->> 'title' DESC NULLS LAST`, [this.columnName]);
+    if (isUserOrLink(type)) {
+      builderClient.orderByRaw(`${this.columnName}::jsonb ->> 'title' DESC NULLS LAST`);
     } else {
-      builderClient.orderByRaw(`??::jsonb DESC NULLS LAST`, [this.columnName]);
+      builderClient.orderByRaw(`${this.columnName}::jsonb DESC NULLS LAST`);
     }
     return builderClient;
+  }
+
+  getAscSQL() {
+    if (!this.columnName) {
+      return undefined;
+    }
+    const { type } = this.field;
+
+    if (isUserOrLink(type)) {
+      return this.knex.raw(`${this.columnName}::jsonb ->> 'title' ASC NULLS FIRST`).toQuery();
+    } else {
+      return this.knex.raw(`${this.columnName}::jsonb ASC NULLS FIRST`).toQuery();
+    }
+  }
+
+  getDescSQL() {
+    if (!this.columnName) {
+      return undefined;
+    }
+    const { type } = this.field;
+
+    if (isUserOrLink(type)) {
+      return this.knex.raw(`${this.columnName}::jsonb ->> 'title' DESC NULLS LAST`).toQuery();
+    } else {
+      return this.knex.raw(`${this.columnName}::jsonb DESC NULLS LAST`).toQuery();
+    }
   }
 }

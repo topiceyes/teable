@@ -1,0 +1,816 @@
+/* eslint-disable @typescript-eslint/no-this-alias */
+import type {
+  Table,
+  DomainError,
+  LastModifiedTimeField,
+  LinkField,
+  FieldId,
+  TableId,
+  RecordId,
+} from '@teable/v2-core';
+import {
+  err,
+  FieldType,
+  isEmptyCellValue,
+  ok,
+  RecordId as RecordIdVO,
+  resolveTrackedFieldIds,
+} from '@teable/v2-core';
+import type { Kysely, CompiledQuery } from 'kysely';
+import { sql } from 'kysely';
+
+import { safeTry } from 'neverthrow';
+import type { Result } from 'neverthrow';
+import { buildAttachmentTableInsertQuery } from '../../attachments/attachmentTableMutations';
+import { buildFilledLinkValueExpression } from '../../buildFilledLinkValueExpression';
+import { isPersistedAsGeneratedColumn } from '../../computed/isPersistedAsGeneratedColumn';
+import { dedupeLinkItemsById, normalizeStoredLinkItems } from '../../normalizeLinkItems';
+
+import { FieldInsertValueVisitor, type FieldInsertResult } from '../../visitors';
+import type { DynamicDB } from '../ITableRecordQueryBuilder';
+
+// System columns
+const RECORD_ID_COLUMN = '__id';
+const CREATED_TIME_COLUMN = '__created_time';
+const CREATED_BY_COLUMN = '__created_by';
+const LAST_MODIFIED_TIME_COLUMN = '__last_modified_time';
+const LAST_MODIFIED_BY_COLUMN = '__last_modified_by';
+const VERSION_COLUMN = '__version';
+
+/**
+ * A compiled SQL statement with description.
+ */
+export interface CompiledSqlStatement {
+  /** Human-readable description of what this SQL does */
+  description: string;
+  /** The compiled SQL query */
+  compiled: CompiledQuery;
+  /** Source record ID used to filter side effects after the actual UPDATE result is known */
+  sourceRecordId?: string;
+  /** Junction replacements require the source UPDATE's row lock, not just a matched no-op. */
+  requiresSourceWrite?: boolean;
+}
+
+/**
+ * Result of building INSERT SQLs for a record (compiled form).
+ */
+export interface RecordInsertSqlResult {
+  /** The main INSERT statement */
+  mainInsert: CompiledSqlStatement;
+  /** Additional SQL statements (junction table inserts, FK updates for link fields) */
+  additionalStatements: CompiledSqlStatement[];
+  /** Foreign record IDs that need advisory locks to serialize link target mutations */
+  linkedRecordLocks: LinkedRecordLockInfo[];
+}
+
+/**
+ * Information about a linked foreign record that requires locking.
+ */
+export interface LinkedRecordLockInfo {
+  /** The foreign table ID or name being referenced */
+  foreignTableId: string;
+  /** The foreign record ID being linked to */
+  foreignRecordId: string;
+}
+
+/**
+ * Describes an exclusivity constraint for insert operations.
+ * Used to validate that foreign records are not already linked elsewhere.
+ */
+export interface InsertExclusivityConstraint {
+  /** The link field that has the constraint */
+  fieldId: FieldId;
+  /** The foreign table being linked to */
+  foreignTableId: TableId;
+  /** The FK host table name (where the FK column lives) */
+  fkHostTableName: string;
+  /** The column name for the self key (points to source record) */
+  selfKeyName: string;
+  /** The column name for the foreign key (points to foreign record) */
+  foreignKeyName: string;
+  /** The foreign record IDs being linked */
+  linkedForeignRecordIds: ReadonlyArray<string>;
+  /** The source record ID making this insert */
+  sourceRecordId: string;
+  /** Whether this is a one-way link */
+  isOneWay: boolean;
+  /** Whether this uses a junction table (oneMany isOneWay) vs main table storage (oneOne) */
+  usesJunctionTable: boolean;
+}
+
+/**
+ * Describes extra seed records for computed update locking.
+ * Used to ensure proper locking when concurrent inserts link to the same foreign record.
+ */
+export interface InsertExtraSeedGroup {
+  /** The foreign table ID being linked to */
+  tableId: TableId;
+  /** The foreign record IDs that need to be locked during computed update */
+  recordIds: RecordId[];
+}
+
+/**
+ * Result of building INSERT data for a record (raw form for batch operations).
+ */
+export interface RecordInsertDataResult {
+  /** Column values to insert into the main table */
+  values: Record<string, unknown>;
+  /** Additional SQL statements to execute after the main insert */
+  additionalStatements: CompiledSqlStatement[];
+  /** Foreign record IDs that need advisory locks to serialize link target mutations */
+  linkedRecordLocks: LinkedRecordLockInfo[];
+  /** Link exclusivity constraints for oneOne/oneMany relationships */
+  exclusivityConstraints: InsertExclusivityConstraint[];
+  /** Extra seed records for computed update locking (foreign records being linked to) */
+  extraSeedRecords: InsertExtraSeedGroup[];
+  /** User snapshot fields populated from the execution context during INSERT */
+  userFieldColumns: UserFieldColumn[];
+}
+
+/**
+ * Describes a system user field snapshot column.
+ */
+export interface UserFieldColumn {
+  /** The database column name */
+  dbFieldName: string;
+  /** The system column to read user ID from (__created_by or __last_modified_by) */
+  systemColumn: string;
+}
+
+/**
+ * Context for building insert data.
+ */
+export interface RecordInsertBuilderContext {
+  recordId: string;
+  actorId: string;
+  now: string;
+  version?: number;
+  actorName?: string;
+  actorEmail?: string;
+  createdTime?: string;
+  createdBy?: string;
+  createdByName?: string;
+  createdByEmail?: string;
+  lastModifiedTime?: string | null;
+  lastModifiedBy?: string | null;
+  lastModifiedByName?: string | null;
+  lastModifiedByEmail?: string | null;
+  autoNumber?: number;
+  /** When true, generate SQL to fill missing link titles via JOIN */
+  fillLinkTitles?: boolean;
+  /** Foreign tables for missing-title link fill SQL. */
+  fillLinkTitleForeignTables?: ReadonlyMap<string, Table>;
+}
+
+/**
+ * Result of building link field SQLs (internal use).
+ */
+interface LinkFieldSqlsResult {
+  statements: CompiledSqlStatement[];
+  linkedRecordLocks: LinkedRecordLockInfo[];
+  exclusivityConstraint?: InsertExclusivityConstraint;
+  /** Foreign records being linked to, for computed update locking */
+  extraSeedRecords: InsertExtraSeedGroup[];
+}
+
+/**
+ * Builds INSERT SQL statements for a record.
+ *
+ * This builder generates the same SQL that PostgresTableRecordRepository would execute,
+ * but returns compiled SQL instead of executing it directly. This allows the SQL to be
+ * used for EXPLAIN analysis, or the raw values can be used for batch inserts.
+ *
+ * @example
+ * ```typescript
+ * const builder = new RecordInsertBuilder(db);
+ *
+ * // For EXPLAIN (compiled SQL)
+ * const result = builder.build({
+ *   table,
+ *   tableName: 'my_table',
+ *   fieldValues: new Map([['fld_xxx', 'value']]),
+ *   context: { recordId: 'rec_xxx', actorId: 'usr_xxx', now: new Date().toISOString() },
+ * });
+ *
+ * // For batch insert (raw values)
+ * const dataResult = builder.buildInsertData({
+ *   table,
+ *   fieldValues: new Map([['fld_xxx', 'value']]),
+ *   context: { recordId: 'rec_xxx', actorId: 'usr_xxx', now: new Date().toISOString() },
+ * });
+ * ```
+ */
+type InsertPlanField = ReturnType<Table['getFields']>[number];
+
+interface IInsertFieldPlanEntry {
+  readonly field: InsertPlanField;
+  readonly fieldIdStr: string;
+  readonly dbFieldName: string;
+  readonly isComputed: boolean;
+  readonly isCreatedTime: boolean;
+  readonly isLastModifiedTime: boolean;
+  /**
+   * Tracked entries the create payload can carry a value for. An empty list is
+   * not track-all on its own: a list whose entries are all computed columns is
+   * empty here as well — see `tracksNonPayloadField`.
+   */
+  readonly trackedPayloadFieldIdStrs: ReadonlyArray<string>;
+  /** Whether a tracked entry is a computed column, which the payload never fills. */
+  readonly tracksNonPayloadField: boolean;
+  readonly isCreatedBy: boolean;
+  readonly isLastModifiedBy: boolean;
+  readonly isJsonField: boolean;
+  readonly isLink: boolean;
+  readonly isAttachment: boolean;
+}
+
+export class RecordInsertBuilder {
+  // buildInsertData runs once per record in bulk inserts; everything derived
+  // only from the field definitions (type flags, dbFieldName, generated-column
+  // probe, json-ness) is invariant per table aggregate, so plan it once.
+  private readonly insertFieldPlanCache = new WeakMap<
+    object,
+    Result<ReadonlyArray<IInsertFieldPlanEntry>, DomainError>
+  >();
+
+  constructor(private readonly db: Kysely<DynamicDB>) {}
+
+  private getInsertFieldPlan(
+    table: Table
+  ): Result<ReadonlyArray<IInsertFieldPlanEntry>, DomainError> {
+    const cached = this.insertFieldPlanCache.get(table);
+    if (cached) {
+      return cached;
+    }
+    const plan = safeTry<ReadonlyArray<IInsertFieldPlanEntry>, DomainError>(function* () {
+      const entries: IInsertFieldPlanEntry[] = [];
+      const trackedFieldIdsByFieldId = new Map<
+        string,
+        {
+          readonly payloadFieldIdStrs: ReadonlyArray<string>;
+          readonly tracksNonPayloadField: boolean;
+        }
+      >();
+      for (const field of table.getFields((candidate): candidate is LastModifiedTimeField =>
+        candidate.type().equals(FieldType.lastModifiedTime())
+      )) {
+        const payloadFieldIdStrs: string[] = [];
+        let tracksNonPayloadField = false;
+        for (const trackedFieldId of resolveTrackedFieldIds(table, field)) {
+          const trackedField = table.getField((candidate) => candidate.id().equals(trackedFieldId));
+          // resolveTrackedFieldIds only returns ids that resolve on the table.
+          if (trackedField.isOk() && !trackedField.value.computed().toBoolean()) {
+            payloadFieldIdStrs.push(trackedFieldId.toString());
+          } else {
+            tracksNonPayloadField = true;
+          }
+        }
+        trackedFieldIdsByFieldId.set(field.id().toString(), {
+          payloadFieldIdStrs,
+          tracksNonPayloadField,
+        });
+      }
+
+      for (const field of table.getFields()) {
+        const isCreatedTime = field.type().equals(FieldType.createdTime());
+        const isLastModifiedTime = field.type().equals(FieldType.lastModifiedTime());
+        const isCreatedBy = field.type().equals(FieldType.createdBy());
+        const isLastModifiedBy = field.type().equals(FieldType.lastModifiedBy());
+        const isAutoNumber = field.type().equals(FieldType.autoNumber());
+        const isSystemComputedField =
+          isCreatedTime || isLastModifiedTime || isCreatedBy || isLastModifiedBy || isAutoNumber;
+        const isComputed = field.computed().toBoolean();
+
+        if (isComputed && !isSystemComputedField) {
+          continue;
+        }
+        if (isComputed) {
+          // PostgreSQL rejects explicit values for GENERATED ALWAYS columns
+          // (legacy tables may still use generated storage).
+          const persistedAsGenerated = yield* isPersistedAsGeneratedColumn(field);
+          if (persistedAsGenerated) {
+            continue;
+          }
+        }
+
+        const dbFieldNameResult = field.dbFieldName();
+        if (dbFieldNameResult.isErr()) {
+          continue;
+        }
+        const dbFieldNameValueResult = dbFieldNameResult.value.value();
+        if (dbFieldNameValueResult.isErr()) {
+          continue;
+        }
+        const dbFieldName = dbFieldNameValueResult.value;
+
+        let isJsonField = false;
+        const dbFieldTypeResult = field.dbFieldType();
+        if (dbFieldTypeResult.isOk()) {
+          const dbFieldTypeValueResult = dbFieldTypeResult.value.value();
+          if (dbFieldTypeValueResult.isOk()) {
+            isJsonField = dbFieldTypeValueResult.value.toLowerCase().includes('json');
+          }
+        }
+
+        const trackedFieldEntry = trackedFieldIdsByFieldId.get(field.id().toString());
+        entries.push({
+          field,
+          fieldIdStr: field.id().toString(),
+          dbFieldName,
+          isComputed,
+          isCreatedTime,
+          isLastModifiedTime,
+          trackedPayloadFieldIdStrs: trackedFieldEntry?.payloadFieldIdStrs ?? [],
+          tracksNonPayloadField: trackedFieldEntry?.tracksNonPayloadField ?? false,
+          isCreatedBy,
+          isLastModifiedBy,
+          isJsonField,
+          isLink: field.type().equals(FieldType.link()),
+          isAttachment: field.type().equals(FieldType.attachment()),
+        });
+      }
+      return ok(entries);
+    });
+    this.insertFieldPlanCache.set(table, plan);
+    return plan;
+  }
+
+  /**
+   * Build INSERT data for a record (raw values for batch operations).
+   * Use this when you need to batch multiple inserts together.
+   */
+  buildInsertData(params: {
+    table: Table;
+    fieldValues: ReadonlyMap<string, unknown>;
+    context: RecordInsertBuilderContext;
+  }): Result<RecordInsertDataResult, DomainError> {
+    const { table, fieldValues, context } = params;
+    const builder = this; // NOSONAR typescript:S7740 -- generator functions cannot be arrow functions, so `this` must be captured
+
+    return safeTry<RecordInsertDataResult, DomainError>(function* () {
+      const createdTime = context.createdTime ?? context.now;
+      const createdBy = context.createdBy ?? context.actorId;
+      const lastModifiedTime =
+        context.lastModifiedTime === undefined ? createdTime : context.lastModifiedTime;
+      const lastModifiedBy =
+        context.lastModifiedBy === undefined ? createdBy : context.lastModifiedBy;
+
+      // System columns
+      const values: Record<string, unknown> = {
+        [RECORD_ID_COLUMN]: context.recordId,
+        [CREATED_TIME_COLUMN]: createdTime,
+        [CREATED_BY_COLUMN]: createdBy,
+        [LAST_MODIFIED_TIME_COLUMN]: lastModifiedTime,
+        [LAST_MODIFIED_BY_COLUMN]: lastModifiedBy,
+        [VERSION_COLUMN]: context.version ?? 1,
+        ...(typeof context.autoNumber === 'number' ? { __auto_number: context.autoNumber } : {}),
+      };
+
+      const additionalStatements: CompiledSqlStatement[] = [];
+      const linkedRecordLocks: LinkedRecordLockInfo[] = [];
+      const exclusivityConstraints: InsertExclusivityConstraint[] = [];
+      const extraSeedRecordsMap = new Map<
+        string,
+        { tableId: TableId; recordIds: Map<string, RecordId> }
+      >();
+      const userFieldColumns: UserFieldColumn[] = [];
+
+      // Map field values to database columns (field-invariant work is planned
+      // once per table aggregate — see getInsertFieldPlan).
+      const planEntries = yield* builder.getInsertFieldPlan(table);
+
+      for (const entry of planEntries) {
+        const { field, fieldIdStr, dbFieldName } = entry;
+        const rawValue = fieldValues.get(fieldIdStr) ?? null;
+
+        if (entry.isComputed) {
+          // CreatedBy and LastModifiedBy fields store user snapshot JSON.
+          // Build it once from execution context to avoid per-row user subqueries in batch INSERT.
+          if (entry.isCreatedBy || entry.isLastModifiedBy) {
+            const systemColumn = entry.isCreatedBy ? CREATED_BY_COLUMN : LAST_MODIFIED_BY_COLUMN;
+            userFieldColumns.push({ dbFieldName, systemColumn });
+            const userId = entry.isCreatedBy ? createdBy : lastModifiedBy;
+            values[dbFieldName] =
+              userId == null
+                ? null
+                : buildUserFieldJsonValue({
+                    userId,
+                    userName: entry.isCreatedBy
+                      ? (context.createdByName ?? context.actorName ?? createdBy)
+                      : (context.lastModifiedByName ?? context.actorName ?? userId),
+                    userEmail: entry.isCreatedBy
+                      ? (context.createdByEmail ?? context.actorEmail)
+                      : (context.lastModifiedByEmail ?? context.actorEmail),
+                  });
+            continue;
+          }
+
+          let fallbackValue: unknown = null;
+          if (entry.isCreatedTime) {
+            fallbackValue = createdTime;
+          } else if (entry.isLastModifiedTime) {
+            // A restricted tracking list records a change of its own fields, and a
+            // creation that leaves every one of them empty recorded no change:
+            // stamping the creation time there makes "never filled" and "filled,
+            // then cleared" indistinguishable to every reader (T7808). An empty or
+            // unresolvable list is track-all and still initializes.
+            //
+            // A tracking list that names a computed column cannot be judged from
+            // the payload: system columns are assigned by this INSERT, and a
+            // formula/rollup/lookup is evaluated after it. Those configurations
+            // keep the creation stamp they have always had, rather than a stamp
+            // that no later write can fill; only a payload-only list is narrowed
+            // here.
+            const tracksEveryField =
+              entry.trackedPayloadFieldIdStrs.length === 0 && !entry.tracksNonPayloadField;
+            const trackedFieldFilled = entry.trackedPayloadFieldIdStrs.some(
+              (trackedFieldId) => !isEmptyCellValue(fieldValues.get(trackedFieldId))
+            );
+            fallbackValue =
+              tracksEveryField || entry.tracksNonPayloadField || trackedFieldFilled
+                ? lastModifiedTime
+                : null;
+          }
+          const resolvedValue = rawValue ?? fallbackValue;
+          values[dbFieldName] =
+            entry.isJsonField && resolvedValue !== null && resolvedValue !== undefined
+              ? JSON.stringify(resolvedValue)
+              : resolvedValue;
+          continue;
+        }
+
+        // Use visitor to get column values
+        const insertVisitor = FieldInsertValueVisitor.create(rawValue, {
+          recordId: context.recordId,
+          dbFieldName,
+        });
+        const insertResult: Result<FieldInsertResult, DomainError> = field.accept(insertVisitor);
+
+        if (insertResult.isOk()) {
+          const { columnValues } = insertResult.value;
+          Object.assign(values, columnValues);
+
+          // For link fields, generate additional SQLs for junction tables / FK updates
+          if (entry.isLink && rawValue !== null && rawValue !== undefined) {
+            const linkField = field as LinkField;
+            const linkResult = yield* builder.buildLinkFieldSqls(
+              linkField,
+              rawValue,
+              context.recordId
+            );
+            additionalStatements.push(...linkResult.statements);
+            linkedRecordLocks.push(...linkResult.linkedRecordLocks);
+            if (linkResult.exclusivityConstraint) {
+              exclusivityConstraints.push(linkResult.exclusivityConstraint);
+            }
+            // Collect extra seed records for computed update locking
+            for (const seedGroup of linkResult.extraSeedRecords) {
+              const tableIdStr = seedGroup.tableId.toString();
+              const entry = extraSeedRecordsMap.get(tableIdStr) ?? {
+                tableId: seedGroup.tableId,
+                recordIds: new Map<string, RecordId>(),
+              };
+              for (const recordId of seedGroup.recordIds) {
+                entry.recordIds.set(recordId.toString(), recordId);
+              }
+              extraSeedRecordsMap.set(tableIdStr, entry);
+            }
+
+            const normalizedLinkItems = dedupeLinkItemsById(normalizeStoredLinkItems(rawValue));
+            const hasMissingTitles =
+              context.fillLinkTitles && normalizedLinkItems.some((item) => item.id && !item.title);
+            if (hasMissingTitles) {
+              const filledValueResult = buildFilledLinkValueExpression({
+                linkField,
+                linkItems: normalizedLinkItems,
+                fillLinkTitleForeignTables: context.fillLinkTitleForeignTables,
+              });
+              if (filledValueResult.isErr()) {
+                return err(filledValueResult.error);
+              }
+              if (filledValueResult.value) {
+                values[dbFieldName] = filledValueResult.value;
+              }
+            }
+          }
+
+          if (entry.isAttachment) {
+            const insertQuery = buildAttachmentTableInsertQuery(builder.db, {
+              actorId: context.actorId,
+              tableId: table.id().toString(),
+              recordId: context.recordId,
+              fieldId: fieldIdStr,
+              value: rawValue,
+            });
+
+            if (insertQuery) {
+              additionalStatements.push({
+                description: `Insert attachment index rows for field ${fieldIdStr}`,
+                compiled: insertQuery,
+              });
+            }
+          }
+        } else {
+          // Fallback: just use raw value
+          values[dbFieldName] = rawValue;
+        }
+      }
+
+      // Convert extraSeedRecordsMap to array
+      const extraSeedRecords: InsertExtraSeedGroup[] = [...extraSeedRecordsMap.values()].map(
+        (entry) => ({
+          tableId: entry.tableId,
+          recordIds: [...entry.recordIds.values()],
+        })
+      );
+
+      return ok({
+        values,
+        additionalStatements,
+        linkedRecordLocks,
+        exclusivityConstraints,
+        extraSeedRecords,
+        userFieldColumns,
+      });
+    });
+  }
+
+  /**
+   * Build INSERT SQL statements for a record (compiled form).
+   * Use this for EXPLAIN analysis or when you need the actual SQL strings.
+   */
+  build(params: {
+    table: Table;
+    tableName: string;
+    fieldValues: ReadonlyMap<string, unknown>;
+    context: RecordInsertBuilderContext;
+  }): Result<RecordInsertSqlResult, DomainError> {
+    const { table, tableName, fieldValues, context } = params;
+    const builder = this; // NOSONAR typescript:S7740 -- generator functions cannot be arrow functions, so `this` must be captured
+
+    return safeTry<RecordInsertSqlResult, DomainError>(function* () {
+      const { values, additionalStatements, linkedRecordLocks } = yield* builder.buildInsertData({
+        table,
+        fieldValues,
+        context,
+      });
+
+      // Build main INSERT SQL
+      const insertQuery = builder.db.insertInto(tableName).values(values);
+      const compiled = insertQuery.compile();
+
+      return ok({
+        mainInsert: {
+          description: `Insert new record into ${tableName}`,
+          compiled,
+        },
+        additionalStatements,
+        linkedRecordLocks,
+      });
+    });
+  }
+
+  /**
+   * Execute compiled SQL statements.
+   * This is a convenience method for executing the additional statements.
+   */
+  static async executeStatements(
+    db: Kysely<DynamicDB>,
+    statements: ReadonlyArray<CompiledSqlStatement>
+  ): Promise<void> {
+    for (const stmt of statements) {
+      await db.executeQuery(stmt.compiled);
+    }
+  }
+
+  /**
+   * Build SQLs for link field operations (junction table inserts, FK updates).
+   */
+  private buildLinkFieldSqls(
+    field: LinkField,
+    rawValue: unknown,
+    recordId: string
+  ): Result<LinkFieldSqlsResult, DomainError> {
+    const builder = this; // NOSONAR typescript:S7740 -- generator functions cannot be arrow functions, so `this` must be captured
+
+    return safeTry<LinkFieldSqlsResult, DomainError>(function* () {
+      const statements: CompiledSqlStatement[] = [];
+      const linkedRecordLocks: LinkedRecordLockInfo[] = [];
+      const extraSeedRecords: InsertExtraSeedGroup[] = [];
+      let exclusivityConstraint: InsertExclusivityConstraint | undefined;
+
+      // Parse link items (duplicates collapsed: one junction row per linked record
+      // and a stable __order that matches the stored cell value)
+      const linkItems = dedupeLinkItemsById(
+        Array.isArray(rawValue) ? (rawValue as Array<{ id: string }>) : [rawValue as { id: string }]
+      );
+
+      if (linkItems.length === 0) {
+        return ok({ statements, linkedRecordLocks, extraSeedRecords });
+      }
+
+      const relationship = field.relationship().toString();
+      const foreignTableId = field.foreignTableId().toString();
+
+      // Determine if this relationship uses a junction table
+      // oneMany with isOneWay uses junction table, oneOne doesn't (stores FK on main table)
+      const usesJunctionTable =
+        relationship === 'manyMany' || (relationship === 'oneMany' && field.isOneWay());
+
+      // Collect extra seed records for computed update locking
+      // ALL link types need this to ensure the symmetric field on the foreign record is updated correctly
+      // when concurrent inserts link to the same foreign record
+      const foreignRecordIds: RecordId[] = [];
+      for (const linkItem of linkItems) {
+        const recordIdResult = RecordIdVO.create(linkItem.id);
+        if (recordIdResult.isOk()) {
+          foreignRecordIds.push(recordIdResult.value);
+        }
+      }
+      if (foreignRecordIds.length > 0) {
+        extraSeedRecords.push({
+          tableId: field.foreignTableId(),
+          recordIds: foreignRecordIds,
+        });
+      }
+
+      // Collect exclusivity constraint for oneOne and oneMany relationships
+      if (field.requiresExclusiveForeignRecord()) {
+        const fkHostTableName = field.fkHostTableName();
+        const fkHostTableSplit = yield* fkHostTableName.split({ defaultSchema: 'public' });
+        const fkHostTableNameStr = fkHostTableSplit.schema
+          ? `${fkHostTableSplit.schema}.${fkHostTableSplit.tableName}`
+          : fkHostTableSplit.tableName;
+
+        const selfKeyName = yield* field.selfKeyNameString();
+        const foreignKeyName = yield* field.foreignKeyNameString();
+
+        exclusivityConstraint = {
+          fieldId: field.id(),
+          foreignTableId: field.foreignTableId(),
+          fkHostTableName: fkHostTableNameStr,
+          selfKeyName,
+          foreignKeyName,
+          linkedForeignRecordIds: linkItems.map((item) => item.id),
+          sourceRecordId: recordId,
+          isOneWay: field.isOneWay(),
+          usesJunctionTable,
+        };
+      }
+
+      if (usesJunctionTable) {
+        // Junction table: insert rows for each linked record
+        const fkHostTableName = field.fkHostTableName();
+        const fkHostTableSplit = yield* fkHostTableName.split({ defaultSchema: 'public' });
+        const junctionTableName = fkHostTableSplit.schema
+          ? `${fkHostTableSplit.schema}.${fkHostTableSplit.tableName}`
+          : fkHostTableSplit.tableName;
+
+        const selfKeyName = yield* field.selfKeyNameString();
+        const foreignKeyName = yield* field.foreignKeyNameString();
+        const orderColumnName = field.hasOrderColumn() ? yield* field.orderColumnName() : null;
+
+        for (let i = 0; i < linkItems.length; i++) {
+          const linkItem = linkItems[i];
+          const order = i + 1;
+
+          // Serialize mutations of this junction target.
+          linkedRecordLocks.push({
+            foreignTableId,
+            foreignRecordId: linkItem.id,
+          });
+
+          // DELETE existing link
+          const deleteQuery = builder.db
+            .deleteFrom(junctionTableName)
+            .where(selfKeyName, '=', recordId)
+            .where(foreignKeyName, '=', linkItem.id);
+          const deleteCompiled = deleteQuery.compile();
+
+          statements.push({
+            description: `Delete existing junction link (${selfKeyName}=${recordId}, ${foreignKeyName}=${linkItem.id})`,
+            compiled: deleteCompiled,
+          });
+
+          // INSERT new link
+          const insertValues: Record<string, unknown> = {
+            [selfKeyName]: recordId,
+            [foreignKeyName]: linkItem.id,
+            ...(orderColumnName ? { [orderColumnName]: order } : {}),
+          };
+          const insertQuery = builder.db.insertInto(junctionTableName).values(insertValues);
+          const insertCompiled = insertQuery.compile();
+
+          statements.push({
+            description: `Insert junction link to ${linkItem.id} (order: ${order})`,
+            compiled: insertCompiled,
+          });
+        }
+      } else if (relationship === 'oneMany') {
+        // oneMany (two-way): FK is on the foreign table
+        const fkHostTableName = field.fkHostTableName();
+        const fkHostTableSplit = yield* fkHostTableName.split({ defaultSchema: 'public' });
+        const foreignTableName = fkHostTableSplit.schema
+          ? `${fkHostTableSplit.schema}.${fkHostTableSplit.tableName}`
+          : fkHostTableSplit.tableName;
+
+        const selfKeyName = yield* field.selfKeyNameString();
+        const orderColumnName = field.hasOrderColumn() ? yield* field.orderColumnName() : null;
+
+        // Keep insert target advisory locks in the shared result so every link
+        // field is acquired together in one deterministic order by the repository.
+        for (const linkItem of linkItems) {
+          linkedRecordLocks.push({
+            foreignTableId,
+            foreignRecordId: linkItem.id,
+          });
+        }
+
+        const orderColumnAlias = 'order_index';
+        const valuesSql = sql.join(
+          linkItems.map((linkItem, index) => {
+            if (orderColumnName) {
+              return sql`(${sql.value(linkItem.id)}, ${sql.value(recordId)}, ${sql.value(
+                index + 1
+              )})`;
+            }
+            return sql`(${sql.value(linkItem.id)}, ${sql.value(recordId)})`;
+          }),
+          sql`, `
+        );
+
+        const valuesTable = orderColumnName
+          ? sql`(values ${valuesSql}) as v(id, record_id, ${sql.raw(orderColumnAlias)})`
+          : sql`(values ${valuesSql}) as v(id, record_id)`;
+
+        const updateSql = orderColumnName
+          ? sql`update ${sql.table(foreignTableName)} as t set ${sql.ref(
+              selfKeyName
+            )} = ${sql.ref('v.record_id')}, ${sql.ref(orderColumnName)} = ${sql`${sql.ref(
+              `v.${orderColumnAlias}`
+            )}::integer`} from ${valuesTable} where ${sql.ref('t.__id')} = ${sql.ref('v.id')}`
+          : sql`update ${sql.table(foreignTableName)} as t set ${sql.ref(
+              selfKeyName
+            )} = ${sql.ref('v.record_id')} from ${valuesTable} where ${sql.ref(
+              't.__id'
+            )} = ${sql.ref('v.id')}`;
+
+        statements.push({
+          description: `Update ${linkItems.length} foreign record(s) to link back`,
+          compiled: updateSql.compile(builder.db),
+        });
+      }
+      // manyOne/oneOne: FK is set in the main INSERT values, no additional SQL needed
+
+      return ok({ statements, linkedRecordLocks, exclusivityConstraint, extraSeedRecords });
+    });
+  }
+
+  /** @deprecated System user field snapshots are populated during INSERT from execution context. */
+  static buildUserFieldUpdateStatement(
+    db: Kysely<DynamicDB>,
+    tableName: string,
+    recordId: string,
+    userFieldColumns: ReadonlyArray<UserFieldColumn>
+  ): CompiledSqlStatement | undefined {
+    if (userFieldColumns.length === 0) {
+      return undefined;
+    }
+
+    const setValues: Record<string, unknown> = {};
+
+    for (const { dbFieldName, systemColumn } of userFieldColumns) {
+      setValues[dbFieldName] = sql`jsonb_build_object(
+        'id', ${sql.ref(systemColumn)},
+        'title', ${sql.ref(systemColumn)},
+        'email', NULL::text
+      )`;
+    }
+
+    const updateQuery = db
+      .updateTable(tableName)
+      .set(setValues)
+      .where(RECORD_ID_COLUMN, '=', recordId);
+
+    return {
+      description: `Populate user fields for record ${recordId}`,
+      compiled: updateQuery.compile(),
+    };
+  }
+}
+
+function buildUserFieldJsonValue(params: {
+  userId: string | null;
+  userName?: string | null;
+  userEmail?: string | null;
+}): string | null {
+  if (params.userId == null) {
+    return null;
+  }
+
+  return JSON.stringify({
+    id: params.userId,
+    title: params.userName ?? params.userId,
+    email: params.userEmail ?? null,
+  });
+}

@@ -13,10 +13,12 @@ interface ISortProps {
   children: (text: string, isActive: boolean) => React.ReactElement;
   sorts: ISort | null;
   onChange: (sort: ISort | null) => void;
+  /** Render as a bottom drawer on narrow viewports. Toolbar call sites only. */
+  responsive?: boolean;
 }
 
-function Sort(props: ISortProps) {
-  const { children, onChange, sorts: outerSorts } = props;
+function Sort(props: Readonly<ISortProps>) {
+  const { children, onChange, sorts: outerSorts, responsive } = props;
   const sortBaseRef = useRef<ISortBaseRef>(null);
 
   const view = useView();
@@ -25,7 +27,7 @@ function Sort(props: ISortProps) {
 
   const { text, isActive } = useSortNode(outerSorts);
 
-  const { mutateAsync, isLoading } = useMutation({
+  const { mutateAsync, isPending } = useMutation({
     mutationFn: async ({ view, viewRo }: { view: View; viewRo: IManualSortRo }) => {
       return (await view.manualSort(viewRo)).data;
     },
@@ -94,8 +96,9 @@ function Sort(props: ISortProps) {
   return (
     <SortBase
       ref={sortBaseRef}
+      responsive={responsive}
       sorts={innerSorts}
-      manualSortLoading={isLoading}
+      manualSortLoading={isPending}
       onChange={onChangeInner}
       manualSortOnClick={manualSort}
     >

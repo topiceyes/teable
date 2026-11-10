@@ -1,545 +1,2899 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+/* eslint-disable sonarjs/cognitive-complexity */
+/* eslint-disable @typescript-eslint/naming-convention */
+import { Injectable, Logger } from '@nestjs/common';
 import type { ILinkFieldOptions } from '@teable/core';
+import { FieldType, HttpErrorCode } from '@teable/core';
+import { PrismaService, ProvisionState } from '@teable/db-main-prisma';
 import {
-  FieldType,
-  generateBaseId,
-  generateFieldId,
-  generateTableId,
-  generateViewId,
-} from '@teable/core';
-import type { Field } from '@teable/db-main-prisma';
-import { PrismaService } from '@teable/db-main-prisma';
-import type { ICreateBaseVo, IDuplicateBaseRo } from '@teable/openapi';
+  BaseDuplicateMode,
+  isCopyToExistingBaseMode,
+  type IBaseJson,
+  type ICreateBaseVo,
+  type ICrossSpaceBaseAffectedField,
+  type IDuplicateBaseRo,
+} from '@teable/openapi';
+import { v2PostgresDbTokens } from '@teable/v2-adapter-db-postgres-pg';
+import type { HostPreviewConcern, PreviewEffect, PreviewIssue } from '@teable/v2-command-explain';
+import {
+  DeleteTableCommand,
+  DuplicateBaseCommand,
+  TableByIdSpec,
+  TableId,
+  v2CoreTokens,
+  type BulkCopySourceLinkField,
+  type DuplicateBaseRecordReadOptions,
+  type DotTeaFieldInput,
+  type DuplicateBaseResult,
+  type DuplicateBaseSource,
+  type IExecutionContext,
+  type ICommandBus,
+  type ITableFieldPersistenceDTO,
+  type ITableMapper,
+  type ITablePersistenceDTO,
+  type ITableRepository,
+  type NormalizedDotTeaField,
+  type NormalizedDotTeaStructure,
+} from '@teable/v2-core';
+import { normalizeFields } from '@teable/v2-dottea';
 import { Knex } from 'knex';
-import { uniq } from 'lodash';
+import type { Kysely } from 'kysely';
+import { groupBy, omit } from 'lodash';
 import { InjectModel } from 'nest-knexjs';
 import { ClsService } from 'nestjs-cls';
+import type { PoolClient } from 'pg';
+import { IThresholdConfig, ThresholdConfig } from '../../configs/threshold.config';
+import { CustomHttpException } from '../../custom.exception';
 import { InjectDbProvider } from '../../db-provider/db.provider';
 import { IDbProvider } from '../../db-provider/db.provider.interface';
+import { toPostgresFkDeleteAction } from '../../db-provider/postgres-fk-delete-action';
+import { DataDbClientManager } from '../../global/data-db-client-manager.service';
+import { DATA_KNEX } from '../../global/knex/knex.module';
 import type { IClsStore } from '../../types/cls';
-import type { IFieldInstance } from '../field/model/factory';
+import { baseDisplayName } from '../../utils/base-name';
+import { AuditScope } from '../audit/audit-scope';
 import { createFieldInstanceByRaw } from '../field/model/factory';
-import { ROW_ORDER_FIELD_PREFIX } from '../view/constant';
-import { replaceExpressionFieldIds, replaceJsonStringFieldIds } from './utils';
+import { PersistedComputedBackfillService } from '../record/computed/services/persisted-computed-backfill.service';
+import { TableDuplicateService } from '../table/table-duplicate.service';
+import { withStagedTemplateSnapshot } from '../template/template-snapshot.helper';
+import { V2ContainerService } from '../v2/v2-container.service';
+import { V2ExecutionContextFactory } from '../v2/v2-execution-context.factory';
+import { BaseExportService } from './base-export.service';
+import type { BaseImportProgressCallback, IBaseHostIdMaps } from './base-import.service';
+import { BaseImportService } from './base-import.service';
+import {
+  collectCrossSpaceAffectedFieldIds,
+  extractForeignTableId,
+  isCrossSpaceReferenceAllowed,
+} from './cross-space-detection.util';
+import { adaptStructureTimeZone, mergeLinkFieldTableMaps, replaceTimeZoneDeep } from './utils';
+import type { ILinkFieldTableInfo, ILinkFieldTableMap } from './utils';
+
+type DuplicatedBase = Awaited<ReturnType<BaseImportService['createBaseStructure']>>['base'];
+const v2DuplicateReadBatchSize = 1000;
+const v2DuplicateCopyBatchSize = 500;
+const v2DuplicateLinkFieldBatchSize = 500;
+const v2DuplicateTableIdQueryChunkSize = 100;
+type DuplicateStructureConfig = Awaited<ReturnType<BaseExportService['generateBaseStructConfig']>>;
+type DuplicateV2FieldConfig = Omit<
+  DuplicateStructureConfig['tables'][number]['fields'][number],
+  keyof NormalizedDotTeaField
+> &
+  NormalizedDotTeaField;
+type DuplicateV2TableConfig = Omit<DuplicateStructureConfig['tables'][number], 'fields'> & {
+  fields: DuplicateV2FieldConfig[];
+};
+type DuplicateV2StructureConfig = Omit<DuplicateStructureConfig, 'tables'> &
+  Omit<NormalizedDotTeaStructure, 'tables'> & {
+    tables: DuplicateV2TableConfig[];
+  };
+type DuplicateProjectionSourceField = {
+  id: string;
+  type: string;
+  isLookup: boolean | null;
+  isConditionalLookup: boolean | null;
+  options: unknown;
+  lookupOptions: unknown;
+};
+type DuplicateStructureConfigResult = {
+  structure: DuplicateStructureConfig;
+  sourceDbTableNameByTableId: Record<string, string>;
+  fieldConversions: {
+    readonly external: number;
+    readonly partialSelection: number;
+  };
+};
+export type DuplicateBaseV2RowCountEvidence =
+  | { readonly basis: 'exact'; readonly value: number }
+  | {
+      readonly basis: 'unknown';
+      readonly reason: 'source-row-count-unavailable' | 'source-row-count-not-requested';
+    };
+
+export type DuplicateBaseV2PreviewFacts = {
+  readonly input: {
+    readonly fromBaseId: string;
+    readonly spaceId: string;
+    readonly baseId?: string;
+    readonly shareId?: string;
+    readonly name?: string;
+    readonly nodes?: ReadonlyArray<string>;
+    readonly withRecords: boolean;
+    readonly timeZone?: string;
+    readonly allowCrossBase: boolean;
+    readonly duplicateMode: BaseDuplicateMode;
+  };
+  readonly selection: {
+    readonly resources: number;
+    readonly bases: number;
+    readonly tables: number;
+    readonly fields: number;
+    readonly views: number;
+    readonly nodes: number;
+  };
+  readonly records: DuplicateBaseV2RowCountEvidence;
+  readonly links: {
+    readonly sameSpacePreserved: number;
+    readonly crossSpaceConverted: number;
+    readonly optionDisabledConverted: number;
+    readonly partialSelectionDisconnected: number;
+    readonly unclassifiedExternal: number;
+  };
+};
+
+type DuplicateBaseV2ExecutionPreparation = {
+  readonly structure: DuplicateStructureConfig;
+  readonly normalizedStructure: DuplicateV2StructureConfig;
+  readonly tableSnapshots: ReadonlyMap<string, ITablePersistenceDTO>;
+  readonly sourceTableIdMap: Record<string, string>;
+  readonly sourceTableIds: string[];
+  readonly sourceDbTableNameByTableId: Record<string, string>;
+  readonly mergedLinkFieldTableMap: ILinkFieldTableMap;
+  readonly internalLinkRelationTableMap: Record<string, V2InternalLinkFieldTableInfo[]>;
+  readonly sourceLinkFields: BulkCopySourceLinkField[];
+  readonly source: DuplicateBaseSource;
+};
+
+export type DuplicateBaseV2Preparation = {
+  readonly preview: DuplicateBaseV2PreviewFacts;
+  /** Physical execution metadata. Preview adapters must never serialize this object. */
+  readonly execution: DuplicateBaseV2ExecutionPreparation;
+};
+
+export type DuplicateBaseV2HostPreviewExtension = {
+  readonly resolvedConcerns: ReadonlyArray<HostPreviewConcern>;
+  readonly effects: ReadonlyArray<PreviewEffect>;
+  readonly blockers: ReadonlyArray<PreviewIssue>;
+  readonly warnings: ReadonlyArray<PreviewIssue>;
+  readonly knownCoverage: ReadonlyArray<string>;
+  readonly unknownCoverage: ReadonlyArray<string>;
+};
+export type DuplicateBaseV2HostPreviewAdmission = {
+  readonly blockers: ReadonlyArray<PreviewIssue>;
+  readonly warnings: ReadonlyArray<PreviewIssue>;
+  readonly knownCoverage: ReadonlyArray<string>;
+  readonly unknownCoverage: ReadonlyArray<string>;
+};
+
+type DuplicateBaseStructConfigInput = Parameters<
+  BaseExportService['generateBaseStructConfig']
+>[0] & {
+  includeWorkflowRuntimeState?: boolean;
+};
+export type IDuplicateBaseV2Result = {
+  base: ICreateBaseVo;
+  tableIdMap: Record<string, string>;
+  fieldIdMap: Record<string, string>;
+  viewIdMap: Record<string, string>;
+  recordsLength: number;
+  structure: IBaseJson;
+} & IBaseHostIdMaps;
+type DuplicateLinkFieldRaw = {
+  id: string;
+  tableId: string;
+  dbFieldName: string;
+  isMultipleCellValue: boolean | null;
+  meta: string | null;
+  options: string | null;
+};
+type V2InternalLinkFieldTableInfo = {
+  fieldId: string;
+  dbFieldName: string;
+  foreignTableId: string;
+  lookupFieldId: string;
+  relationship: string;
+  fkHostTableName: string;
+  selfKeyName: string;
+  foreignKeyName: string;
+  isOneWay: boolean;
+  isMultipleCellValue: boolean;
+  orderColumnName?: string;
+};
+type V2LinkCellItem = { id: string; title?: string };
+
+type IDataPrismaExecutor = {
+  $executeRawUnsafe(query: string, ...values: unknown[]): Promise<number>;
+  $queryRawUnsafe<T = unknown>(query: string, ...values: unknown[]): Promise<T>;
+};
+
+type IDataPrismaScopedClient = IDataPrismaExecutor & {
+  txClient?: () => IDataPrismaExecutor;
+};
+
+const toLinkFieldTableInfo = ({
+  dbFieldName,
+  options,
+  isMultipleCellValue,
+}: {
+  dbFieldName: string;
+  options?: unknown;
+  isMultipleCellValue?: boolean | null;
+}): ILinkFieldTableInfo => ({
+  dbFieldName,
+  selfKeyName: (options as ILinkFieldOptions).selfKeyName,
+  isMultipleCellValue: !!isMultipleCellValue,
+});
+
+const splitPostgresTextArrayItems = (inner: string): string[] | undefined => {
+  const items: string[] = [];
+  let item = '';
+  let inQuotes = false;
+
+  for (let index = 0; index < inner.length; index += 1) {
+    const char = inner[index];
+
+    if (inQuotes) {
+      if (char === '\\') {
+        index += 1;
+        item += inner[index] ?? '';
+        continue;
+      }
+      if (char === '"') {
+        inQuotes = false;
+        continue;
+      }
+      item += char;
+      continue;
+    }
+
+    if (char === '"') {
+      inQuotes = true;
+      continue;
+    }
+
+    if (char === ',') {
+      items.push(item);
+      item = '';
+      continue;
+    }
+
+    item += char;
+  }
+
+  if (inQuotes) {
+    return undefined;
+  }
+
+  items.push(item);
+  return items;
+};
+
+const clearInternalLinkColumns = (
+  rows: Record<string, unknown>[],
+  internalLinkInfo: ReadonlyArray<V2InternalLinkFieldTableInfo>
+): void => {
+  for (const row of rows) {
+    for (const { dbFieldName } of internalLinkInfo) {
+      delete row[dbFieldName];
+    }
+  }
+};
+
+const applyInternalLinkRelations = (
+  rowsById: ReadonlyMap<string, Record<string, unknown>>,
+  relations: ReadonlyMap<string, V2LinkCellItem[]>,
+  info: V2InternalLinkFieldTableInfo
+): void => {
+  for (const [sourceRecordId, linkItems] of relations) {
+    const row = rowsById.get(sourceRecordId);
+    if (!row) continue;
+    if (info.isMultipleCellValue) {
+      row[info.dbFieldName] = linkItems;
+    } else if (linkItems[0]) {
+      row[info.dbFieldName] = linkItems[0];
+    }
+  }
+};
+
+const collectConvertedFieldIds = (
+  fieldRaws: ReadonlyArray<DuplicateProjectionSourceField>,
+  structure: DuplicateStructureConfig
+): Set<string> => {
+  const projectedFieldsById = new Map<
+    string,
+    DuplicateStructureConfig['tables'][number]['fields'][number]
+  >();
+  for (const table of structure.tables) {
+    for (const field of table.fields) {
+      if (field.id) projectedFieldsById.set(field.id, field);
+    }
+  }
+  const convertedFieldIds = new Set<string>();
+
+  for (const field of fieldRaws) {
+    const projected = projectedFieldsById.get(field.id);
+    if (!projected || projected.type !== FieldType.SingleLineText) continue;
+
+    const convertedType = field.type !== FieldType.SingleLineText;
+    const removedLookupSemantics =
+      Boolean(field.isLookup || field.isConditionalLookup) &&
+      !projected.isLookup &&
+      !projected.isConditionalLookup;
+    if (convertedType || removedLookupSemantics) convertedFieldIds.add(field.id);
+  }
+
+  return convertedFieldIds;
+};
+
+// generateFieldConfig currently degrades only external references and references
+// disconnected by the selected-node boundary. Intersecting the visitor result
+// with the actual projection delta avoids reporting merely potential effects.
+const countPartialSelectionConversions = (
+  fieldRaws: ReadonlyArray<DuplicateProjectionSourceField>,
+  convertedFieldIds: ReadonlySet<string>,
+  excludedTableIds: ReadonlyArray<string>
+): number => {
+  const excludedTableIdSet = new Set(excludedTableIds);
+  const affectedFieldIds = collectCrossSpaceAffectedFieldIds({
+    fields: fieldRaws,
+    isForeignCrossSpace: (foreignTableId) => excludedTableIdSet.has(foreignTableId),
+  });
+  let partialSelection = 0;
+  for (const fieldId of convertedFieldIds) {
+    if (affectedFieldIds.has(fieldId)) partialSelection += 1;
+  }
+  return partialSelection;
+};
+
+const isPreservedExternalLinkCandidate = (
+  field: DuplicateStructureConfig['tables'][number]['fields'][number]
+): boolean => {
+  if (field.type !== FieldType.Link || field.isLookup) return false;
+  return Boolean((field.options as ILinkFieldOptions | undefined)?.baseId);
+};
+
+const collectPreservedExternalLinkCandidates = (
+  structure: DuplicateStructureConfig
+): DuplicateStructureConfig['tables'][number]['fields'] =>
+  structure.tables.flatMap((table) => table.fields.filter(isPreservedExternalLinkCandidate));
+
+const summarizeDuplicateStructureSelection = (
+  structure: DuplicateStructureConfig
+): DuplicateBaseV2PreviewFacts['selection'] => {
+  const tables = structure.tables.length;
+  const fields = structure.tables.reduce((total, table) => total + table.fields.length, 0);
+  const views = structure.tables.reduce((total, table) => total + table.views.length, 0);
+  const nodes = structure.nodes?.length ?? 0;
+  const folders = structure.folders?.length ?? 0;
+  const plugins = structure.plugins
+    ? Object.values(structure.plugins).reduce(
+        (total, items) => total + (Array.isArray(items) ? items.length : 0),
+        0
+      )
+    : 0;
+  const editionStructure = structure as unknown as {
+    workflows?: ReadonlyArray<unknown>;
+    apps?: ReadonlyArray<unknown>;
+    routines?: ReadonlyArray<unknown>;
+    authorityMatrix?: unknown | null;
+  };
+  const editionResources =
+    (editionStructure.workflows?.length ?? 0) +
+    (editionStructure.apps?.length ?? 0) +
+    (editionStructure.routines?.length ?? 0) +
+    (editionStructure.authorityMatrix ? 1 : 0);
+
+  return {
+    resources: 1 + tables + fields + views + nodes + folders + plugins + editionResources,
+    bases: 1,
+    tables,
+    fields,
+    views,
+    nodes,
+  };
+};
+
+const buildDuplicatePreviewInput = (
+  duplicateBaseRo: IDuplicateBaseRo,
+  allowCrossBase: boolean,
+  duplicateMode: BaseDuplicateMode
+): DuplicateBaseV2PreviewFacts['input'] => {
+  const { fromBaseId, spaceId, withRecords, name, nodes, timeZone } = duplicateBaseRo;
+  return {
+    fromBaseId,
+    spaceId,
+    ...(duplicateBaseRo.baseId !== undefined ? { baseId: duplicateBaseRo.baseId } : {}),
+    ...(duplicateBaseRo.shareId !== undefined ? { shareId: duplicateBaseRo.shareId } : {}),
+    ...(name !== undefined ? { name } : {}),
+    ...(nodes !== undefined ? { nodes: [...nodes] } : {}),
+    withRecords: Boolean(withRecords),
+    ...(timeZone !== undefined ? { timeZone } : {}),
+    allowCrossBase,
+    duplicateMode,
+  };
+};
+
+const buildDuplicateLinkEvidence = (
+  allowCrossBase: boolean,
+  preservedExternal: { sameSpace: number; unclassified: number },
+  convertedExternal: number,
+  partialSelectionDisconnected: number
+): DuplicateBaseV2PreviewFacts['links'] => ({
+  sameSpacePreserved: preservedExternal.sameSpace,
+  crossSpaceConverted: allowCrossBase ? convertedExternal : 0,
+  optionDisabledConverted: allowCrossBase ? 0 : convertedExternal,
+  partialSelectionDisconnected,
+  unclassifiedExternal: preservedExternal.unclassified,
+});
 
 @Injectable()
 export class BaseDuplicateService {
-  private logger = new Logger(BaseDuplicateService.name);
+  private readonly logger = new Logger(BaseDuplicateService.name);
+
+  @ThresholdConfig()
+  private readonly thresholdConfig!: IThresholdConfig;
 
   constructor(
     private readonly prismaService: PrismaService,
+    private readonly tableDuplicateService: TableDuplicateService,
+    private readonly baseExportService: BaseExportService,
+    private readonly baseImportService: BaseImportService,
+    @InjectDbProvider() private readonly dbProvider: IDbProvider,
+    @InjectModel(DATA_KNEX) private readonly knex: Knex,
+    private readonly persistedComputedBackfillService: PersistedComputedBackfillService,
     private readonly cls: ClsService<IClsStore>,
-    @InjectModel('CUSTOM_KNEX') private readonly knex: Knex,
-    @InjectDbProvider() private readonly dbProvider: IDbProvider
+    private readonly dataDbClientManager: DataDbClientManager,
+    private readonly v2ContainerService: V2ContainerService,
+    private readonly v2ContextFactory: V2ExecutionContextFactory,
+    private readonly audit: AuditScope
   ) {}
 
-  private async getMaxOrder(spaceId: string) {
-    const spaceAggregate = await this.prismaService.txClient().base.aggregate({
-      where: { spaceId, deletedTime: null },
-      _max: { order: true },
-    });
-    return spaceAggregate._max.order || 0;
+  private getDataPrismaExecutor(prisma: IDataPrismaScopedClient): IDataPrismaExecutor {
+    return prisma.txClient?.() ?? prisma;
   }
 
-  private async duplicateBaseMeta(duplicateBaseRo: IDuplicateBaseRo) {
-    const { spaceId, fromBaseId, name } = duplicateBaseRo;
-    const base = await this.prismaService.txClient().base.findFirst({
+  async duplicateBase(
+    duplicateBaseRo: IDuplicateBaseRo,
+    allowCrossBase: boolean = true,
+    duplicateMode: BaseDuplicateMode = BaseDuplicateMode.Normal
+  ) {
+    const { fromBaseId, spaceId, withRecords, name, baseId, nodes, timeZone } = duplicateBaseRo;
+    const userId = this.cls.get('user.id');
+    const prisma = this.prismaService.txClient();
+
+    // For CopyShareBase mode, don't collect parent nodes - the shared node becomes the root
+    const skipParentNodes = duplicateMode === BaseDuplicateMode.CopyShareBase;
+
+    let base: DuplicatedBase | undefined;
+
+    try {
+      const duplicated = await this.duplicateStructure(
+        fromBaseId,
+        spaceId,
+        name,
+        allowCrossBase,
+        baseId,
+        nodes,
+        duplicateMode,
+        timeZone
+      );
+
+      ({ base } = duplicated);
+      // Patch the active audit operation's resourceId to the newly created base id. Outer
+      // decorators (BaseDuplicate / TemplateApply / ShareBaseCopy) opened the operation with
+      // fromBaseId/targetBaseId placeholders before the new base existed; without this,
+      // every inner atomic audit row would point at the source base instead of the copy.
+      this.audit.setResourceId(base.id);
+      const { base: _base, tableIdMap, fieldIdMap, viewIdMap, ...rest } = duplicated;
+
+      const crossBaseLinkFieldTableMap = allowCrossBase
+        ? await this.getCrossBaseLinkFieldTableMap(tableIdMap, spaceId)
+        : await this.getCrossBaseLinkFieldTableMap(tableIdMap);
+
+      const disconnectedLinkFieldTableMap = await this.getDisconnectedLinkFieldTableMap(
+        tableIdMap,
+        fromBaseId,
+        nodes,
+        skipParentNodes
+      );
+
+      const mergedLinkFieldTableMap = mergeLinkFieldTableMaps(
+        crossBaseLinkFieldTableMap,
+        disconnectedLinkFieldTableMap
+      );
+
+      const disconnectedLinkFieldIds = await this.getDisconnectedLinkFieldIds(
+        tableIdMap,
+        fromBaseId,
+        nodes,
+        skipParentNodes
+      );
+
+      let recordsLength = 0;
+      if (withRecords) {
+        await this.assertSameDataDatabaseForRecordCopy(fromBaseId, base.id);
+        await prisma.base.update({
+          where: { id: base.id },
+          data: {
+            provisionState: ProvisionState.pending,
+            lastModifiedBy: userId,
+          },
+        });
+
+        recordsLength = await this.duplicateTableData(
+          base.id,
+          tableIdMap,
+          fieldIdMap,
+          viewIdMap,
+          mergedLinkFieldTableMap
+        );
+        await this.duplicateAttachments(base.id, tableIdMap, fieldIdMap);
+        await this.duplicateLinkJunction(
+          base.id,
+          tableIdMap,
+          fieldIdMap,
+          allowCrossBase,
+          disconnectedLinkFieldIds
+        );
+
+        // Persist computed/link/lookup/rollup columns for duplicated data so that
+        // reads via useQueryModel (tableCache/raw table) return correct values.
+        // This mirrors what the computed pipeline does during regular record writes.
+        await this.persistedComputedBackfillService.recomputeForTables(Object.values(tableIdMap));
+
+        await prisma.base.update({
+          where: { id: base.id },
+          data: {
+            provisionState: ProvisionState.ready,
+            lastModifiedBy: userId,
+          },
+        });
+      }
+
+      return { base, tableIdMap, fieldIdMap, viewIdMap, recordsLength, ...rest };
+    } catch (error) {
+      if (base?.id) {
+        await prisma.base
+          .update({
+            where: { id: base.id },
+            data: {
+              provisionState: ProvisionState.error,
+              lastModifiedBy: userId,
+            },
+          })
+          .catch(() => undefined);
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Builds the shared v2 duplication preparation used by execution and preview.
+   * Preview preparation defaults to non-migrating source acquisition; execution
+   * opts into normal routing initialization before consuming the same snapshots.
+   */
+  async prepareDuplicateBaseV2(
+    duplicateBaseRo: IDuplicateBaseRo,
+    allowCrossBase: boolean = true,
+    duplicateMode: BaseDuplicateMode = BaseDuplicateMode.Normal,
+    options: { readonly includeRowCount?: boolean; readonly readOnly?: boolean } = {}
+  ): Promise<DuplicateBaseV2Preparation> {
+    const { fromBaseId, spaceId, withRecords, name, nodes, timeZone } = duplicateBaseRo;
+    const skipParentNodes = duplicateMode === BaseDuplicateMode.CopyShareBase;
+    const {
+      structure: rawStructure,
+      sourceDbTableNameByTableId,
+      fieldConversions,
+    } = await this.buildDuplicateStructureConfig(
+      fromBaseId,
+      name,
+      allowCrossBase,
+      nodes,
+      duplicateMode,
+      spaceId
+    );
+    const structure = timeZone ? adaptStructureTimeZone(rawStructure, timeZone) : rawStructure;
+    const sourceTableIdMap = Object.fromEntries(
+      structure.tables.flatMap((table) => (table.id ? ([[table.id, table.id]] as const) : []))
+    );
+    const sourceTableIds = Object.keys(sourceTableIdMap);
+
+    // With allowCrossBase enabled, only links that cannot remain stable at the
+    // destination are downgraded. A partial node selection is a separate cause.
+    const crossBaseLinkFieldTableMap: ILinkFieldTableMap = allowCrossBase
+      ? await this.getV2CrossBaseLinkFieldTableMap(sourceTableIdMap, spaceId)
+      : await this.getV2CrossBaseLinkFieldTableMap(sourceTableIdMap);
+    const disconnectedLinkFieldTableMap = await this.getV2DisconnectedLinkFieldTableMap(
+      sourceTableIdMap,
+      fromBaseId,
+      nodes,
+      skipParentNodes
+    );
+    const mergedLinkFieldTableMap = mergeLinkFieldTableMaps(
+      crossBaseLinkFieldTableMap,
+      disconnectedLinkFieldTableMap
+    );
+    const internalLinkRelationTableMap =
+      await this.getV2InternalLinkRelationTableMap(sourceTableIdMap);
+    const normalizedStructure = this.normalizeDuplicateStructureForV2(structure);
+    const tableSnapshots = await this.createNativeTableSnapshots(
+      fromBaseId,
+      normalizedStructure,
+      timeZone,
+      {
+        readOnly: options.readOnly !== false,
+        // Existing target schemas may already contain the source physical names.
+        keepDbTableNames: !duplicateBaseRo.baseId,
+      }
+    );
+    const sourceLinkFields = withRecords
+      ? await this.getV2BulkCopySourceLinkFields({
+          fromBaseId,
+          sourceTableIds,
+          allowCrossBase,
+          nodes,
+          skipParentNodes,
+        })
+      : [];
+    const source = this.createDuplicateBaseSource(
+      fromBaseId,
+      normalizedStructure,
+      tableSnapshots,
+      mergedLinkFieldTableMap,
+      sourceDbTableNameByTableId,
+      internalLinkRelationTableMap,
+      sourceLinkFields
+    );
+
+    const preservedExternal = await this.classifyPreservedExternalLinks(
+      collectPreservedExternalLinkCandidates(structure),
+      spaceId
+    );
+    const records = await this.resolveDuplicateRowCountEvidence(
+      fromBaseId,
+      sourceTableIds,
+      sourceDbTableNameByTableId,
+      Boolean(withRecords),
+      options.includeRowCount
+    );
+
+    return {
+      preview: {
+        input: buildDuplicatePreviewInput(duplicateBaseRo, allowCrossBase, duplicateMode),
+        selection: summarizeDuplicateStructureSelection(structure),
+        records,
+        links: buildDuplicateLinkEvidence(
+          allowCrossBase,
+          preservedExternal,
+          fieldConversions.external,
+          fieldConversions.partialSelection
+        ),
+      },
+      execution: {
+        structure,
+        normalizedStructure,
+        tableSnapshots,
+        sourceTableIdMap,
+        sourceTableIds,
+        sourceDbTableNameByTableId,
+        mergedLinkFieldTableMap,
+        internalLinkRelationTableMap,
+        sourceLinkFields,
+        source,
+      },
+    };
+  }
+
+  private async resolveDuplicateRowCountEvidence(
+    fromBaseId: string,
+    sourceTableIds: ReadonlyArray<string>,
+    sourceDbTableNameByTableId: Readonly<Record<string, string>>,
+    withRecords: boolean,
+    includeRowCount: boolean | undefined
+  ): Promise<DuplicateBaseV2RowCountEvidence> {
+    if (!withRecords) return { basis: 'exact', value: 0 };
+    if (includeRowCount === false) {
+      return { basis: 'unknown', reason: 'source-row-count-not-requested' };
+    }
+    return this.countDuplicateSourceRows(fromBaseId, sourceTableIds, sourceDbTableNameByTableId);
+  }
+
+  private async classifyPreservedExternalLinks(
+    fields: ReadonlyArray<{ options?: unknown }>,
+    destinationSpaceId: string
+  ): Promise<{ sameSpace: number; unclassified: number }> {
+    const foreignBaseIds = Array.from(
+      new Set(
+        fields
+          .map((field) => (field.options as ILinkFieldOptions | undefined)?.baseId)
+          .filter((baseId): baseId is string => Boolean(baseId))
+      )
+    );
+    if (foreignBaseIds.length === 0) return { sameSpace: 0, unclassified: 0 };
+
+    try {
+      const bases = await this.prismaService.txClient().base.findMany({
+        where: { id: { in: foreignBaseIds }, deletedTime: null },
+        select: { id: true, spaceId: true },
+      });
+      const sameSpaceBaseIds = new Set(
+        bases.filter((base) => base.spaceId === destinationSpaceId).map((base) => base.id)
+      );
+      const sameSpace = fields.filter((field) => {
+        const baseId = (field.options as ILinkFieldOptions | undefined)?.baseId;
+        return Boolean(baseId && sameSpaceBaseIds.has(baseId));
+      }).length;
+      return { sameSpace, unclassified: fields.length - sameSpace };
+    } catch {
+      return { sameSpace: 0, unclassified: fields.length };
+    }
+  }
+
+  private async countDuplicateSourceRows(
+    sourceBaseId: string,
+    sourceTableIds: ReadonlyArray<string>,
+    sourceDbTableNameByTableId: Readonly<Record<string, string>>
+  ): Promise<DuplicateBaseV2RowCountEvidence> {
+    if (sourceTableIds.length === 0) return { basis: 'exact', value: 0 };
+    if (sourceTableIds.some((tableId) => !sourceDbTableNameByTableId[tableId])) {
+      return { basis: 'unknown', reason: 'source-row-count-unavailable' };
+    }
+
+    try {
+      const scopedClient =
+        await this.dataDbClientManager.dataPrismaForBasePreviewReadOnly(sourceBaseId);
+      if (!scopedClient) return { basis: 'unknown', reason: 'source-row-count-unavailable' };
+      const prisma = this.getDataPrismaExecutor(scopedClient as IDataPrismaScopedClient);
+      let value = 0;
+      for (const tableId of sourceTableIds) {
+        const countQuery = this.knex(sourceDbTableNameByTableId[tableId])
+          .count('*', { as: 'count' })
+          .toQuery();
+        const result =
+          await prisma.$queryRawUnsafe<Array<{ count: bigint | number | string }>>(countQuery);
+        const count = result[0]?.count;
+        const numericCount = count == null ? Number.NaN : Number(count);
+        if (!Number.isSafeInteger(numericCount) || numericCount < 0) {
+          return { basis: 'unknown', reason: 'source-row-count-unavailable' };
+        }
+        value += numericCount;
+      }
+      return Number.isSafeInteger(value)
+        ? { basis: 'exact', value }
+        : { basis: 'unknown', reason: 'source-row-count-unavailable' };
+    } catch {
+      return { basis: 'unknown', reason: 'source-row-count-unavailable' };
+    }
+  }
+
+  /** Mirrors the legacy duplicate route's same-data-database record-copy guard without migration. */
+  async previewDuplicateBaseV1DataRoute(
+    input: IDuplicateBaseRo
+  ): Promise<DuplicateBaseV2HostPreviewAdmission> {
+    if (!input.withRecords) {
+      return {
+        blockers: [],
+        warnings: [],
+        knownCoverage: ['host.cross-database.copy'],
+        unknownCoverage: [],
+      };
+    }
+
+    const [source, destination] = await Promise.all([
+      this.dataDbClientManager.getDataDatabaseForBasePreviewReadOnly(input.fromBaseId),
+      this.dataDbClientManager.getDataDatabaseForSpacePreviewReadOnly(input.spaceId),
+    ]);
+    if (!source || !destination) {
+      return {
+        blockers: [],
+        warnings: [
+          {
+            code: 'base.duplicate.cross_database.route_unknown',
+            message:
+              'Existing routing metadata is not ready enough to verify legacy record-copy compatibility.',
+          },
+        ],
+        knownCoverage: [],
+        unknownCoverage: ['host.cross-database.copy'],
+      };
+    }
+    if (source.cacheKey !== destination.cacheKey) {
+      return {
+        blockers: [
+          {
+            code: 'base.duplicate.v1.cross_database_records_blocked',
+            message: 'The selected legacy write path cannot copy records across data databases.',
+          },
+        ],
+        warnings: [],
+        knownCoverage: ['host.cross-database.copy'],
+        unknownCoverage: [],
+      };
+    }
+    return {
+      blockers: [],
+      warnings: [],
+      knownCoverage: ['host.cross-database.copy'],
+      unknownCoverage: [],
+    };
+  }
+
+  /** Edition admission that must run before any structure or row-count reads. */
+  async previewDuplicateBaseV2Admission(
+    _context: IExecutionContext,
+    _input: IDuplicateBaseRo
+  ): Promise<DuplicateBaseV2HostPreviewAdmission> {
+    return { blockers: [], warnings: [], knownCoverage: [], unknownCoverage: [] };
+  }
+
+  /**
+   * Edition extension seam for read-only host policy evidence. EE overrides
+   * this method to add authority/quota blockers and effects. The live request
+   * context is passed through and is never retained by the singleton.
+   */
+  async planDuplicateBaseV2Preview(
+    _context: IExecutionContext,
+    _preparation: DuplicateBaseV2Preparation
+  ): Promise<DuplicateBaseV2HostPreviewExtension> {
+    return {
+      resolvedConcerns: [],
+      effects: [],
+      blockers: [],
+      warnings: [],
+      knownCoverage: [],
+      unknownCoverage: [],
+    };
+  }
+
+  async duplicateBaseV2(
+    duplicateBaseRo: IDuplicateBaseRo,
+    allowCrossBase: boolean = true,
+    duplicateMode: BaseDuplicateMode = BaseDuplicateMode.Normal,
+    onProgress?: BaseImportProgressCallback,
+    onHostRestored?: (result: IDuplicateBaseV2Result) => Promise<void>
+  ): Promise<IDuplicateBaseV2Result> {
+    const { fromBaseId, spaceId, withRecords, baseId } = duplicateBaseRo;
+    const userId = this.cls.get('user.id');
+    const prisma = this.prismaService.txClient();
+    const templateApply =
+      duplicateMode === BaseDuplicateMode.ApplyTemplate ||
+      duplicateMode === BaseDuplicateMode.InstallTemplate;
+    const applyToExistingBase = Boolean(baseId && templateApply);
+    const ownsCreatedTemplateBase = !baseId && templateApply;
+    let tableIdMap: Record<string, string> = {};
+    let failedTableIds: string[] | undefined;
+    let base: ICreateBaseVo | undefined;
+
+    try {
+      onProgress?.({ phase: 'structure_creating' });
+      // Resolve every structure and copy decision before creating the target
+      // base. Execution consumes this preparation exactly once.
+      const preparation = await this.prepareDuplicateBaseV2(
+        duplicateBaseRo,
+        allowCrossBase,
+        duplicateMode,
+        { includeRowCount: false, readOnly: false }
+      );
+      const { structure, source } = preparation.execution;
+      const container = await this.v2ContainerService.getContainerForSpace(spaceId);
+      const commandBus = container.resolve<ICommandBus>(v2CoreTokens.commandBus);
+      const db = container.resolve<Kysely<unknown>>(v2PostgresDbTokens.db);
+      const context = await this.v2ContextFactory.createContext(container);
+      base = await this.baseImportService.createBaseV2(
+        db,
+        spaceId,
+        structure.name,
+        structure.icon || undefined,
+        baseId,
+        !isCopyToExistingBaseMode(duplicateMode) && !applyToExistingBase
+      );
+      this.audit.setResourceId(base.id);
+      if (withRecords && !applyToExistingBase) {
+        await prisma.base.update({
+          where: { id: base.id },
+          data: {
+            provisionState: ProvisionState.pending,
+            lastModifiedBy: userId,
+          },
+        });
+      }
+
+      // Structure and row copy both run inside the command. The handler chooses
+      // its physical copy mode only after target metadata exists, so preparation
+      // and preview deliberately make no bulk-versus-stream promise.
+      const commandResult = DuplicateBaseCommand.createFromSource({
+        baseId: base.id,
+        source,
+        withRecords: Boolean(withRecords),
+        batchSize: v2DuplicateCopyBatchSize,
+      });
+      if (commandResult.isErr()) {
+        throw new Error(commandResult.error.message);
+      }
+      const result = await commandBus.execute<DuplicateBaseCommand, DuplicateBaseResult>(
+        context,
+        commandResult.value
+      );
+      if (result.isErr()) {
+        throw new Error(result.error.message);
+      }
+
+      let fieldIdMap: Record<string, string> = {};
+      let viewIdMap: Record<string, string> = {};
+      let recordsLength = 0;
+      let recordCopyMode: 'bulk' | 'stream' | 'none' = 'none';
+      for await (const event of result.value) {
+        if (event.id === 'error') {
+          failedTableIds = event.tableIdMap ? Object.values(event.tableIdMap) : undefined;
+          throw new Error(event.message);
+        }
+
+        if (event.id === 'progress') {
+          onProgress?.(event);
+          continue;
+        }
+
+        tableIdMap = event.tableIdMap;
+        fieldIdMap = event.fieldIdMap;
+        viewIdMap = event.viewIdMap;
+        recordsLength = event.recordsLength;
+        recordCopyMode = event.recordCopyMode ?? 'none';
+      }
+
+      if (withRecords && recordCopyMode === 'bulk') {
+        await this.persistedComputedBackfillService.recomputeForTables(Object.values(tableIdMap));
+      }
+
+      const targetBase = base;
+      const restoreHost = async (): Promise<IDuplicateBaseV2Result> => {
+        onProgress?.({ phase: 'structure_created', detail: targetBase.id });
+        const hostIdMaps = await this.baseImportService.restoreBaseExtrasV2(
+          db,
+          targetBase.id,
+          structure,
+          { tableIdMap, fieldIdMap, viewIdMap },
+          duplicateMode,
+          onProgress,
+          ownsCreatedTemplateBase ||
+            Boolean(baseId && (isCopyToExistingBaseMode(duplicateMode) || applyToExistingBase))
+        );
+        if (withRecords) {
+          onProgress?.({
+            phase: 'attachments_copying',
+            processedRows: recordsLength,
+            totalRows: recordsLength,
+          });
+          await this.duplicateAttachments(targetBase.id, tableIdMap, fieldIdMap);
+        }
+        const duplicate = {
+          base: applyToExistingBase ? { ...targetBase, name: structure.name } : targetBase,
+          tableIdMap,
+          fieldIdMap,
+          viewIdMap,
+          recordsLength,
+          structure,
+          ...hostIdMaps,
+        };
+        await this.finalizeDuplicateBaseV2(duplicateBaseRo, duplicate, duplicateMode);
+        await onHostRestored?.(duplicate);
+        if (applyToExistingBase || withRecords) {
+          await this.prismaService.txClient().base.update({
+            where: { id: targetBase.id },
+            data: {
+              ...(applyToExistingBase
+                ? { name: structure.name, icon: structure.icon ?? null }
+                : { provisionState: ProvisionState.ready }),
+              lastModifiedBy: userId,
+            },
+          });
+        }
+        return duplicate;
+      };
+      // Host metadata is transactional for template installation. Native table/record writes
+      // commit independently and are compensated below if host restoration or activation fails.
+      const duplicate =
+        applyToExistingBase || ownsCreatedTemplateBase
+          ? await this.prismaService.$tx(restoreHost, {
+              timeout: this.thresholdConfig.bigTransactionTimeout,
+            })
+          : await restoreHost();
+      onProgress?.({
+        phase: 'duplicate_done',
+        processedRows: recordsLength,
+        totalRows: recordsLength,
+      });
+
+      return duplicate;
+    } catch (error) {
+      if (applyToExistingBase && base) {
+        const failedBaseId = base.id;
+        this.logger.error(`Template apply to existing base ${failedBaseId} failed`, error);
+        await this.cleanupDuplicateTablesV2(
+          failedBaseId,
+          failedTableIds ?? Object.values(tableIdMap)
+        ).catch((cleanupError) =>
+          this.logger.error(`Failed to clean copied tables in base ${failedBaseId}`, cleanupError)
+        );
+      } else if (ownsCreatedTemplateBase && base) {
+        const failedBaseId = base.id;
+        this.logger.error(`Template apply to new base ${failedBaseId} failed`, error);
+        try {
+          await this.cleanupOwnedDuplicateBaseV2(
+            failedBaseId,
+            failedTableIds ?? Object.values(tableIdMap)
+          );
+        } catch (cleanupError) {
+          this.logger.error(`Failed to remove new template base ${failedBaseId}`, cleanupError);
+          throw new AggregateError(
+            [error, cleanupError],
+            `Template apply failed and base ${failedBaseId} could not be fully removed`
+          );
+        }
+      } else if (duplicateMode === BaseDuplicateMode.CreateTemplate && base) {
+        await withStagedTemplateSnapshot(
+          this.prismaService,
+          fromBaseId,
+          base.id,
+          userId,
+          async () => {
+            throw error;
+          },
+          (cleanupError) =>
+            this.logger.error(`Failed to retire staged snapshot ${base!.id}`, cleanupError)
+        );
+      } else if (base?.id) {
+        await prisma.base
+          .update({
+            where: { id: base.id },
+            data: {
+              provisionState: ProvisionState.error,
+              lastModifiedBy: userId,
+            },
+          })
+          .catch(() => undefined);
+      }
+      throw error;
+    }
+  }
+
+  protected async finalizeDuplicateBaseV2(
+    _duplicateBaseRo: IDuplicateBaseRo,
+    _result: IDuplicateBaseV2Result,
+    _duplicateMode: BaseDuplicateMode
+  ): Promise<void> {
+    // Community has no edition-specific host effects.
+  }
+
+  private async cleanupOwnedDuplicateBaseV2(baseId: string, tableIds: string[]): Promise<void> {
+    await this.cleanupDuplicateTablesV2(baseId, tableIds, false);
+    const dropSchemaSql = this.dbProvider.dropSchema(baseId);
+    if (dropSchemaSql) {
+      const dataPrisma = await this.dataDbClientManager.dataPrismaForBase(baseId, {
+        useTransaction: true,
+      });
+      await this.getDataPrismaExecutor(dataPrisma).$executeRawUnsafe(dropSchemaSql);
+    }
+    await this.prismaService.$tx(
+      async () => {
+        await this.prismaService.txClient().base.delete({ where: { id: baseId } });
+      },
+      { timeout: this.thresholdConfig.bigTransactionTimeout }
+    );
+  }
+
+  private async cleanupDuplicateTablesV2(
+    baseId: string,
+    tableIds: string[],
+    bestEffort: boolean = true
+  ): Promise<void> {
+    if (!tableIds.length) return;
+    await this.cleanupDuplicateAttachmentRefsV2(baseId, tableIds);
+    const existingTables = await this.prismaService.txClient().tableMeta.findMany({
+      where: { baseId, id: { in: tableIds } },
+      select: { id: true },
+    });
+    if (!existingTables.length) return;
+    const existingTableIds = new Set(existingTables.map(({ id }) => id));
+    const container = await this.v2ContainerService.getContainerForBase(baseId);
+    const commandBus = container.resolve<ICommandBus>(v2CoreTokens.commandBus);
+    const context = await this.v2ContextFactory.createContext(container);
+    for (const tableId of [...tableIds].reverse()) {
+      if (!existingTableIds.has(tableId)) continue;
+      try {
+        const command = DeleteTableCommand.create({ baseId, tableId, mode: 'permanent' });
+        if (command.isErr()) throw new Error(command.error.message);
+        const result = await commandBus.execute(context, command.value);
+        if (result.isErr()) throw new Error(result.error.message);
+      } catch (error) {
+        this.logger.error(
+          `Failed to remove copied table ${tableId} after template apply failure`,
+          error
+        );
+        if (!bestEffort) throw error;
+      }
+    }
+  }
+
+  private async cleanupDuplicateAttachmentRefsV2(
+    baseId: string,
+    tableIds: string[]
+  ): Promise<void> {
+    const dataPrisma = await this.dataDbClientManager.dataPrismaForBase(baseId, {
+      useTransaction: true,
+    });
+    await dataPrisma.attachmentsTable.deleteMany({
+      where: { tableId: { in: tableIds } },
+    });
+  }
+
+  private async getDisconnectedLinkFieldIds(
+    tableIdMap: Record<string, string>,
+    fromBaseId: string,
+    nodes?: string[],
+    skipParentNodes: boolean = false
+  ) {
+    const { excludedTableIds } = await this.collectNodesAndResourceIds(
+      fromBaseId,
+      nodes,
+      skipParentNodes
+    );
+    if (!excludedTableIds?.length) {
+      return [];
+    }
+
+    const prisma = this.prismaService.txClient();
+    const allFieldRaws = await prisma.field.findMany({
+      where: {
+        tableId: { in: Object.keys(tableIdMap) },
+        deletedTime: null,
+      },
+    });
+
+    const fields = allFieldRaws.map((f) => createFieldInstanceByRaw(f));
+
+    return fields
+      .filter(({ type, isLookup }) => type === FieldType.Link && !isLookup)
+      .filter((f) => excludedTableIds.includes((f.options as ILinkFieldOptions)?.foreignTableId))
+      .map((f) => f.id);
+  }
+
+  private async assertSameDataDatabaseForRecordCopy(sourceBaseId: string, targetBaseId: string) {
+    if (await this.isSameDataDatabaseForRecordCopy(sourceBaseId, targetBaseId)) {
+      return;
+    }
+
+    throw new CustomHttpException(
+      'Duplicating records across different space data databases is not supported yet',
+      HttpErrorCode.VALIDATION_ERROR,
+      { localization: { i18nKey: 'httpErrors.base.crossDataDbDuplicateUnsupported' } }
+    );
+  }
+
+  private async isSameDataDatabaseForRecordCopy(sourceBaseId: string, targetBaseId: string) {
+    const [source, target] = await Promise.all([
+      this.dataDbClientManager.getDataDatabaseForBase(sourceBaseId, { useTransaction: true }),
+      this.dataDbClientManager.getDataDatabaseForBase(targetBaseId, { useTransaction: true }),
+    ]);
+
+    return source.cacheKey === target.cacheKey;
+  }
+
+  private async buildDuplicateStructureConfig(
+    fromBaseId: string,
+    baseName?: string,
+    allowCrossBase?: boolean,
+    nodes?: string[],
+    duplicateMode: BaseDuplicateMode = BaseDuplicateMode.Normal,
+    destSpaceId?: string
+  ): Promise<DuplicateStructureConfigResult> {
+    const prisma = this.prismaService.txClient();
+    const baseRaw = await prisma.base.findUniqueOrThrow({
       where: {
         id: fromBaseId,
         deletedTime: null,
       },
     });
-    if (!base) {
-      throw new NotFoundException('Base not found');
-    }
-    const userId = this.cls.get('user.id');
-    const toBaseId = generateBaseId();
-    return await this.prismaService.txClient().base.create({
-      data: {
-        id: toBaseId,
-        name: name ? name : base.name,
-        icon: base.icon,
-        order: (await this.getMaxOrder(spaceId)) + 1,
-        spaceId: spaceId,
-        createdBy: userId,
-      },
-      select: {
-        id: true,
-        name: true,
-        icon: true,
-        spaceId: true,
-        order: true,
-      },
-    });
-  }
+    // The copy always gets a name, even when the source was never named.
+    baseRaw.name = baseName || `${baseDisplayName(baseRaw.name)} (Copy)`;
 
-  private async duplicateTableMeta(fromBaseId: string, toBaseId: string) {
-    const tables = await this.prismaService.txClient().tableMeta.findMany({
+    const skipParentNodes = duplicateMode === BaseDuplicateMode.CopyShareBase;
+    const {
+      finalIncludeNodes,
+      includedTableIds,
+      includedFolderIds,
+      includedDashboardIds,
+      includedWorkflowIds,
+      includedAppIds,
+      includedRoutineIds,
+      excludedTableIds,
+    } = await this.collectNodesAndResourceIds(fromBaseId, nodes, skipParentNodes);
+    const rootNodeIds = skipParentNodes ? [...(nodes || [])] : undefined;
+
+    const tableRaws = await prisma.tableMeta.findMany({
       where: {
         baseId: fromBaseId,
         deletedTime: null,
+        ...(includedTableIds !== undefined ? { id: { in: includedTableIds } } : {}),
+      },
+      orderBy: {
+        order: 'asc',
       },
     });
-    const userId = this.cls.get('user.id');
-    const old2NewTableIdMap: Record<string, string> = {};
-    for (const table of tables) {
-      const newTableId = generateTableId();
-      old2NewTableIdMap[table.id] = newTableId;
-      await this.prismaService.txClient().tableMeta.create({
-        data: {
-          ...table,
-          id: newTableId,
-          dbTableName: this.replaceDbTableName(table.dbTableName, toBaseId),
-          baseId: toBaseId,
-          version: 1,
-          createdTime: new Date(),
-          lastModifiedTime: new Date(),
-          createdBy: userId,
-          lastModifiedBy: userId,
-        },
-      });
-    }
-    return old2NewTableIdMap;
-  }
+    const tableIds = tableRaws.map(({ id }) => id);
+    const fieldRaws = await this.baseExportService.findFieldsByTableIds(tableIds);
+    const viewRaws = await this.baseExportService.findViewsByTableIds(tableIds);
 
-  private replaceDbTableName(dbTableName: string, toBaseId: string) {
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    const [_, tableName] = this.dbProvider.splitTableName(dbTableName);
-    return this.dbProvider.joinDbTableName(toBaseId, tableName);
-  }
-
-  private reBuildFieldRaw(
-    toBaseId: string,
-    field: IFieldInstance,
-    fieldRaw: Field,
-    old2NewTableIdMap: Record<string, string>,
-    old2NewFieldIdMap: Record<string, string>
-  ) {
-    const userId = this.cls.get('user.id');
-    const newFieldRaw: Field = {
-      ...fieldRaw,
-      id: old2NewFieldIdMap[field.id],
-      tableId: old2NewTableIdMap[fieldRaw.tableId],
-      version: 1,
-      createdTime: new Date(),
-      lastModifiedTime: new Date(),
-      createdBy: userId,
-      lastModifiedBy: userId,
+    const structureInput: DuplicateBaseStructConfigInput = {
+      baseRaw,
+      tableRaws,
+      fieldRaws,
+      viewRaws,
+      allowCrossBase,
+      includeNodes: finalIncludeNodes,
+      includedFolderIds,
+      includedDashboardIds,
+      includedWorkflowIds,
+      includedAppIds,
+      includedRoutineIds,
+      excludedTableIds,
+      rootNodeIds,
+      destSpaceId,
+      includeWorkflowRuntimeState: false,
     };
+    const structure = await this.baseExportService.generateBaseStructConfig(structureInput);
 
-    if (field.lookupOptions) {
-      newFieldRaw.lookupOptions = JSON.stringify({
-        ...field.lookupOptions,
-        foreignTableId: old2NewTableIdMap[field.lookupOptions.foreignTableId],
-        lookupFieldId: old2NewFieldIdMap[field.lookupOptions.lookupFieldId],
-        linkFieldId: old2NewFieldIdMap[field.lookupOptions.linkFieldId],
-        fkHostTableName: this.replaceDbTableName(field.lookupOptions.fkHostTableName, toBaseId),
-      });
-    }
-
-    if (field.type === FieldType.Link) {
-      newFieldRaw.options = JSON.stringify({
-        ...field.options,
-        foreignTableId: old2NewTableIdMap[field.options.foreignTableId],
-        lookupFieldId: old2NewFieldIdMap[field.options.lookupFieldId],
-        symmetricFieldId: field.options.symmetricFieldId
-          ? old2NewFieldIdMap[field.options.symmetricFieldId]
-          : undefined,
-        fkHostTableName: this.replaceDbTableName(field.options.fkHostTableName, toBaseId),
-      });
-    }
-
-    if (field.type === FieldType.Formula || field.type === FieldType.Rollup) {
-      newFieldRaw.options = JSON.stringify({
-        ...field.options,
-        expression: replaceExpressionFieldIds(field.options.expression, old2NewFieldIdMap),
-      });
-    }
-
-    if (fieldRaw.lookupLinkedFieldId) {
-      newFieldRaw.lookupLinkedFieldId = old2NewFieldIdMap[fieldRaw.lookupLinkedFieldId];
-    }
-
-    return newFieldRaw;
+    return {
+      structure,
+      sourceDbTableNameByTableId: Object.fromEntries(
+        tableRaws.flatMap(({ id, dbTableName }) =>
+          dbTableName ? ([[id, dbTableName]] as const) : []
+        )
+      ),
+      fieldConversions: this.summarizeProjectedFieldConversions(
+        fieldRaws,
+        structure,
+        excludedTableIds
+      ),
+    };
   }
 
-  private async duplicateFields(toBaseId: string, old2NewTableIdMap: Record<string, string>) {
-    const fieldRaws = await this.prismaService.txClient().field.findMany({
-      where: {
-        tableId: { in: Object.keys(old2NewTableIdMap) },
-        deletedTime: null,
-      },
-    });
-    const old2NewFieldIdMap = fieldRaws.reduce<Record<string, string>>((acc, fieldRaw) => {
-      acc[fieldRaw.id] = generateFieldId();
-      return acc;
-    }, {});
-
-    for (const fieldRaw of fieldRaws) {
-      const field = createFieldInstanceByRaw(fieldRaw);
-
-      const newFieldRaw = this.reBuildFieldRaw(
-        toBaseId,
-        field,
-        fieldRaw,
-        old2NewTableIdMap,
-        old2NewFieldIdMap
-      );
-
-      await this.prismaService.txClient().field.create({
-        data: newFieldRaw,
-      });
+  private summarizeProjectedFieldConversions(
+    fieldRaws: DuplicateProjectionSourceField[],
+    structure: DuplicateStructureConfig,
+    excludedTableIds?: ReadonlyArray<string>
+  ): { external: number; partialSelection: number } {
+    const convertedFieldIds = collectConvertedFieldIds(fieldRaws, structure);
+    if (convertedFieldIds.size === 0 || !excludedTableIds?.length) {
+      return { external: convertedFieldIds.size, partialSelection: 0 };
     }
 
-    return old2NewFieldIdMap;
-  }
-
-  private async duplicateViews(
-    old2NewTableIdMap: Record<string, string>,
-    old2NewFieldIdMap: Record<string, string>
-  ) {
-    const viewRaws = await this.prismaService.txClient().view.findMany({
-      where: {
-        tableId: { in: Object.keys(old2NewTableIdMap) },
-        deletedTime: null,
-      },
-    });
-
-    const userId = this.cls.get('user.id');
-    const old2NewViewIdMap: Record<string, string> = {};
-    for (const viewRaw of viewRaws) {
-      const newViewId = generateViewId();
-      old2NewViewIdMap[viewRaw.id] = newViewId;
-      const newView = {
-        ...viewRaw,
-        id: newViewId,
-        tableId: old2NewTableIdMap[viewRaw.tableId],
-        version: 1,
-        createdTime: new Date(),
-        createdBy: userId,
-        options: replaceJsonStringFieldIds(viewRaw.options, old2NewFieldIdMap),
-        sort: replaceJsonStringFieldIds(viewRaw.sort, old2NewFieldIdMap),
-        filter: replaceJsonStringFieldIds(viewRaw.filter, old2NewFieldIdMap),
-        group: replaceJsonStringFieldIds(viewRaw.group, old2NewFieldIdMap),
-        columnMeta: replaceJsonStringFieldIds(viewRaw.columnMeta, old2NewFieldIdMap) || '',
-        enableShare: undefined,
-        shareId: undefined,
-        shareMeta: undefined,
-      };
-      await this.prismaService.txClient().view.create({ data: newView });
-    }
-    return old2NewViewIdMap;
-  }
-
-  private async duplicateReferences(old2NewFieldIdMap: Record<string, string>) {
-    const allFieldIds = Object.keys(old2NewFieldIdMap);
-    const references = await this.prismaService.txClient().reference.findMany({
-      where: { OR: [{ fromFieldId: { in: allFieldIds } }, { toFieldId: { in: allFieldIds } }] },
-      select: { fromFieldId: true, toFieldId: true },
-    });
-
-    for (const { fromFieldId, toFieldId } of references) {
-      await this.prismaService.txClient().reference.create({
-        data: {
-          fromFieldId: old2NewFieldIdMap[fromFieldId],
-          toFieldId: old2NewFieldIdMap[toFieldId],
-        },
-      });
-    }
-  }
-
-  private async createSchema(baseId: string) {
-    const sqlList = this.dbProvider.createSchema(baseId);
-    if (sqlList) {
-      for (const sql of sqlList) {
-        await this.prismaService.txClient().$executeRawUnsafe(sql);
-      }
-    }
-  }
-
-  private async renameViewIndexes(dbTableName: string, old2NewViewIdMap: Record<string, string>) {
-    const columnInfoQuery = this.dbProvider.columnInfo(dbTableName);
-    const columns = await this.prismaService
-      .txClient()
-      .$queryRawUnsafe<{ name: string }[]>(columnInfoQuery);
-    const viewIndexColumns = columns.filter((column) =>
-      column.name.startsWith(ROW_ORDER_FIELD_PREFIX)
+    const partialSelection = countPartialSelectionConversions(
+      fieldRaws,
+      convertedFieldIds,
+      excludedTableIds
     );
+    return {
+      external: convertedFieldIds.size - partialSelection,
+      partialSelection,
+    };
+  }
 
-    for (const { name } of viewIndexColumns) {
-      const oldViewId = name.substring(ROW_ORDER_FIELD_PREFIX.length + 1);
-      const newViewId = old2NewViewIdMap[oldViewId];
-      if (newViewId) {
-        const query = this.dbProvider.renameColumn(
-          dbTableName,
-          name,
-          `${ROW_ORDER_FIELD_PREFIX}_${newViewId}`
-        );
-        for (const sql of query) {
-          await this.prismaService.txClient().$executeRawUnsafe(sql);
+  private createDuplicateBaseSource(
+    sourceBaseId: string,
+    structure: DuplicateV2StructureConfig,
+    tableSnapshots: ReadonlyMap<string, ITablePersistenceDTO>,
+    disconnectedLinkFieldTableMap: ILinkFieldTableMap,
+    sourceDbTableNameByTableId: Record<string, string> = {},
+    internalLinkRelationTableMap: Record<string, V2InternalLinkFieldTableInfo[]> = {},
+    sourceLinkFields: BulkCopySourceLinkField[] = []
+  ): DuplicateBaseSource {
+    const tableById = new Map(structure.tables.map((table) => [table.id, table]));
+    const readRows = (
+      sourceDbTableName: string,
+      crossBaseLinkInfo: ILinkFieldTableInfo[],
+      internalLinkInfo: V2InternalLinkFieldTableInfo[]
+    ) =>
+      this.createSourceTableRecordRows(
+        sourceBaseId,
+        sourceDbTableName,
+        crossBaseLinkInfo,
+        internalLinkInfo
+      );
+    const toRecordInput = (table: DuplicateV2TableConfig, row: Record<string, unknown>) =>
+      this.toDuplicateBaseRecordInput(table, row);
+
+    return {
+      structure,
+      tableSnapshots,
+      sourceDbTableNameByTableId,
+      linkValueColumnsByTableId: disconnectedLinkFieldTableMap,
+      sourceLinkFields,
+      async *records(tableId: string, options?: DuplicateBaseRecordReadOptions) {
+        const table = tableById.get(tableId);
+        const sourceDbTableName = sourceDbTableNameByTableId[tableId] ?? table?.dbTableName;
+        if (!table || !sourceDbTableName) {
+          return;
+        }
+        const shouldReadInternalLinks = options?.phase !== 'insert';
+
+        for await (const row of readRows(
+          sourceDbTableName,
+          disconnectedLinkFieldTableMap[tableId] || [],
+          shouldReadInternalLinks ? internalLinkRelationTableMap[tableId] || [] : []
+        )) {
+          yield toRecordInput(table, row);
+        }
+      },
+    };
+  }
+
+  private normalizeDuplicateStructureForV2(
+    structure: DuplicateStructureConfig
+  ): DuplicateV2StructureConfig {
+    const availableTableIds = new Set(
+      structure.tables.flatMap((table) => (table.id ? [table.id] : []))
+    );
+    for (const table of structure.tables) {
+      for (const field of table.fields) {
+        const options = field.options as ILinkFieldOptions | undefined;
+        if (
+          field.type === FieldType.Link &&
+          options?.baseId &&
+          typeof options.foreignTableId === 'string'
+        ) {
+          availableTableIds.add(options.foreignTableId);
         }
       }
     }
-  }
-
-  private async duplicateJunctionTable(
-    fromBaseId: string,
-    toBaseId: string,
-    tableRaws: { id: string; dbTableName: string }[],
-    withRecords?: boolean
-  ) {
-    const tableIds = tableRaws.map((tableRaw) => tableRaw.id);
-    const dbTableNameSet = new Set(tableRaws.map((tableRaw) => tableRaw.dbTableName));
-
-    const linkFieldRaws = await this.prismaService.txClient().field.findMany({
-      where: { tableId: { in: tableIds }, type: FieldType.Link, deletedTime: null },
-      select: { id: true, options: true },
-    });
-
-    const junctionTables = uniq(
-      linkFieldRaws
-        .map((linkFieldRaw) => {
-          const options = JSON.parse(linkFieldRaw.options as string) as ILinkFieldOptions;
-          return options.fkHostTableName;
-        })
-        .filter((tableName) => !dbTableNameSet.has(tableName))
+    const fieldIdsByTableId = new Map(
+      structure.tables.flatMap((table) =>
+        table.id
+          ? [
+              [
+                table.id,
+                new Set(table.fields.flatMap((field) => (field.id ? [field.id] : []))),
+              ] as const,
+            ]
+          : []
+      )
     );
 
-    for (const dbTableName of junctionTables) {
-      const sql = this.dbProvider.duplicateTable(fromBaseId, toBaseId, dbTableName, withRecords);
-      await this.prismaService.txClient().$executeRawUnsafe(sql);
-    }
+    return {
+      ...structure,
+      tables: structure.tables.map((table) => {
+        return {
+          ...table,
+          fields: normalizeFields(table.fields as ReadonlyArray<DotTeaFieldInput>, {
+            availableTableIds,
+            fieldIdsByTableId,
+          }).map((normalized, index) => {
+            const field = table.fields[index]!;
+            const normalizedField = { ...field, ...normalized };
+
+            if (
+              normalized.type === FieldType.SingleLineText &&
+              (field.isLookup ||
+                field.isConditionalLookup ||
+                field.type === FieldType.Rollup ||
+                field.type === FieldType.ConditionalRollup)
+            ) {
+              return omit(normalizedField, ['isLookup', 'isConditionalLookup', 'lookupOptions']);
+            }
+
+            return normalizedField;
+          }),
+        };
+      }),
+    };
   }
 
-  private async duplicateDataTable(
-    fromBaseId: string,
-    toBaseId: string,
-    tableRaws: { id: string; dbTableName: string }[],
-    withRecords?: boolean
-  ) {
-    const userId = this.cls.get('user.id');
-    const toDuplicate = tableRaws.map((tableRaw) => tableRaw.dbTableName);
-
-    for (const dbTableName of toDuplicate) {
-      const sql = this.dbProvider.duplicateTable(fromBaseId, toBaseId, dbTableName, withRecords);
-      const newDbTableName = this.replaceDbTableName(dbTableName, toBaseId);
-      await this.prismaService.txClient().$executeRawUnsafe(sql);
-      const updateSql = this.knex(newDbTableName)
-        .update({
-          __created_time: new Date(),
-          __last_modified_time: null,
-          __created_by: userId,
-          __last_modified_by: null,
-          __version: 1,
-        })
-        .toQuery();
-      await this.prismaService.txClient().$executeRawUnsafe(updateSql);
-
-      const alterAutoNumber = this.dbProvider.alterAutoNumber(newDbTableName);
-      for (const sql of alterAutoNumber) {
-        await this.prismaService.txClient().$executeRawUnsafe(sql);
-      }
-
-      const alterTableSchemaSql = this.knex.schema
-        .alterTable(newDbTableName, (table) => {
-          table.dropNullable('__id');
-          table.unique('__id');
-          table.unique('__auto_number');
-          table.dateTime('__created_time').defaultTo(this.knex.fn.now()).notNullable().alter();
-          table.dropNullable('__created_by');
-          table.dropNullable('__version');
-        })
-        .toSQL()
-        .map((item) => item.sql);
-
-      for (const sql of alterTableSchemaSql) {
-        await this.prismaService.txClient().$executeRawUnsafe(sql);
-      }
+  private nativeFieldType(field: ITableFieldPersistenceDTO): string {
+    if (field.isConditionalLookup) {
+      return 'conditionalLookup';
     }
+    if (field.isLookup) {
+      return 'lookup';
+    }
+    return field.type;
   }
 
-  private async duplicateDbTable(
-    fromBaseId: string,
-    toBaseId: string,
-    old2NewViewIdMap: Record<string, string>,
-    withRecords?: boolean
-  ) {
-    // create pg schema
-    await this.createSchema(toBaseId);
+  private applyDuplicateFieldTransformation(
+    sourceField: ITableFieldPersistenceDTO,
+    transformedField: DuplicateV2FieldConfig,
+    sourceBaseId: string,
+    sourceTableIdByDbTableName: ReadonlyMap<string, string>
+  ): ITableFieldPersistenceDTO {
+    if (sourceField.type === FieldType.Button) {
+      const { workflow: _workflow, ...options } = sourceField.options ?? {};
+      return { ...sourceField, options };
+    }
 
-    const tableRaws = await this.prismaService.txClient().tableMeta.findMany({
-      where: { baseId: fromBaseId, deletedTime: null },
-      select: { id: true, dbTableName: true },
-    });
+    let portableSourceField = sourceField;
+    if (
+      sourceField.type === FieldType.Link &&
+      !sourceField.isLookup &&
+      !sourceField.isConditionalLookup &&
+      sourceField.options.fkHostTableName
+    ) {
+      const sourceHostTableId = sourceTableIdByDbTableName.get(sourceField.options.fkHostTableName);
+      if (sourceHostTableId) {
+        portableSourceField = {
+          ...sourceField,
+          options: {
+            ...sourceField.options,
+            fkHostTableName: `${sourceBaseId}.${sourceHostTableId}`,
+          },
+        };
+      }
+    }
 
-    // create visible table
-    await this.duplicateDataTable(fromBaseId, toBaseId, tableRaws, withRecords);
-
-    // rename view index fields
-    for (const { dbTableName } of tableRaws) {
-      await this.renameViewIndexes(
-        this.replaceDbTableName(dbTableName, toBaseId),
-        old2NewViewIdMap
+    if (this.nativeFieldType(portableSourceField) === transformedField.type) {
+      return portableSourceField;
+    }
+    if (transformedField.type !== FieldType.SingleLineText) {
+      throw new Error(
+        `Unsupported native duplicate field transformation: ${sourceField.id} (${this.nativeFieldType(sourceField)} -> ${transformedField.type})`
       );
     }
 
-    // create junction tables for many to many link fields
-    await this.duplicateJunctionTable(fromBaseId, toBaseId, tableRaws, withRecords);
+    return {
+      id: sourceField.id,
+      name: sourceField.name,
+      version: sourceField.version,
+      isPending: sourceField.isPending,
+      description: sourceField.description,
+      aiConfig: sourceField.aiConfig,
+      dbFieldName: sourceField.dbFieldName,
+      notNull: sourceField.notNull,
+      unique: sourceField.unique,
+      type: FieldType.SingleLineText,
+      dbFieldType: transformedField.dbFieldType ?? 'TEXT',
+      isComputed: false,
+      hasError: false,
+      ...(transformedField.options ? { options: transformedField.options } : {}),
+    };
   }
 
-  private async duplicateJunctionTableIndexes(fromBaseId: string, toBaseId: string) {
-    const query = this.knex('pg_indexes')
-      .select('*')
-      .where({
-        schemaname: fromBaseId,
-      })
-      .where('indexname', 'like', 'index_%')
-      .toQuery();
+  private async createNativeTableSnapshots(
+    sourceBaseId: string,
+    structure: DuplicateV2StructureConfig,
+    timeZone?: string,
+    options: { readonly readOnly?: boolean; readonly keepDbTableNames?: boolean } = {}
+  ): Promise<ReadonlyMap<string, ITablePersistenceDTO>> {
+    const { readOnly = false, keepDbTableNames = false } = options;
+    const firstTable = structure.tables[0];
+    if (!firstTable) return new Map();
+    if (!firstTable.id) {
+      throw new Error('Native duplicate source table is missing an id');
+    }
+    const sourceContainer = readOnly
+      ? await this.v2ContainerService.getPreviewContainerForTable(firstTable.id)
+      : await this.v2ContainerService.getContainerForBase(sourceBaseId);
+    if (!sourceContainer) {
+      throw new Error('Native duplicate source route is unavailable for read-only preview');
+    }
+    const tableRepository = sourceContainer.resolve<ITableRepository>(v2CoreTokens.tableRepository);
+    const tableMapper = sourceContainer.resolve<ITableMapper>(v2CoreTokens.tableMapper);
+    const context = await this.v2ContextFactory.createContext(sourceContainer);
+    const sourceSnapshots = new Map<string, ITablePersistenceDTO>();
 
-    const beforeIndexedResult = await this.prismaService.txClient().$queryRawUnsafe<
-      {
-        schemaname: string;
-        tablename: string;
-        indexname: string;
-        indexdef: string;
-      }[]
-    >(query);
+    for (const tableConfig of structure.tables) {
+      if (!tableConfig.id) {
+        throw new Error('Native duplicate source table is missing an id');
+      }
+      const tableId = TableId.create(tableConfig.id);
+      if (tableId.isErr()) {
+        throw new Error(tableId.error.message);
+      }
+      const tableResult = await tableRepository.findOne(
+        context,
+        TableByIdSpec.create(tableId.value)
+      );
+      if (tableResult.isErr()) {
+        throw new Error(tableResult.error.message);
+      }
+      const snapshotResult = tableMapper.toDTO(tableResult.value);
+      if (snapshotResult.isErr()) {
+        throw new Error(snapshotResult.error.message);
+      }
 
-    this.logger.log(beforeIndexedResult, 'beforeJunctionIndexed');
+      sourceSnapshots.set(
+        tableConfig.id,
+        timeZone ? replaceTimeZoneDeep(snapshotResult.value, timeZone) : snapshotResult.value
+      );
+    }
 
-    for (const item of beforeIndexedResult) {
-      const regex = new RegExp(`"${fromBaseId}"`, 'g');
-      const updatedIndexDef = item.indexdef.replace(regex, `"${toBaseId}"`);
-      try {
-        await this.prismaService.txClient().$executeRawUnsafe(updatedIndexDef);
-      } catch (e) {
-        this.logger.error(
-          { def: updatedIndexDef, msg: (e as { message: string }).message },
-          'indexUpdateError'
+    // A kept table name is still the foreign key host its links point at; a table renamed
+    // after its new id needs those links rewritten to the id-based name.
+    const sourceTableIdByDbTableName = new Map<string, string>();
+    for (const [tableId, snapshot] of keepDbTableNames ? [] : sourceSnapshots) {
+      if (snapshot.dbTableName) {
+        sourceTableIdByDbTableName.set(snapshot.dbTableName, tableId);
+      }
+    }
+    const snapshots = new Map<string, ITablePersistenceDTO>();
+    for (const tableConfig of structure.tables) {
+      if (!tableConfig.id) {
+        throw new Error('Native duplicate source table is missing an id');
+      }
+      const sourceSnapshot = sourceSnapshots.get(tableConfig.id);
+      if (!sourceSnapshot) {
+        throw new Error(`Native duplicate source table is missing: ${tableConfig.id}`);
+      }
+      const transformedFields = new Map(
+        tableConfig.fields.flatMap((field) => (field.id ? [[field.id, field] as const] : []))
+      );
+      const fields = sourceSnapshot.fields.map((sourceField) => {
+        const transformedField = transformedFields.get(sourceField.id);
+        if (!transformedField) {
+          throw new Error(`Native duplicate field is missing from structure: ${sourceField.id}`);
+        }
+        return this.applyDuplicateFieldTransformation(
+          sourceField,
+          transformedField,
+          sourceBaseId,
+          sourceTableIdByDbTableName
         );
+      });
+      snapshots.set(tableConfig.id, {
+        ...sourceSnapshot,
+        // Without a name the copy is named after its new table id.
+        dbTableName: keepDbTableNames ? sourceSnapshot.dbTableName : undefined,
+        fields,
+      });
+    }
+
+    return snapshots;
+  }
+
+  private shouldSkipDuplicateRecordColumn(columnName: string) {
+    return (
+      columnName === '__id' ||
+      columnName.startsWith('__row_') ||
+      this.isRestoreSystemColumn(columnName)
+    );
+  }
+
+  private shouldSkipDuplicateRecordField(field: DuplicateV2FieldConfig) {
+    if (field.isLookup) {
+      return true;
+    }
+
+    switch (field.type) {
+      case FieldType.Button:
+      case FieldType.Formula:
+      case FieldType.Rollup:
+      case FieldType.ConditionalRollup:
+      case 'lookup':
+      case 'conditionalLookup':
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  private toDuplicateRecordFieldValue(field: DuplicateV2FieldConfig, value: unknown) {
+    return this.isJsonDbField(field.dbFieldType) ? this.parseJsonCellValue(value) : value;
+  }
+
+  private toDuplicateBaseRecordInput(table: DuplicateV2TableConfig, row: Record<string, unknown>) {
+    const fields: Record<string, unknown> = {};
+    const fieldsByDbFieldName = new Map(table.fields.map((field) => [field.dbFieldName, field]));
+    for (const [columnName, value] of Object.entries(row)) {
+      if (this.shouldSkipDuplicateRecordColumn(columnName)) {
+        continue;
+      }
+
+      const field = fieldsByDbFieldName.get(columnName);
+      if (!field?.id || this.shouldSkipDuplicateRecordField(field)) {
+        continue;
+      }
+
+      const fieldId = field.id;
+      fields[fieldId] = this.toDuplicateRecordFieldValue(field, value);
+    }
+
+    const orders = Object.fromEntries(
+      Object.entries(row).flatMap(([columnName, value]) => {
+        if (!columnName.startsWith('__row_')) {
+          return [];
+        }
+        const order = Number(value);
+        return Number.isFinite(order) ? [[columnName.slice('__row_'.length), order]] : [];
+      })
+    );
+
+    return {
+      recordId: typeof row.__id === 'string' ? row.__id : undefined,
+      fields,
+      ...(Object.keys(orders).length ? { orders } : {}),
+      ...(row.__version ? { version: Number(row.__version) } : {}),
+      ...(row.__auto_number ? { autoNumber: Number(row.__auto_number) } : {}),
+      ...(row.__created_time ? { createdTime: this.toRestoreString(row.__created_time) } : {}),
+      ...(row.__created_by ? { createdBy: this.toRestoreString(row.__created_by) } : {}),
+      lastModifiedTime: null,
+      lastModifiedBy: null,
+    };
+  }
+
+  private async duplicateStructure(
+    fromBaseId: string,
+    spaceId: string,
+    baseName?: string,
+    allowCrossBase?: boolean,
+    baseId?: string,
+    nodes?: string[],
+    duplicateMode: BaseDuplicateMode = BaseDuplicateMode.Normal,
+    timeZone?: string
+  ) {
+    const prisma = this.prismaService.txClient();
+    const baseRaw = await prisma.base.findUniqueOrThrow({
+      where: {
+        id: fromBaseId,
+        deletedTime: null,
+      },
+    });
+    // The copy always gets a name, even when the source was never named.
+    baseRaw.name = baseName || `${baseDisplayName(baseRaw.name)} (Copy)`;
+
+    // For CopyShareBase mode, don't collect parent nodes - the shared node becomes the root
+    const skipParentNodes = duplicateMode === BaseDuplicateMode.CopyShareBase;
+
+    // Get included table IDs if includeNodes is provided
+    const {
+      finalIncludeNodes,
+      includedTableIds,
+      includedFolderIds,
+      includedDashboardIds,
+      includedWorkflowIds,
+      includedAppIds,
+      includedRoutineIds,
+      excludedTableIds,
+    } = await this.collectNodesAndResourceIds(fromBaseId, nodes, skipParentNodes);
+
+    const rootNodeIds = skipParentNodes ? [...(nodes || [])] : undefined;
+
+    const tableRaws = await prisma.tableMeta.findMany({
+      where: {
+        baseId: fromBaseId,
+        deletedTime: null,
+        ...(includedTableIds !== undefined ? { id: { in: includedTableIds } } : {}),
+      },
+      orderBy: {
+        order: 'asc',
+      },
+    });
+    const tableIds = tableRaws.map(({ id }) => id);
+    const fieldRaws = await prisma.field.findMany({
+      where: {
+        tableId: {
+          in: tableIds,
+        },
+        deletedTime: null,
+      },
+    });
+    const viewRaws = await prisma.view.findMany({
+      where: {
+        tableId: {
+          in: tableIds,
+        },
+        deletedTime: null,
+      },
+      orderBy: {
+        order: 'asc',
+      },
+    });
+
+    const rawStructure = await this.baseExportService.generateBaseStructConfig({
+      baseRaw,
+      tableRaws,
+      fieldRaws,
+      viewRaws,
+      allowCrossBase,
+      includeNodes: finalIncludeNodes,
+      includedFolderIds,
+      includedDashboardIds,
+      includedWorkflowIds,
+      includedAppIds,
+      includedRoutineIds,
+      excludedTableIds,
+      rootNodeIds,
+      destSpaceId: spaceId,
+    });
+
+    const structure = timeZone ? adaptStructureTimeZone(rawStructure, timeZone) : rawStructure;
+
+    this.logger.log(`base-duplicate-service: Start to getting base structure config successfully`);
+
+    const {
+      base: newBase,
+      tableIdMap,
+      fieldIdMap,
+      viewIdMap,
+      ...rest
+    } = await this.baseImportService.createBaseStructure(
+      spaceId,
+      structure,
+      baseId,
+      undefined,
+      duplicateMode,
+      undefined,
+      { useTransaction: true }
+    );
+
+    return { base: newBase, tableIdMap, fieldIdMap, viewIdMap, ...rest };
+  }
+
+  /**
+   * Collect nodes and their resource IDs by type
+   * This method processes the selected nodes and collects all their parent nodes (unless skipParentNodes is true)
+   * Then extracts resource IDs grouped by resource type
+   *
+   * @param fromBaseId - The base ID to collect nodes from
+   * @param nodes - The selected node IDs
+   * @param skipParentNodes - If true, don't collect parent nodes (used for share base copy)
+   */
+  private async collectNodesAndResourceIds(
+    fromBaseId: string,
+    nodes: string[] | undefined,
+    skipParentNodes: boolean = false
+  ) {
+    const prisma = this.prismaService.txClient();
+    let includedTableIds: string[] | undefined;
+    let includedFolderIds: string[] | undefined;
+    let includedDashboardIds: string[] | undefined;
+    let includedWorkflowIds: string[] | undefined;
+    let includedRoutineIds: string[] | undefined;
+    let includedAppIds: string[] | undefined;
+    let finalIncludeNodes: string[] | undefined;
+
+    let excludedTableIds: string[] | undefined;
+    let excludedFolderIds: string[] | undefined;
+    let excludedDashboardIds: string[] | undefined;
+    let excludedWorkflowIds: string[] | undefined;
+    let excludedAppIds: string[] | undefined;
+
+    if (nodes && nodes.length > 0) {
+      // Get all nodes in the base to build parent-child relationships
+      const allNodes = await prisma.baseNode.findMany({
+        where: {
+          baseId: fromBaseId,
+        },
+        select: {
+          id: true,
+          parentId: true,
+          resourceId: true,
+          resourceType: true,
+        },
+      });
+
+      // Build a map for quick lookup
+      const nodeMap = new Map(allNodes.map((node) => [node.id, node]));
+
+      // Function to recursively collect parent nodes
+      const collectParentNodes = (nodeId: string, collected: Set<string>) => {
+        if (collected.has(nodeId)) return;
+        collected.add(nodeId);
+
+        const node = nodeMap.get(nodeId);
+        if (node?.parentId) {
+          collectParentNodes(node.parentId, collected);
+        }
+      };
+
+      // Function to recursively collect descendant nodes (children)
+      const collectDescendantNodes = (nodeId: string, collected: Set<string>) => {
+        // Find all children of this node and collect them
+        for (const node of allNodes) {
+          if (node.parentId === nodeId && !collected.has(node.id)) {
+            collected.add(node.id);
+            collectDescendantNodes(node.id, collected);
+          }
+        }
+      };
+
+      // Collect selected nodes, all their parent nodes (unless skipParentNodes), and all their descendant nodes
+      const allIncludedNodeIds = new Set<string>();
+      for (const nodeId of nodes) {
+        if (skipParentNodes) {
+          // Only add the node itself, no parent collection
+          allIncludedNodeIds.add(nodeId);
+        } else {
+          // Collect the node itself and its parents (for folder structure)
+          // Note: collectParentNodes already adds the nodeId itself
+          collectParentNodes(nodeId, allIncludedNodeIds);
+        }
+        // Collect all descendants (children, grandchildren, etc.)
+        collectDescendantNodes(nodeId, allIncludedNodeIds);
+      }
+
+      finalIncludeNodes = Array.from(allIncludedNodeIds);
+
+      // Extract resource IDs by type
+      const includedNodeDetails = allNodes.filter((node) => allIncludedNodeIds.has(node.id));
+
+      includedTableIds = includedNodeDetails
+        .filter((node) => node.resourceType === 'table')
+        .map((node) => node.resourceId);
+
+      includedFolderIds = includedNodeDetails
+        .filter((node) => node.resourceType === 'folder')
+        .map((node) => node.resourceId);
+
+      includedDashboardIds = includedNodeDetails
+        .filter((node) => node.resourceType === 'dashboard')
+        .map((node) => node.resourceId);
+
+      includedWorkflowIds = includedNodeDetails
+        .filter((node) => node.resourceType === 'workflow')
+        .map((node) => node.resourceId);
+
+      includedAppIds = includedNodeDetails
+        .filter((node) => node.resourceType === 'app')
+        .map((node) => node.resourceId);
+
+      includedRoutineIds = includedNodeDetails
+        .filter((node) => node.resourceType === 'routine')
+        .map((node) => node.resourceId);
+
+      excludedTableIds = allNodes
+        .filter((node) => !allIncludedNodeIds.has(node.id))
+        .map((node) => node.resourceId);
+      excludedFolderIds = allNodes
+        .filter((node) => !allIncludedNodeIds.has(node.id))
+        .map((node) => node.resourceId);
+      excludedDashboardIds = allNodes
+        .filter((node) => !allIncludedNodeIds.has(node.id))
+        .map((node) => node.resourceId);
+      excludedWorkflowIds = allNodes
+        .filter((node) => !allIncludedNodeIds.has(node.id))
+        .map((node) => node.resourceId);
+      excludedAppIds = allNodes
+        .filter((node) => !allIncludedNodeIds.has(node.id))
+        .map((node) => node.resourceId);
+    }
+
+    return {
+      finalIncludeNodes,
+      includedTableIds,
+      includedFolderIds,
+      includedDashboardIds,
+      includedWorkflowIds,
+      includedAppIds,
+      includedRoutineIds,
+
+      excludedTableIds,
+      excludedFolderIds,
+      excludedDashboardIds,
+      excludedWorkflowIds,
+      excludedAppIds,
+    };
+  }
+
+  private async getDisconnectedLinkFieldTableMap(
+    tableIdMap: Record<string, string>,
+    fromBaseId: string,
+    nodes?: string[],
+    skipParentNodes: boolean = false
+  ): Promise<ILinkFieldTableMap> {
+    const tableId2DbFieldNameMap: ILinkFieldTableMap = {};
+    const { excludedTableIds } = await this.collectNodesAndResourceIds(
+      fromBaseId,
+      nodes,
+      skipParentNodes
+    );
+
+    if (!nodes?.length || !excludedTableIds?.length) {
+      return tableId2DbFieldNameMap;
+    }
+
+    const prisma = this.prismaService.txClient();
+    const allFieldRaws = await prisma.field.findMany({
+      where: {
+        tableId: { in: Object.keys(tableIdMap) },
+        deletedTime: null,
+      },
+    });
+
+    const disconnectedLinkFields = allFieldRaws
+      .filter(({ type, isLookup }) => type === FieldType.Link && !isLookup)
+      .map((f) => ({ ...createFieldInstanceByRaw(f), tableId: f.tableId }))
+      .filter((f) => excludedTableIds.includes((f.options as ILinkFieldOptions)?.foreignTableId));
+
+    Object.entries(groupBy(disconnectedLinkFields, 'tableId')).forEach(([tableId, fields]) => {
+      const info = fields.map(toLinkFieldTableInfo);
+      tableId2DbFieldNameMap[tableId] = info;
+      tableId2DbFieldNameMap[tableIdMap[tableId]] = info;
+    });
+
+    return tableId2DbFieldNameMap;
+  }
+
+  private async findV2DuplicateLinkFields(tableIds: string[]) {
+    const prisma = this.prismaService.txClient();
+    const fields: DuplicateLinkFieldRaw[] = [];
+
+    for (let index = 0; index < tableIds.length; index += v2DuplicateTableIdQueryChunkSize) {
+      const tableIdChunk = tableIds.slice(index, index + v2DuplicateTableIdQueryChunkSize);
+      let cursor: string | undefined;
+      let hasMore = true;
+
+      while (hasMore) {
+        const page = await prisma.field.findMany({
+          where: {
+            tableId: { in: tableIdChunk },
+            type: FieldType.Link,
+            OR: [{ isLookup: false }, { isLookup: null }],
+            deletedTime: null,
+          },
+          ...(cursor
+            ? {
+                cursor: {
+                  id: cursor,
+                },
+                skip: 1,
+              }
+            : {}),
+          select: {
+            id: true,
+            tableId: true,
+            dbFieldName: true,
+            isMultipleCellValue: true,
+            meta: true,
+            options: true,
+          },
+          orderBy: [{ tableId: 'asc' }, { id: 'asc' }],
+          take: v2DuplicateLinkFieldBatchSize,
+        });
+
+        fields.push(...page);
+
+        hasMore = page.length === v2DuplicateLinkFieldBatchSize;
+        if (hasMore) {
+          cursor = page[page.length - 1].id;
+        }
       }
     }
 
-    const afterQuery = this.knex('pg_indexes')
-      .select('*')
-      .where({
-        schemaname: toBaseId,
-      })
-      .where('indexname', 'like', 'index_%')
-      .toQuery();
-
-    const afterIndexedResult = await this.prismaService.txClient().$queryRawUnsafe<
-      {
-        schemaname: string;
-        tablename: string;
-        indexname: string;
-        indexdef: string;
-      }[]
-    >(afterQuery);
-
-    this.logger.log(afterIndexedResult, 'afterJunctionIndexed');
+    return fields;
   }
 
-  private async duplicateDbIndexes(
-    fromBaseId: string,
-    toBaseId: string,
-    old2NewViewIdMap: Record<string, string>
-  ) {
-    const query = this.knex('pg_indexes')
-      .select('*')
-      .where({
-        schemaname: fromBaseId,
-      })
-      .where('indexname', 'like', 'idx___row%')
-      .toQuery();
-
-    const beforeIndexedResult = await this.prismaService.txClient().$queryRawUnsafe<
-      {
-        schemaname: string;
-        tablename: string;
-        indexname: string;
-      }[]
-    >(query);
-
-    this.logger.log(beforeIndexedResult, 'beforeViewIndexed');
-
-    const indexSql = beforeIndexedResult
-      .map((item) => ({
-        oldViewId: item.indexname.substring('idx___row_'.length),
-        tablename: item.tablename,
-      }))
-      .filter(({ oldViewId }) => old2NewViewIdMap[oldViewId])
-      .map(({ oldViewId, tablename }) =>
-        this.knex.schema
-          .withSchema(toBaseId)
-          .alterTable(tablename, (table) => {
-            const newViewId = old2NewViewIdMap[oldViewId];
-            table.index([`${ROW_ORDER_FIELD_PREFIX}_${newViewId}`], `idx___row_${newViewId}`);
-          })
-          .toSQL()
-          .map((item) => item.sql)
-      )
-      .flat();
-
-    for (const sql of indexSql) {
-      await this.prismaService.txClient().$executeRawUnsafe(sql);
+  private parseLinkFieldOptions(options: string | null): ILinkFieldOptions | undefined {
+    if (!options) {
+      return undefined;
     }
 
-    const toBaseQuery = this.knex('pg_indexes')
-      .select('*')
-      .where({
-        schemaname: toBaseId,
-      })
-      .where('indexname', 'like', 'idx___row%')
-      .toQuery();
-    const afterIndexedResult = await this.prismaService.txClient().$queryRawUnsafe(toBaseQuery);
-    this.logger.log(afterIndexedResult, 'afterViewIndexed');
+    try {
+      return JSON.parse(options) as ILinkFieldOptions;
+    } catch {
+      return undefined;
+    }
+  }
 
-    await this.duplicateJunctionTableIndexes(fromBaseId, toBaseId);
+  private resolveV2LinkOrderColumnName(options: ILinkFieldOptions): string | undefined {
+    switch (options.relationship) {
+      case 'manyMany':
+        return '__order';
+      case 'oneMany':
+        return options.isOneWay ? '__order' : `${options.selfKeyName}_order`;
+      case 'manyOne':
+      case 'oneOne':
+        return `${options.foreignKeyName}_order`;
+      default:
+        return undefined;
+    }
+  }
+
+  private hasV2LinkOrderColumn(meta: string | null): boolean {
+    if (!meta) {
+      return false;
+    }
+
+    try {
+      return Boolean((JSON.parse(meta) as { hasOrderColumn?: unknown }).hasOrderColumn);
+    } catch {
+      return false;
+    }
+  }
+
+  private buildLinkFieldTableMap(
+    tableIdMap: Record<string, string>,
+    fields: DuplicateLinkFieldRaw[]
+  ): ILinkFieldTableMap {
+    const tableId2DbFieldNameMap: ILinkFieldTableMap = {};
+
+    Object.entries(groupBy(fields, 'tableId')).forEach(([tableId, fields]) => {
+      const info = fields.flatMap(({ dbFieldName, isMultipleCellValue, options }) => {
+        const parsedOptions = this.parseLinkFieldOptions(options);
+        if (!parsedOptions?.selfKeyName) {
+          return [];
+        }
+        return [
+          {
+            dbFieldName,
+            selfKeyName: parsedOptions.selfKeyName,
+            isMultipleCellValue: !!isMultipleCellValue,
+          },
+        ];
+      });
+
+      if (info.length) {
+        tableId2DbFieldNameMap[tableId] = info;
+        tableId2DbFieldNameMap[tableIdMap[tableId]] = info;
+      }
+    });
+
+    return tableId2DbFieldNameMap;
+  }
+
+  private async getV2InternalLinkRelationTableMap(
+    tableIdMap: Record<string, string>
+  ): Promise<Record<string, V2InternalLinkFieldTableInfo[]>> {
+    const tableIds = Object.keys(tableIdMap);
+    const fields = (await this.findV2DuplicateLinkFields(tableIds)).filter((field) => {
+      const options = this.parseLinkFieldOptions(field.options);
+      return (
+        options?.foreignTableId &&
+        !options.baseId &&
+        tableIdMap[options.foreignTableId] &&
+        options.fkHostTableName &&
+        options.selfKeyName &&
+        options.foreignKeyName
+      );
+    });
+
+    if (!fields.length) {
+      return {};
+    }
+
+    const tableId2Info: Record<string, V2InternalLinkFieldTableInfo[]> = {};
+    Object.entries(groupBy(fields, 'tableId')).forEach(([tableId, tableFields]) => {
+      const info = tableFields.flatMap((field) => {
+        const options = this.parseLinkFieldOptions(field.options);
+        const foreignTableId = options?.foreignTableId;
+        const lookupFieldId = options?.lookupFieldId;
+        if (
+          !foreignTableId ||
+          !lookupFieldId ||
+          !options?.relationship ||
+          !options.fkHostTableName ||
+          !options.selfKeyName ||
+          !options.foreignKeyName
+        ) {
+          return [];
+        }
+
+        return [
+          {
+            fieldId: field.id,
+            dbFieldName: field.dbFieldName,
+            foreignTableId,
+            lookupFieldId,
+            relationship: options.relationship,
+            fkHostTableName: options.fkHostTableName,
+            selfKeyName: options.selfKeyName,
+            foreignKeyName: options.foreignKeyName,
+            isOneWay: Boolean(options.isOneWay),
+            isMultipleCellValue: !!field.isMultipleCellValue,
+            orderColumnName: this.hasV2LinkOrderColumn(field.meta)
+              ? this.resolveV2LinkOrderColumnName(options)
+              : undefined,
+          },
+        ];
+      });
+
+      if (info.length) {
+        tableId2Info[tableId] = info;
+        tableId2Info[tableIdMap[tableId]] = info;
+      }
+    });
+
+    return tableId2Info;
+  }
+
+  private async getV2DisconnectedLinkFieldTableMap(
+    tableIdMap: Record<string, string>,
+    fromBaseId: string,
+    nodes?: string[],
+    skipParentNodes: boolean = false
+  ): Promise<ILinkFieldTableMap> {
+    const { excludedTableIds } = await this.collectNodesAndResourceIds(
+      fromBaseId,
+      nodes,
+      skipParentNodes
+    );
+
+    if (!nodes?.length || !excludedTableIds?.length) {
+      return {};
+    }
+
+    const fields = (await this.findV2DuplicateLinkFields(Object.keys(tableIdMap))).filter((field) =>
+      excludedTableIds.includes(this.parseLinkFieldOptions(field.options)?.foreignTableId ?? '')
+    );
+
+    return this.buildLinkFieldTableMap(tableIdMap, fields);
+  }
+
+  /**
+   * Physical storage info of the source (non-lookup) link fields for the v2
+   * bulk copier, filtered exactly like the legacy junction copier: cross-base
+   * links are dropped when cross-base references are not allowed, and links
+   * disconnected by a partial (nodes) duplication are dropped as well.
+   */
+  private async getV2BulkCopySourceLinkFields(params: {
+    fromBaseId: string;
+    sourceTableIds: string[];
+    allowCrossBase: boolean;
+    nodes?: string[];
+    skipParentNodes: boolean;
+  }): Promise<BulkCopySourceLinkField[]> {
+    const { fromBaseId, sourceTableIds, allowCrossBase, nodes, skipParentNodes } = params;
+    if (!sourceTableIds.length) {
+      return [];
+    }
+    const { excludedTableIds } = nodes?.length
+      ? await this.collectNodesAndResourceIds(fromBaseId, nodes, skipParentNodes)
+      : { excludedTableIds: undefined };
+
+    const prisma = this.prismaService.txClient();
+    const linkFieldRaws = await prisma.field.findMany({
+      where: {
+        tableId: { in: sourceTableIds },
+        type: FieldType.Link,
+        deletedTime: null,
+      },
+      select: { id: true, tableId: true, isLookup: true, options: true },
+    });
+
+    return linkFieldRaws
+      .filter((field) => !field.isLookup)
+      .map((field) => ({
+        tableId: field.tableId,
+        fieldId: field.id,
+        options: this.parseLinkFieldOptions(field.options),
+      }))
+      .filter(
+        (field): field is typeof field & { options: ILinkFieldOptions } =>
+          field.options !== undefined
+      )
+      .filter((field) => allowCrossBase || !field.options.baseId)
+      .filter(
+        (field) =>
+          !excludedTableIds?.length ||
+          !excludedTableIds.includes(field.options.foreignTableId ?? '')
+      )
+      .filter(
+        (field) =>
+          !!field.options.fkHostTableName &&
+          !!field.options.selfKeyName &&
+          !!field.options.foreignKeyName
+      )
+      .map((field) => ({
+        tableId: field.tableId,
+        fieldId: field.fieldId,
+        fkHostTableName: field.options.fkHostTableName!,
+        selfKeyName: field.options.selfKeyName!,
+        foreignKeyName: field.options.foreignKeyName!,
+      }));
+  }
+
+  async previewCrossSpaceAffectedFields(
+    fromBaseId: string,
+    destSpaceId: string
+  ): Promise<ICrossSpaceBaseAffectedField[]> {
+    if (isCrossSpaceReferenceAllowed()) return [];
+    const prisma = this.prismaService.txClient();
+    const tables = await prisma.tableMeta.findMany({
+      where: { baseId: fromBaseId, deletedTime: null },
+      select: { id: true, name: true },
+    });
+    if (!tables.length) return [];
+    const tableNameMap = new Map(tables.map((t) => [t.id, t.name]));
+    const tableIds = tables.map((t) => t.id);
+
+    const allFields = await prisma.field.findMany({
+      where: { tableId: { in: tableIds }, deletedTime: null },
+      select: {
+        id: true,
+        name: true,
+        type: true,
+        tableId: true,
+        isLookup: true,
+        isConditionalLookup: true,
+        options: true,
+        lookupOptions: true,
+      },
+    });
+
+    const inBaseTableIds = new Set(tableIds);
+    const foreignTableIds = Array.from(
+      new Set(
+        allFields
+          .map((f) => extractForeignTableId(f))
+          .filter((ft): ft is string => !!ft && !inBaseTableIds.has(ft))
+      )
+    );
+    if (!foreignTableIds.length) return [];
+
+    const foreignTables = await prisma.tableMeta.findMany({
+      where: { id: { in: foreignTableIds }, deletedTime: null },
+      select: { id: true, base: { select: { spaceId: true } } },
+    });
+    const foreignSpaceMap = new Map(foreignTables.map((t) => [t.id, t.base.spaceId]));
+
+    const affected = collectCrossSpaceAffectedFieldIds({
+      fields: allFields,
+      isForeignInternal: (ft) => inBaseTableIds.has(ft),
+      isForeignCrossSpace: (ft) => {
+        const s = foreignSpaceMap.get(ft);
+        return Boolean(s && s !== destSpaceId);
+      },
+    });
+
+    return allFields
+      .filter((f) => affected.has(f.id))
+      .map((f) => ({
+        fieldId: f.id,
+        fieldName: f.name,
+        type: f.type,
+        tableId: f.tableId,
+        tableName: tableNameMap.get(f.tableId) ?? '',
+      }));
+  }
+
+  private async getCrossBaseLinkFieldTableMap(
+    tableIdMap: Record<string, string>,
+    destSpaceId?: string
+  ): Promise<ILinkFieldTableMap> {
+    // destSpaceId narrows the value downgrade to cross-space links; with the
+    // escape hatch on, those keep their link values. The destSpaceId-less
+    // branch is the user-chosen "drop cross-base links" duplicate option and
+    // must keep downgrading regardless of the flag.
+    if (destSpaceId && isCrossSpaceReferenceAllowed()) return {};
+    const tableId2DbFieldNameMap: ILinkFieldTableMap = {};
+    const prisma = this.prismaService.txClient();
+    const allFieldRaws = await prisma.field.findMany({
+      where: {
+        tableId: { in: Object.keys(tableIdMap) },
+        deletedTime: null,
+      },
+    });
+
+    const linkFields = allFieldRaws
+      .filter(({ type, isLookup }) => type === FieldType.Link && !isLookup)
+      .map((f) => ({ ...createFieldInstanceByRaw(f), tableId: f.tableId }))
+      .filter((f) => (f.options as ILinkFieldOptions).baseId);
+
+    let crossBaseLinkFields = linkFields;
+    if (destSpaceId) {
+      const foreignBaseIds = Array.from(
+        new Set(
+          linkFields
+            .map((f) => (f.options as ILinkFieldOptions).baseId)
+            .filter((x): x is string => Boolean(x))
+        )
+      );
+      const bases = foreignBaseIds.length
+        ? await prisma.base.findMany({
+            where: { id: { in: foreignBaseIds }, deletedTime: null },
+            select: { id: true, spaceId: true },
+          })
+        : [];
+      const crossSpaceBaseIds = new Set(
+        bases.filter((b) => b.spaceId !== destSpaceId).map((b) => b.id)
+      );
+      crossBaseLinkFields = linkFields.filter((f) => {
+        const baseId = (f.options as ILinkFieldOptions).baseId;
+        return baseId && crossSpaceBaseIds.has(baseId);
+      });
+    }
+
+    Object.entries(groupBy(crossBaseLinkFields, 'tableId')).forEach(([tableId, fields]) => {
+      const info = fields.map(toLinkFieldTableInfo);
+      tableId2DbFieldNameMap[tableId] = info;
+      tableId2DbFieldNameMap[tableIdMap[tableId]] = info;
+    });
+
+    return tableId2DbFieldNameMap;
+  }
+
+  private async getV2CrossBaseLinkFieldTableMap(
+    tableIdMap: Record<string, string>,
+    destSpaceId?: string
+  ): Promise<ILinkFieldTableMap> {
+    // Same contract as getCrossBaseLinkFieldTableMap above.
+    if (destSpaceId && isCrossSpaceReferenceAllowed()) return {};
+    const linkFields = (await this.findV2DuplicateLinkFields(Object.keys(tableIdMap))).filter(
+      (field) => this.parseLinkFieldOptions(field.options)?.baseId
+    );
+
+    let crossBaseLinkFields = linkFields;
+    if (destSpaceId) {
+      const prisma = this.prismaService.txClient();
+      const foreignBaseIds = Array.from(
+        new Set(
+          linkFields
+            .map((field) => this.parseLinkFieldOptions(field.options)?.baseId)
+            .filter((baseId): baseId is string => Boolean(baseId))
+        )
+      );
+      const bases = foreignBaseIds.length
+        ? await prisma.base.findMany({
+            where: { id: { in: foreignBaseIds }, deletedTime: null },
+            select: { id: true, spaceId: true },
+          })
+        : [];
+      const crossSpaceBaseIds = new Set(
+        bases.filter((base) => base.spaceId !== destSpaceId).map((base) => base.id)
+      );
+      crossBaseLinkFields = linkFields.filter((field) => {
+        const baseId = this.parseLinkFieldOptions(field.options)?.baseId;
+        return baseId && crossSpaceBaseIds.has(baseId);
+      });
+    }
+
+    return this.buildLinkFieldTableMap(tableIdMap, crossBaseLinkFields);
+  }
+
+  private async duplicateTableData(
+    targetBaseId: string,
+    tableIdMap: Record<string, string>,
+    fieldIdMap: Record<string, string>,
+    viewIdMap: Record<string, string>,
+    crossBaseLinkFieldTableMap: ILinkFieldTableMap,
+    onProgress?: BaseImportProgressCallback
+  ): Promise<number> {
+    const prisma = this.getDataPrismaExecutor(
+      (await this.dataDbClientManager.dataPrismaForBase(targetBaseId, {
+        useTransaction: true,
+      })) as IDataPrismaScopedClient
+    );
+    const metaPrisma = this.prismaService.txClient();
+    const tableId2DbTableNameMap: Record<string, string> = {};
+    const tableId2NameMap: Record<string, string> = {};
+    const allTableId = Object.keys(tableIdMap).concat(Object.values(tableIdMap));
+    const tableRaws = await metaPrisma.tableMeta.findMany({
+      where: { id: { in: allTableId }, deletedTime: null },
+      select: {
+        id: true,
+        dbTableName: true,
+        name: true,
+      },
+    });
+    tableRaws.forEach((tableRaw) => {
+      tableId2DbTableNameMap[tableRaw.id] = tableRaw.dbTableName;
+      tableId2NameMap[tableRaw.id] = tableRaw.name;
+    });
+
+    const oldTableId = Object.keys(tableIdMap);
+
+    const dbTableNames = tableRaws.map((tableRaw) => tableRaw.dbTableName);
+
+    // Query total records count from all source tables before duplicating
+    let totalRecordsCount = 0;
+    for (const tableId of oldTableId) {
+      const sourceDbTableName = tableId2DbTableNameMap[tableId];
+      const countQuery = this.knex(sourceDbTableName).count('*', { as: 'count' }).toQuery();
+      const countResult = await prisma.$queryRawUnsafe<[{ count: bigint | number }]>(countQuery);
+      const tableRecordCount = Number(countResult[0]?.count || 0);
+      totalRecordsCount += tableRecordCount;
+    }
+
+    onProgress?.({
+      phase: 'table_data_start',
+      processedRows: 0,
+      batchProcessedRows: 0,
+      currentBatch: 0,
+      totalRows: totalRecordsCount,
+    });
+
+    const allForeignKeyInfos = [] as {
+      constraint_name: string;
+      column_name: string;
+      referenced_table_schema: string;
+      referenced_table_name: string;
+      referenced_column_name: string;
+      delete_rule: string;
+      dbTableName: string;
+    }[];
+
+    // delete foreign keys if(exist) then duplicate table data
+    for (const dbTableName of dbTableNames) {
+      const foreignKeysInfoSql = this.dbProvider.getForeignKeysInfo(dbTableName);
+      const foreignKeysInfo = await prisma.$queryRawUnsafe<
+        {
+          constraint_name: string;
+          column_name: string;
+          referenced_table_schema: string;
+          referenced_table_name: string;
+          referenced_column_name: string;
+          delete_rule: string;
+        }[]
+      >(foreignKeysInfoSql);
+      const newForeignKeyInfos = foreignKeysInfo.map((info) => ({
+        ...info,
+        dbTableName,
+      }));
+      allForeignKeyInfos.push(...newForeignKeyInfos);
+    }
+
+    for (const { constraint_name, column_name, dbTableName } of allForeignKeyInfos) {
+      const dropForeignKeyQuery = this.knex.schema
+        .alterTable(dbTableName, (table) => {
+          table.dropForeign(column_name, constraint_name);
+        })
+        .toQuery();
+
+      await prisma.$executeRawUnsafe(dropForeignKeyQuery);
+    }
+
+    const progressState = { processedRows: 0, totalRows: totalRecordsCount };
+    for (const tableId of oldTableId) {
+      await this.duplicateSingleTableData({
+        tableId,
+        tableIdMap,
+        fieldIdMap,
+        viewIdMap,
+        crossBaseLinkFieldTableMap,
+        tableId2DbTableNameMap,
+        tableId2NameMap,
+        prisma,
+        progressState,
+        onProgress,
+      });
+    }
+
+    for (const {
+      constraint_name: constraintName,
+      column_name: columnName,
+      referenced_table_schema: referencedTableSchema,
+      referenced_table_name: referencedTableName,
+      referenced_column_name: referencedColumnName,
+      delete_rule: deleteRule,
+      dbTableName,
+    } of allForeignKeyInfos) {
+      const addForeignKeyQuerySql = this.knex.schema
+        .alterTable(dbTableName, (table) => {
+          table
+            .foreign(columnName, constraintName)
+            .references(referencedColumnName)
+            .inTable(`${referencedTableSchema}.${referencedTableName}`)
+            .onDelete(toPostgresFkDeleteAction(deleteRule));
+        })
+        .toQuery();
+
+      await prisma.$executeRawUnsafe(addForeignKeyQuerySql);
+    }
+
+    onProgress?.({
+      phase: 'table_data_done',
+      processedRows: progressState.processedRows,
+      totalRows: totalRecordsCount,
+    });
+
+    return onProgress ? progressState.processedRows : totalRecordsCount;
+  }
+
+  private createDuplicateTableProgressOptions(
+    onProgress: BaseImportProgressCallback | undefined,
+    progressState: { processedRows: number; totalRows: number },
+    tableId: string,
+    tableName: string
+  ) {
+    if (!onProgress) {
+      return undefined;
+    }
+
+    return {
+      batchSize: v2DuplicateCopyBatchSize,
+      onProgress: (progress: { batchProcessedRows: number; currentBatch: number }) => {
+        progressState.processedRows += progress.batchProcessedRows;
+        onProgress({
+          phase: 'table_data_progress',
+          tableId,
+          tableName,
+          processedRows: progressState.processedRows,
+          batchProcessedRows: progress.batchProcessedRows,
+          currentBatch: progress.currentBatch,
+          totalRows: progressState.totalRows,
+        });
+      },
+    };
+  }
+
+  private async duplicateSingleTableData(params: {
+    tableId: string;
+    tableIdMap: Record<string, string>;
+    fieldIdMap: Record<string, string>;
+    viewIdMap: Record<string, string>;
+    crossBaseLinkFieldTableMap: ILinkFieldTableMap;
+    tableId2DbTableNameMap: Record<string, string>;
+    tableId2NameMap: Record<string, string>;
+    prisma: IDataPrismaExecutor;
+    progressState: { processedRows: number; totalRows: number };
+    onProgress?: BaseImportProgressCallback;
+  }) {
+    const {
+      tableId,
+      tableIdMap,
+      fieldIdMap,
+      viewIdMap,
+      crossBaseLinkFieldTableMap,
+      tableId2DbTableNameMap,
+      tableId2NameMap,
+      prisma,
+      progressState,
+      onProgress,
+    } = params;
+    const targetTableId = tableIdMap[tableId];
+    const sourceDbTableName = tableId2DbTableNameMap[tableId];
+    const targetDbTableName = tableId2DbTableNameMap[targetTableId];
+    const tableName = tableId2NameMap[tableId] ?? sourceDbTableName;
+    const processedRowsBeforeTable = progressState.processedRows;
+
+    try {
+      const tableRows = await this.tableDuplicateService.duplicateTableData(
+        sourceDbTableName,
+        targetDbTableName,
+        viewIdMap,
+        fieldIdMap,
+        crossBaseLinkFieldTableMap[tableId] || [],
+        prisma,
+        this.createDuplicateTableProgressOptions(
+          onProgress,
+          progressState,
+          targetTableId,
+          tableName
+        )
+      );
+      if (onProgress && progressState.processedRows === processedRowsBeforeTable && tableRows > 0) {
+        progressState.processedRows += tableRows;
+        onProgress({
+          phase: 'table_data_progress',
+          tableId: targetTableId,
+          tableName,
+          processedRows: progressState.processedRows,
+          batchProcessedRows: tableRows,
+          currentBatch: 1,
+          totalRows: progressState.totalRows,
+        });
+      }
+      onProgress?.({
+        phase: 'table_data_done',
+        tableId: targetTableId,
+        tableName,
+        processedRows: progressState.processedRows,
+        totalRows: progressState.totalRows,
+      });
+    } catch (error) {
+      this.logger.error(
+        `exc duplicate table data error: ${(error as Error)?.message}`,
+        (error as Error)?.stack
+      );
+      throw error;
+    }
+  }
+
+  private isRestoreSystemColumn(columnName: string) {
+    return [
+      '__version',
+      '__auto_number',
+      '__created_time',
+      '__created_by',
+      '__last_modified_time',
+      '__last_modified_by',
+    ].includes(columnName);
+  }
+
+  private parseJsonCellValue(value: unknown) {
+    if (typeof value !== 'string') {
+      return value;
+    }
+
+    try {
+      return JSON.parse(value);
+    } catch {
+      return value;
+    }
+  }
+
+  private isJsonDbField(dbFieldType?: string | null) {
+    return typeof dbFieldType === 'string' && dbFieldType.toLowerCase() === 'json';
+  }
+
+  private toRestoreString(value: unknown) {
+    if (value instanceof Date) {
+      return value.toISOString();
+    }
+    return String(value);
+  }
+
+  private parsePostgresTextArrayLiteral(value: string): string[] | undefined {
+    if (!value.startsWith('{') || !value.endsWith('}')) {
+      return undefined;
+    }
+
+    const inner = value.slice(1, -1);
+    if (!inner) {
+      return [];
+    }
+
+    return splitPostgresTextArrayItems(inner);
+  }
+
+  private async *createSourceTableRecordRows(
+    sourceBaseId: string,
+    sourceDbTableName: string,
+    crossBaseLinkInfo: ILinkFieldTableInfo[],
+    internalLinkInfo: V2InternalLinkFieldTableInfo[] = []
+  ): AsyncGenerator<Record<string, unknown>> {
+    let lastAutoNumber = 0;
+
+    while (true) {
+      const { rows, normalizedRows } = await this.dataDbClientManager.withDataKnexConnectionForBase(
+        sourceBaseId,
+        async (dataKnex, connection) => {
+          const rows = await dataKnex<Record<string, unknown>>(sourceDbTableName)
+            .connection(connection)
+            .select('*')
+            .where('__auto_number', '>', lastAutoNumber)
+            .orderBy('__auto_number', 'asc')
+            .limit(v2DuplicateReadBatchSize);
+          const sourceRecordIds = rows.flatMap((row) =>
+            typeof row.__id === 'string' ? [row.__id] : []
+          );
+          const normalizedRows = await this.normalizeInternalLinkColumns(
+            dataKnex,
+            connection,
+            rows.map((row) => this.normalizeCrossBaseLinkColumns(row, crossBaseLinkInfo)),
+            sourceRecordIds,
+            internalLinkInfo
+          );
+          return { rows, normalizedRows };
+        },
+        { useTransaction: true }
+      );
+      if (!rows.length) {
+        return;
+      }
+
+      for (const row of normalizedRows) {
+        yield row;
+      }
+
+      lastAutoNumber = Number(rows[rows.length - 1]?.__auto_number ?? lastAutoNumber);
+    }
+  }
+
+  private normalizeCrossBaseLinkColumns(
+    row: Record<string, unknown>,
+    crossBaseLinkInfo: ILinkFieldTableInfo[]
+  ) {
+    if (!crossBaseLinkInfo.length) {
+      return row;
+    }
+
+    const nextRow = { ...row };
+    for (const { dbFieldName, isMultipleCellValue } of crossBaseLinkInfo) {
+      if (!(dbFieldName in nextRow)) {
+        continue;
+      }
+
+      nextRow[dbFieldName] = this.toCrossBaseLinkTitle(nextRow[dbFieldName], isMultipleCellValue);
+    }
+
+    return nextRow;
+  }
+
+  private async normalizeInternalLinkColumns(
+    dataKnex: Knex,
+    connection: PoolClient,
+    rows: Record<string, unknown>[],
+    sourceRecordIds: string[],
+    internalLinkInfo: V2InternalLinkFieldTableInfo[]
+  ) {
+    if (!rows.length || !internalLinkInfo.length) {
+      return rows;
+    }
+
+    const rowsById = new Map(
+      rows.flatMap((row) => (typeof row.__id === 'string' ? ([[row.__id, row]] as const) : []))
+    );
+    clearInternalLinkColumns(rows, internalLinkInfo);
+
+    if (!sourceRecordIds.length) {
+      return rows;
+    }
+
+    for (const info of internalLinkInfo) {
+      const relations = await this.findV2InternalLinkRelations(
+        dataKnex,
+        connection,
+        sourceRecordIds,
+        info
+      );
+      applyInternalLinkRelations(rowsById, relations, info);
+    }
+
+    return rows;
+  }
+
+  private async findV2InternalLinkRelations(
+    dataKnex: Knex,
+    connection: PoolClient,
+    sourceRecordIds: string[],
+    info: V2InternalLinkFieldTableInfo
+  ): Promise<Map<string, V2LinkCellItem[]>> {
+    if (info.relationship === 'manyMany' || (info.relationship === 'oneMany' && info.isOneWay)) {
+      return this.findV2JunctionLinkRelations(dataKnex, connection, sourceRecordIds, info);
+    }
+
+    if (
+      (info.relationship === 'manyOne' || info.relationship === 'oneOne') &&
+      info.foreignKeyName !== '__id'
+    ) {
+      return this.findV2CurrentTableFkLinkRelations(dataKnex, connection, sourceRecordIds, info);
+    }
+
+    if (
+      info.relationship === 'oneMany' ||
+      ((info.relationship === 'manyOne' || info.relationship === 'oneOne') &&
+        info.foreignKeyName === '__id')
+    ) {
+      return this.findV2ForeignTableFkLinkRelations(dataKnex, connection, sourceRecordIds, info);
+    }
+
+    return new Map();
+  }
+
+  private async findV2JunctionLinkRelations(
+    dataKnex: Knex,
+    connection: PoolClient,
+    sourceRecordIds: string[],
+    info: V2InternalLinkFieldTableInfo
+  ): Promise<Map<string, V2LinkCellItem[]>> {
+    const relationRows = await dataKnex(info.fkHostTableName)
+      .connection(connection)
+      .select({
+        sourceRecordId: info.selfKeyName,
+        foreignRecordId: info.foreignKeyName,
+      })
+      .whereIn(info.selfKeyName, sourceRecordIds)
+      .orderBy(info.orderColumnName || info.foreignKeyName, 'asc');
+
+    return this.groupLinkRelationRows(relationRows);
+  }
+
+  private async findV2CurrentTableFkLinkRelations(
+    dataKnex: Knex,
+    connection: PoolClient,
+    sourceRecordIds: string[],
+    info: V2InternalLinkFieldTableInfo
+  ): Promise<Map<string, V2LinkCellItem[]>> {
+    const relationRows = await dataKnex(info.fkHostTableName)
+      .connection(connection)
+      .select({
+        sourceRecordId: info.selfKeyName,
+        foreignRecordId: info.foreignKeyName,
+      })
+      .whereIn(info.selfKeyName, sourceRecordIds)
+      .whereNotNull(info.foreignKeyName);
+
+    return this.groupLinkRelationRows(relationRows);
+  }
+
+  private async findV2ForeignTableFkLinkRelations(
+    dataKnex: Knex,
+    connection: PoolClient,
+    sourceRecordIds: string[],
+    info: V2InternalLinkFieldTableInfo
+  ): Promise<Map<string, V2LinkCellItem[]>> {
+    const query = dataKnex(info.fkHostTableName)
+      .connection(connection)
+      .select({
+        sourceRecordId: info.selfKeyName,
+        foreignRecordId: info.foreignKeyName,
+      })
+      .whereIn(info.selfKeyName, sourceRecordIds);
+    const relationRows = info.orderColumnName
+      ? await query.orderBy(info.orderColumnName, 'asc')
+      : await query;
+
+    return this.groupLinkRelationRows(relationRows);
+  }
+
+  private groupLinkRelationRows(
+    relationRows: Array<{ sourceRecordId?: unknown; foreignRecordId?: unknown }>
+  ): Map<string, V2LinkCellItem[]> {
+    const relations = new Map<string, V2LinkCellItem[]>();
+    for (const { sourceRecordId, foreignRecordId } of relationRows) {
+      if (typeof sourceRecordId !== 'string' || typeof foreignRecordId !== 'string') {
+        continue;
+      }
+      const items = relations.get(sourceRecordId) ?? [];
+      items.push({ id: foreignRecordId });
+      relations.set(sourceRecordId, items);
+    }
+
+    return relations;
+  }
+
+  private toCrossBaseLinkTitle(value: unknown, isMultipleCellValue: boolean): unknown {
+    if (value == null) {
+      return value;
+    }
+
+    if (typeof value === 'string') {
+      try {
+        return this.toCrossBaseLinkTitle(JSON.parse(value), isMultipleCellValue);
+      } catch {
+        const arrayValue = this.parsePostgresTextArrayLiteral(value);
+        if (arrayValue) {
+          return this.toCrossBaseLinkTitle(arrayValue, isMultipleCellValue);
+        }
+        return value;
+      }
+    }
+
+    if (Array.isArray(value)) {
+      const titles = value
+        .map((item) => this.toCrossBaseLinkTitle(item, false))
+        .filter((item): item is string => typeof item === 'string' && Boolean(item));
+      return isMultipleCellValue ? titles.join(', ') : titles[0];
+    }
+
+    return value && typeof value === 'object' && 'title' in value
+      ? String((value as { title?: unknown }).title ?? '')
+      : value;
   }
 
   private async duplicateAttachments(
-    old2NewTableIdMap: Record<string, string>,
-    old2NewFieldIdMap: Record<string, string>
+    targetBaseId: string,
+    tableIdMap: Record<string, string>,
+    fieldIdMap: Record<string, string>
   ) {
-    const tableIds = Object.keys(old2NewTableIdMap);
-    const attachmentIndexes = await this.prismaService.txClient().attachmentsTable.findMany({
-      where: { tableId: { in: tableIds } },
-    });
-
-    const userId = this.cls.get('user.id');
-    for (const attachmentIndex of attachmentIndexes) {
-      const newTableId = old2NewTableIdMap[attachmentIndex.tableId];
-      const newFieldId = old2NewFieldIdMap[attachmentIndex.fieldId];
-      await this.prismaService.txClient().attachmentsTable.create({
-        data: {
-          ...attachmentIndex,
-          id: undefined,
-          tableId: newTableId,
-          fieldId: newFieldId,
-          createdBy: userId,
-          createdTime: new Date(),
-        },
-      });
+    const dataPrisma = this.getDataPrismaExecutor(
+      (await this.dataDbClientManager.dataPrismaForBase(targetBaseId, {
+        useTransaction: true,
+      })) as IDataPrismaScopedClient
+    );
+    for (const [sourceTableId, targetTableId] of Object.entries(tableIdMap)) {
+      await this.tableDuplicateService.duplicateAttachments(
+        sourceTableId,
+        targetTableId,
+        fieldIdMap,
+        dataPrisma
+      );
     }
   }
 
-  async duplicate(duplicateBaseRo: IDuplicateBaseRo): Promise<ICreateBaseVo> {
-    const { fromBaseId, withRecords } = duplicateBaseRo;
-    const newBase = await this.duplicateBaseMeta(duplicateBaseRo);
-    const toBaseId = newBase.id;
-    const old2NewTableIdMap = await this.duplicateTableMeta(fromBaseId, toBaseId);
-    this.logger.log(old2NewTableIdMap, 'old2NewTableIdMap');
-    const old2NewFieldIdMap = await this.duplicateFields(toBaseId, old2NewTableIdMap);
-    this.logger.log(old2NewFieldIdMap, 'old2NewFieldIdMap');
-    const old2NewViewIdMap = await this.duplicateViews(old2NewTableIdMap, old2NewFieldIdMap);
-    this.logger.log(old2NewViewIdMap, 'old2NewViewIdMap');
-    await this.duplicateReferences(old2NewFieldIdMap);
-    await this.duplicateDbTable(fromBaseId, toBaseId, old2NewViewIdMap, withRecords);
-    await this.duplicateDbIndexes(fromBaseId, toBaseId, old2NewViewIdMap);
-    if (withRecords) {
-      await this.duplicateAttachments(old2NewTableIdMap, old2NewFieldIdMap);
-    }
-    return newBase;
+  private async duplicateLinkJunction(
+    targetBaseId: string,
+    tableIdMap: Record<string, string>,
+    fieldIdMap: Record<string, string>,
+    allowCrossBase: boolean = true,
+    disconnectedLinkFieldIds?: string[]
+  ) {
+    const dataPrisma = this.getDataPrismaExecutor(
+      (await this.dataDbClientManager.dataPrismaForBase(targetBaseId, {
+        useTransaction: true,
+      })) as IDataPrismaScopedClient
+    );
+    await this.tableDuplicateService.duplicateLinkJunction(
+      tableIdMap,
+      fieldIdMap,
+      allowCrossBase,
+      dataPrisma,
+      disconnectedLinkFieldIds
+    );
   }
 }

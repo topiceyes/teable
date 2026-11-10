@@ -1,0 +1,99 @@
+{
+  "add": "Nueva App OAuth",
+  "title": {
+    "add": "Nueva App OAuth",
+    "edit": "Editar App OAuth",
+    "description": "Las apps de Teable pueden actuar en su propio nombre y ejecutar operaciones directamente a través de la API, sin suplantar a un usuario. Consulta nuestra <a>documentación de ayuda</a> para más información."
+  },
+  "form": {
+    "name": {
+      "label": "Nombre de la App OAuth",
+      "description": "El nombre de tu App OAuth."
+    },
+    "description": {
+      "label": "Descripción"
+    },
+    "homePageUrl": {
+      "label": "URL de la página principal",
+      "description": "La URL completa del sitio web de tu App OAuth."
+    },
+    "logo": {
+      "label": "Logo",
+      "description": "Se recomienda una imagen cuadrada.",
+      "placeholder": "Arrastra y suelta tu logo aquí o haz clic para subir",
+      "button": "Subir un logo",
+      "clear": "Limpiar",
+      "lengthError": "Solo se permite un archivo.",
+      "typeError": "Solo se permiten archivos de imagen."
+    },
+    "callbackUrl": {
+      "label": "URL de callback",
+      "description": "La URL completa a la que redirigir después de que un usuario autorice tu integración.",
+      "add": "Agregar URL de callback"
+    },
+    "deviceFlow": {
+      "label": "Habilitar el flujo de dispositivo",
+      "description": "Permite que esta aplicación inicie la sesión de los usuarios con un código de un solo uso introducido en un navegador (para CLI y dispositivos sin navegador). Cualquiera que conozca el ID de cliente puede iniciar este flujo en nombre de tu aplicación, así que actívalo solo si tu aplicación lo necesita."
+    },
+    "secret": {
+      "label": "Client secrets",
+      "add": "Generar un nuevo client secret",
+      "newDescription": "Asegúrate de copiar tu nuevo client secret ahora. No podrás verlo nuevamente.",
+      "empty": "Necesitas un client secret para autenticarte como la aplicación en la API.",
+      "lastUsed": "Último uso el {{date}}",
+      "tag": "Client secret",
+      "neverUsed": "Nunca usado"
+    },
+    "clientId": {
+      "label": "Client ID: "
+    }
+  },
+  "formType": {
+    "basic": "Información básica",
+    "scopes": "Escopas",
+    "identify": "Identificar y autorizar a los usuarios",
+    "clientInfo": "Información del cliente"
+  },
+  "decision": {
+    "title": "{{name}} está solicitando acceso a su cuenta",
+    "scopes": "Esta aplicación podrá obtener los siguientes ámbitos:",
+    "redirectDescription": "La autorización redirigirá a",
+    "authorize": "Autorizar"
+  },
+  "mcpDecision": {
+    "title": "Conectar Teable MCP",
+    "subtitle": "Conceder a <b>{{name}}</b> acceso a Teable",
+    "capabilities": "A través de Teable MCP, <b>{{name}}</b> podrá:",
+    "ability1": "Ver y editar tablas, campos, vistas, registros, automatizaciones y aplicaciones según sus permisos en cada proyecto",
+    "ability2": "Actuar en su nombre; las acciones se registran bajo esta aplicación",
+    "ability3": "Usar todos los proyectos a los que tiene acceso",
+    "redirectTitle": "Será redirigido a:",
+    "trustRedirect": "Reconozco y confío en esta URL",
+    "continue": "Continuar"
+  },
+  "device": {
+    "title": "Conectar un dispositivo",
+    "description": "Introduce el código de 8 caracteres que se muestra en tu terminal para iniciar sesión en tu cuenta desde ese dispositivo.",
+    "submit": "Continuar",
+    "invalidCode": "Ese código no es válido o ha caducado. Revisa tu terminal e inténtalo de nuevo.",
+    "codeUsed": "Ese código ya se ha usado. Vuelve a ejecutar el comando de inicio de sesión para obtener un código nuevo.",
+    "deviceFlowDisabled": "Esta aplicación no permite iniciar sesión con un código de dispositivo.",
+    "codeLabel": "Código de autorización",
+    "confirmCode": "Asegúrate de que coincide con el código que se muestra en tu terminal.",
+    "securityTitle": "Advertencia de seguridad",
+    "phishingHint": "Los códigos de dispositivo son un objetivo habitual del phishing y pueden usarse para iniciar sesión en tu cuenta. No compartas nunca el tuyo y continúa solo si has iniciado tú mismo este inicio de sesión.",
+    "phishingHintStrong": "Si no tenías intención de abrir esta página o el enlace te lo ha enviado otra persona, cierra esta pestaña.",
+    "approvedTitle": "Dispositivo conectado",
+    "approvedDescription": "Puedes cerrar esta página y volver a tu terminal.",
+    "deniedTitle": "Solicitud denegada",
+    "deniedDescription": "No se ha concedido acceso a ese dispositivo. Puedes cerrar esta página."
+  },
+  "help": {
+    "link": "https://help.teable.ai/en/api-doc/oauth",
+    "title": "Más información"
+  },
+  "deleteConfirm": {
+    "title": "Eliminar app de OAuth",
+    "description": "¿Seguro que quieres eliminar la app de OAuth {{name}}? Esta acción no se puede deshacer."
+  }
+}

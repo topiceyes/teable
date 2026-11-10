@@ -1,6 +1,6 @@
 import { IdPrefix } from '../../utils';
-import { z } from '../../zod';
-import { StatisticsFunc } from '../aggregation/statistics-func.enum';
+import { strictUnionMember, z } from '../../zod';
+import { StatisticsFunc } from '../aggregation';
 
 export const fieldsViewVisibleRoSchema = z.object({
   viewFields: z
@@ -18,7 +18,13 @@ export type IGridColumnMeta = z.infer<typeof gridColumnMetaSchema>;
 
 export type IKanbanColumnMeta = z.infer<typeof kanbanColumnMetaSchema>;
 
+export type IGalleryColumnMeta = z.infer<typeof galleryColumnMetaSchema>;
+
+export type ICalendarColumnMeta = z.infer<typeof calendarColumnMetaSchema>;
+
 export type IFormColumnMeta = z.infer<typeof formColumnMetaSchema>;
+
+export type IPluginColumnMeta = z.infer<typeof pluginColumnMetaSchema>;
 
 export type IColumn = z.infer<typeof columnSchema>;
 
@@ -28,50 +34,70 @@ export type IKanbanColumn = z.infer<typeof kanbanColumnSchema>;
 
 export type IFormColumn = z.infer<typeof formColumnSchema>;
 
+export type IPluginColumn = z.infer<typeof pluginColumnSchema>;
+
 export const columnSchemaBase = z
   .object({
-    order: z.number().openapi({
+    order: z.number().meta({
       description: 'Order is a floating number, column will sort by it in the view.',
     }),
   })
-  .openapi({
+  .meta({
     description: 'A mapping of field IDs to their corresponding column metadata.',
   });
 
-export const gridColumnSchema = columnSchemaBase.merge(
-  z.object({
-    width: z.number().optional().openapi({
-      description: 'Column width in the view.',
-    }),
-    hidden: z.boolean().optional().openapi({
-      description: 'If column hidden in the view.',
-    }),
-    statisticFunc: z.nativeEnum(StatisticsFunc).nullable().optional().openapi({
-      description: 'Statistic function of the column in the view.',
-    }),
-  })
-);
+export const gridColumnSchema = columnSchemaBase.extend({
+  width: z.number().optional().meta({
+    description: 'Column width in the view.',
+  }),
+  hidden: z.boolean().optional().meta({
+    description: 'If column hidden in the view.',
+  }),
+  statisticFunc: z.enum(StatisticsFunc).nullable().optional().meta({
+    description: 'Statistic function of the column in the view.',
+  }),
+});
 
-export const kanbanColumnSchema = columnSchemaBase.merge(
-  z.object({
-    hidden: z.boolean().optional().openapi({
-      description: 'If column hidden in the view.',
-    }),
-  })
-);
+export const kanbanColumnSchema = columnSchemaBase.extend({
+  visible: z.boolean().optional().meta({
+    description: 'If column visible in the kanban view.',
+  }),
+});
 
-export const formColumnSchema = columnSchemaBase.merge(
-  z.object({
-    visible: z.boolean().optional().openapi({
-      description: 'If column visible in the view.',
-    }),
-    required: z.boolean().optional().openapi({
-      description: 'If column is required.',
-    }),
-  })
-);
+export const galleryColumnSchema = columnSchemaBase.extend({
+  visible: z.boolean().optional().meta({
+    description: 'If column visible in the gallery view.',
+  }),
+});
 
-export const columnSchema = z.union([gridColumnSchema, kanbanColumnSchema, formColumnSchema]);
+export const calendarColumnSchema = columnSchemaBase.extend({
+  visible: z.boolean().optional().meta({
+    description: 'If column visible in the calendar view.',
+  }),
+});
+
+export const formColumnSchema = columnSchemaBase.extend({
+  visible: z.boolean().optional().meta({
+    description: 'If column visible in the view.',
+  }),
+  required: z.boolean().optional().meta({
+    description: 'If column is required.',
+  }),
+});
+
+export const pluginColumnSchema = columnSchemaBase.extend({
+  hidden: z.boolean().optional().meta({
+    description: 'If column hidden in the view.',
+  }),
+});
+
+export const columnSchema = z.union([
+  strictUnionMember(gridColumnSchema),
+  strictUnionMember(kanbanColumnSchema),
+  strictUnionMember(galleryColumnSchema),
+  strictUnionMember(formColumnSchema),
+  strictUnionMember(pluginColumnSchema),
+]);
 
 export const columnMetaSchema = z.record(z.string().startsWith(IdPrefix.Field), columnSchema);
 
@@ -85,9 +111,24 @@ export const kanbanColumnMetaSchema = z.record(
   kanbanColumnSchema
 );
 
+export const galleryColumnMetaSchema = z.record(
+  z.string().startsWith(IdPrefix.Field),
+  galleryColumnSchema
+);
+
+export const calendarColumnMetaSchema = z.record(
+  z.string().startsWith(IdPrefix.Field),
+  calendarColumnSchema
+);
+
 export const formColumnMetaSchema = z.record(
   z.string().startsWith(IdPrefix.Field),
   formColumnSchema
+);
+
+export const pluginColumnMetaSchema = z.record(
+  z.string().startsWith(IdPrefix.Field),
+  pluginColumnSchema
 );
 
 export const columnMetaRoSchema = z
@@ -96,11 +137,12 @@ export const columnMetaRoSchema = z
       .string()
       .startsWith(IdPrefix.Field)
       .describe('Field ID')
-      .openapi({ description: 'Field ID' }),
+      .meta({ description: 'Field ID' }),
     columnMeta: z.union([
-      gridColumnSchema.partial().strict(),
-      kanbanColumnSchema.partial().strict(),
-      formColumnSchema.partial().strict(),
+      strictUnionMember(gridColumnSchema.partial()),
+      strictUnionMember(kanbanColumnSchema.partial()),
+      strictUnionMember(formColumnSchema.partial()),
+      strictUnionMember(pluginColumnSchema.partial()),
     ]),
   })
   .array();

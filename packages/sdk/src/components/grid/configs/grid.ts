@@ -1,6 +1,6 @@
 import { DragRegionType, RegionType } from '../interface';
 
-export const GRID_CONTAINER_ID = '__t_grid_container_id';
+export const GRID_CONTAINER_ATTR = 'data-t-grid-container';
 
 export const GRID_DEFAULT = {
   // Row
@@ -31,9 +31,11 @@ export const GRID_DEFAULT = {
   cellVerticalPaddingLG: 16,
   cellTextLineHeight: 22,
   fillHandlerSize: 5,
+  fillHandlerPadding: 8,
 
   // Statistics
   columnStatisticHeight: 40,
+  minColumnStatisticWidth: 110,
 
   // Others
   scrollBuffer: 100,
@@ -42,6 +44,7 @@ export const GRID_DEFAULT = {
   cellScrollBarMinHeight: 16,
   cellScrollBarPaddingX: 1,
   cellScrollBarPaddingY: 4,
+  cellEditorEdgePadding: 32,
 };
 
 export const DEFAULT_MOUSE_STATE = {

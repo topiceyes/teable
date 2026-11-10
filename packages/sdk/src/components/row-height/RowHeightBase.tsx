@@ -1,61 +1,92 @@
-import { RowHeightLevel } from '@teable/core';
-import { DivideSquare, Menu, Square, StretchHorizontal } from '@teable/icons';
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from '@teable/ui-lib';
+import type { RowHeightLevel } from '@teable/core';
+import { DropdownMenuCheckboxItem, DropdownMenuLabel, DropdownMenuSeparator } from '@teable/ui-lib';
 import React from 'react';
-
-// eslint-disable-next-line @typescript-eslint/naming-convention
-export const ROW_HEIGHT_MENU_ITEMS = [
-  {
-    label: 'Short',
-    value: RowHeightLevel.Short,
-    Icon: Menu,
-  },
-  {
-    label: 'Medium',
-    value: RowHeightLevel.Medium,
-    Icon: StretchHorizontal,
-  },
-  {
-    label: 'Tall',
-    value: RowHeightLevel.Tall,
-    Icon: DivideSquare,
-  },
-  {
-    label: 'ExtraTall',
-    value: RowHeightLevel.ExtraTall,
-    Icon: Square,
-  },
-];
+import { useTranslation } from '../../context/app/i18n';
+import { AdaptiveMenu } from '../adaptive-panel';
+import { ReadOnlyTip } from '../ReadOnlyTip';
+import { useFieldNameDisplayLinesNodes } from './useFieldNameDisplayLinesNodes';
+import { useRowHeightNodes } from './useRowHeightNodes';
 
 interface IRowHeightBaseProps {
-  value?: RowHeightLevel;
-  onChange?: (value: RowHeightLevel) => void;
+  rowHeight?: RowHeightLevel;
+  fieldNameDisplayLines?: number;
+  onChange?: (type: 'rowHeight' | 'fieldNameDisplayLines', value: RowHeightLevel | number) => void;
+  /** Render as a bottom drawer on narrow viewports. Toolbar call sites only. */
+  responsive?: boolean;
   children: React.ReactNode;
 }
 
 export const RowHeightBase = (props: IRowHeightBaseProps) => {
-  const { onChange, children } = props;
+  const { rowHeight, fieldNameDisplayLines, responsive, children, onChange } = props;
+
+  const { t } = useTranslation();
+  const rowHeightMenuItems = useRowHeightNodes();
+  const fieldNameDisplayLinesMenuItems = useFieldNameDisplayLinesNodes();
 
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>{children}</DropdownMenuTrigger>
-      <DropdownMenuContent side="bottom" align="start" className="w-40 p-0">
-        {ROW_HEIGHT_MENU_ITEMS.map(({ label, value: valueInner, Icon }) => (
-          <DropdownMenuItem
-            className="cursor-pointer"
-            key={valueInner}
-            onClick={() => onChange?.(valueInner)}
-          >
-            <Icon className="pr-1 text-lg" />
-            {label}
-          </DropdownMenuItem>
-        ))}
-      </DropdownMenuContent>
-    </DropdownMenu>
+    <AdaptiveMenu
+      responsive={responsive}
+      title={t('rowHeight.title')}
+      desktopClassName="relative w-52 p-0"
+      overlay={<ReadOnlyTip />}
+      sections={[
+        {
+          key: 'rowHeight',
+          // No visible label: the drawer heading already says "Row height",
+          // and repeating it reads as "Row height / Row height / Short".
+          ariaLabel: t('rowHeight.title'),
+          value: rowHeight,
+          options: rowHeightMenuItems,
+          onSelect: (value) => onChange?.('rowHeight', value as RowHeightLevel),
+        },
+        {
+          key: 'fieldNameDisplayLines',
+          label: t('fieldNameConfig.title'),
+          value: fieldNameDisplayLines,
+          options: fieldNameDisplayLinesMenuItems,
+          onSelect: (value) => onChange?.('fieldNameDisplayLines', value as number),
+        },
+      ]}
+      desktop={
+        <>
+          <ReadOnlyTip />
+          <DropdownMenuLabel className="px-4 py-2 text-xs font-normal text-muted-foreground">
+            {t('rowHeight.title')}
+          </DropdownMenuLabel>
+          <div className="flex flex-col px-2">
+            {rowHeightMenuItems.map(({ label, value: valueInner, Icon }) => (
+              <DropdownMenuCheckboxItem
+                className="cursor-pointer rounded-md hover:bg-accent"
+                key={valueInner}
+                checked={rowHeight === valueInner}
+                onClick={() => onChange?.('rowHeight', valueInner)}
+              >
+                <Icon className="pe-1 text-lg" />
+                {label}
+              </DropdownMenuCheckboxItem>
+            ))}
+          </div>
+          <DropdownMenuSeparator />
+          <DropdownMenuLabel className="px-4 py-2 text-xs font-normal text-muted-foreground">
+            {t('fieldNameConfig.title')}
+          </DropdownMenuLabel>
+          <div className="flex flex-col px-2">
+            {fieldNameDisplayLinesMenuItems.map(({ label, value: valueInner, Icon }) => (
+              <DropdownMenuCheckboxItem
+                className="cursor-pointer rounded-md hover:bg-accent"
+                key={valueInner}
+                checked={fieldNameDisplayLines === valueInner}
+                onClick={() => onChange?.('fieldNameDisplayLines', valueInner)}
+              >
+                <Icon className="pe-1 text-lg" />
+                {label}
+              </DropdownMenuCheckboxItem>
+            ))}
+          </div>
+        </>
+      }
+    >
+      {children}
+    </AdaptiveMenu>
   );
 };

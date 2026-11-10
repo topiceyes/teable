@@ -1,30 +1,24 @@
 import dayjs, { extend } from 'dayjs';
+import customParseFormat from 'dayjs/plugin/customParseFormat';
 import timezone from 'dayjs/plugin/timezone';
+import utc from 'dayjs/plugin/utc';
 import { z } from 'zod';
+import { isoDateTimeSchema } from '../../../utils/iso-datetime';
 import type { FieldType, CellValueType } from '../constant';
 import { FieldCore } from '../field';
-import {
-  datetimeFormattingSchema,
-  defaultDatetimeFormatting,
-  formatDateToString,
-} from '../formatting';
+import type { IFieldVisitor } from '../field-visitor.interface';
+import { TimeFormatting, defaultDatetimeFormatting, formatDateToString } from '../formatting';
+import type { IDateFieldOptions } from './date-option.schema';
+import { dateFieldOptionsSchema } from './date-option.schema';
 
 extend(timezone);
+extend(customParseFormat);
+extend(utc);
 
-export const dateFieldOptionsSchema = z.object({
-  formatting: datetimeFormattingSchema,
-  defaultValue: z
-    .enum(['now'] as const)
-    .optional()
-    .openapi({
-      description:
-        'Whether the new row is automatically filled with the current time, caveat: the defaultValue is just a flag, it dose not effect the storing value of the record',
-    }),
-});
-
-export type IDateFieldOptions = z.infer<typeof dateFieldOptionsSchema>;
-
-export const dataFieldCellValueSchema = z.string().datetime({ precision: 3, offset: true });
+// Stored date/time values can come from client-side `Date.toISOString()` (millisecond precision)
+// or from database JSON aggregation (which may omit fractional seconds when zero).
+// Accept both, while still requiring an explicit timezone offset (e.g. `Z`, `+00:00`).
+export const dataFieldCellValueSchema = isoDateTimeSchema({ offset: true });
 
 export type IDateCellValue = z.infer<typeof dataFieldCellValueSchema>;
 
@@ -33,12 +27,18 @@ export class DateFieldCore extends FieldCore {
 
   options!: IDateFieldOptions;
 
+  meta?: undefined;
+
   cellValueType!: CellValueType.DateTime;
 
   static defaultOptions(): IDateFieldOptions {
     return {
       formatting: defaultDatetimeFormatting,
     };
+  }
+
+  getDatetimeFormatting() {
+    return this.options?.formatting ?? defaultDatetimeFormatting;
   }
 
   cellValue2String(cellValue?: unknown) {
@@ -50,6 +50,38 @@ export class DateFieldCore extends FieldCore {
     return this.item2String(cellValue as string);
   }
 
+  private defaultTzFormat(value: string) {
+    const { timeZone } = this.getDatetimeFormatting();
+    try {
+      const formatValue = dayjs.tz(value, timeZone);
+      if (!formatValue.isValid()) return null;
+      return formatValue.toISOString();
+    } catch {
+      return null;
+    }
+  }
+
+  private parseUsingFieldFormatting(value: string): string | null {
+    const formatting = this.getDatetimeFormatting();
+    const hasTime = /\d{1,2}:\d{2}(?::\d{2})?/.test(value);
+    const dateFormat = formatting.date;
+    const timeFormat = hasTime && formatting.time !== TimeFormatting.None ? formatting.time : null;
+    const format = timeFormat ? `${dateFormat} ${timeFormat}` : dateFormat;
+
+    try {
+      const check = dayjs(value, format, true).isValid();
+      if (!check) return null;
+      const formatValue = dayjs.tz(value, format, formatting.timeZone);
+      if (!formatValue.isValid()) return null;
+      const isoString = formatValue.toISOString();
+      if (isoString.startsWith('-')) return null;
+      return isoString;
+    } catch {
+      return null;
+    }
+  }
+
+  // eslint-disable-next-line sonarjs/cognitive-complexity
   convertStringToCellValue(value: string): string | null {
     if (this.isLookup) {
       return null;
@@ -57,17 +89,23 @@ export class DateFieldCore extends FieldCore {
 
     if (value === '' || value == null) return null;
 
-    try {
-      const formatValue = dayjs.tz(value, this.options.formatting.timeZone);
-      if (!formatValue.isValid()) return null;
-      return formatValue.toISOString();
-    } catch (e) {
-      return null;
+    if (value === 'now') {
+      return dayjs().toISOString();
     }
+
+    const dayjsObj = dayjs(value);
+    if (dayjsObj.isValid() && dayjsObj.toISOString() === value) {
+      return value;
+    }
+
+    const formatted = this.parseUsingFieldFormatting(value);
+    if (formatted) return formatted;
+
+    return this.defaultTzFormat(value);
   }
 
   item2String(item?: unknown) {
-    return formatDateToString(item as string, this.options.formatting);
+    return formatDateToString(item as string, this.getDatetimeFormatting());
   }
 
   repair(value: unknown) {
@@ -91,5 +129,16 @@ export class DateFieldCore extends FieldCore {
       return z.array(dataFieldCellValueSchema).nonempty().nullable().safeParse(cellValue);
     }
     return dataFieldCellValueSchema.nullable().safeParse(cellValue);
+  }
+
+  validateCellValueLoose(cellValue: unknown) {
+    if (this.isMultipleCellValue) {
+      return z.array(z.string()).nonempty().nullable().safeParse(cellValue);
+    }
+    return z.string().nullable().safeParse(cellValue);
+  }
+
+  accept<T>(visitor: IFieldVisitor<T>): T {
+    return visitor.visitDateField(this);
   }
 }

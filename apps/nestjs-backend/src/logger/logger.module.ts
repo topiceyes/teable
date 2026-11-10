@@ -6,21 +6,61 @@ import { ClsService } from 'nestjs-cls';
 import { LoggerModule as BaseLoggerModule } from 'nestjs-pino';
 import type { ILoggerConfig } from '../configs/logger.config';
 import { X_REQUEST_ID } from '../const';
+import type { IClsStore } from '../types/cls';
+import { LOG_REDACT_PATHS, REDACTED, redactQuery, redactUrl } from './redact';
 
 @Module({})
 export class LoggerModule {
   static register(): DynamicModule {
     return BaseLoggerModule.forRootAsync({
       inject: [ClsService, ConfigService],
-      useFactory: (cls: ClsService, config: ConfigService) => {
+      useFactory: (cls: ClsService<IClsStore>, config: ConfigService) => {
         const { level } = config.getOrThrow<ILoggerConfig>('logger');
+        const env = process.env.NODE_ENV;
+        const isCi = ['true', '1'].includes(process.env?.CI ?? '');
+
+        const disableAutoLogging = isCi || env === 'test';
+        const shouldAutoLog = !disableAutoLogging && (env === 'production' || level === 'debug');
 
         return {
           pinoHttp: {
+            serializers: {
+              req(req) {
+                // Keep the first-party client tag (mobile app) after the headers are dropped.
+                const client = req.headers?.['x-teable-client'];
+                delete req.headers;
+                if (typeof client === 'string' && client) req.client = client;
+                // OAuth codes, magic-link tokens, signed-URL signatures, ... travel
+                // in the query string; keep them out of access logs.
+                if (typeof req.url === 'string') req.url = redactUrl(req.url);
+                if (req.query) req.query = redactQuery(req.query);
+                return req;
+              },
+              res(res) {
+                delete res.headers;
+                return res;
+              },
+            },
             name: 'teable',
             level: level,
-            autoLogging: false,
-            quietReqLogger: true,
+            redact: { paths: LOG_REDACT_PATHS, censor: REDACTED },
+            // Disable automatic HTTP request logging in CI and tests
+            autoLogging: shouldAutoLog
+              ? {
+                  ignore: (req) => {
+                    const url = req.url;
+                    if (!url) return false;
+
+                    if (url.startsWith('/_next')) return true;
+                    if (url.startsWith('/__next')) return true;
+                    if (url === '/favicon.ico') return true;
+                    if (url.startsWith('/.well-known/')) return true;
+                    if (url === '/health' || url === '/ping') return true;
+                    if (req.headers.upgrade === 'websocket') return true;
+                    return false;
+                  },
+                }
+              : false,
             genReqId: (req, res) => {
               const existingID = req.id ?? req.headers[X_REQUEST_ID];
               if (existingID) return existingID;
@@ -35,7 +75,19 @@ export class LoggerModule {
                 const span = trace.getSpan(context.active());
                 if (!span) return { ...object };
                 const { traceId, spanId } = span.spanContext();
-                return { ...object, spanId, traceId };
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                const sessionId = (object as any)?.res?.req?.sessionID;
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                const reqPath = (object as any)?.res?.req?.route?.path;
+                return {
+                  ...object,
+                  route: reqPath,
+                  is_access_token: Boolean(cls.get('accessTokenId')),
+                  user_id: cls.get('user.id'),
+                  session_id: sessionId,
+                  spanId,
+                  traceId,
+                };
               },
             },
           },

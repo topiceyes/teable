@@ -1,0 +1,805 @@
+/* eslint-disable @typescript-eslint/naming-convention */
+import {
+  createV2NodeTestContainer,
+  type IV2NodeTestContainer,
+} from '@teable/v2-container-node-test';
+import {
+  ActorId,
+  CreateFieldCommand,
+  CreateRecordCommand,
+  CreateRecordsCommand,
+  CreateTableCommand,
+  DeleteFieldCommand,
+  FieldId,
+  RecordSearch,
+  TableByIdSpec,
+  TableId,
+  UpdateFieldCommand,
+  v2CoreTokens,
+  type CreateFieldResult,
+  type CreateRecordResult,
+  type CreateRecordsResult,
+  type CreateTableResult,
+  type DeleteFieldResult,
+  type ICommandBus,
+  type IExecutionContext,
+  type ITableRecordQueryRepository,
+  type ITableRepository,
+  type Table,
+  type UpdateFieldResult,
+} from '@teable/v2-core';
+import {
+  registerV2TableOps,
+  RunTableQueryRemediationTaskCommand,
+  v2TableOpsTokens,
+  type TableQueryRemediationTask,
+  type TableQueryRemediationTaskRepository,
+  resolveTableSearchAccessPath,
+  type TableSearchVectorReconciler,
+  type TableSearchVectorStatusReader,
+} from '@teable/v2-table-query-ops';
+import { sql, type Kysely } from 'kysely';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+
+import { getTablePhysicalName, quoteIdentifier } from './helpers';
+import { registerV2TableOpsPostgresAdapter } from './register';
+import type { TableQueryOpsDatabase } from './schema';
+import { PostgresTableSearchAccessPathMetadataPublisher } from './searchVectorMetadata';
+import type { UnknownPostgresDatabase } from './types';
+
+type SearchVectorConfig = {
+  candidate_key: string;
+  generated_column_name: string;
+  index_name: string;
+  field_ids: unknown;
+  search_scope: string;
+  field_db_names: unknown;
+  status: string;
+  semantics: string;
+  access_path: string;
+  provider: 'pg_bigm' | 'pg_trgm';
+  operator_class: 'gin_bigm_ops' | 'gin_trgm_ops';
+};
+
+type SearchVectorPhysicalState = {
+  expression: string;
+  generated: string;
+  index_valid: boolean;
+};
+
+const context: IExecutionContext = {
+  actorId: ActorId.create('system')._unsafeUnwrap(),
+  requestId: 'search-vector-schema-lifecycle-e2e',
+};
+
+const asStringArray = (value: unknown): string[] => {
+  const parsed = typeof value === 'string' ? JSON.parse(value) : value;
+  return Array.isArray(parsed)
+    ? parsed.filter((item): item is string => typeof item === 'string')
+    : [];
+};
+
+// Needs a real Postgres (env-provided URL or the search CI flag). Without the
+// gate, plain `pnpm test-unit` on a machine with no Docker and no database
+// URL fails while booting testcontainers.
+const hasTestDatabaseUrl = Boolean(
+  process.env.TEABLE_V2_TEST_DATABASE_URL ??
+  process.env.PRISMA_DATABASE_URL ??
+  process.env.DATABASE_URL
+);
+const describeWithDb =
+  process.env.TEABLE_V2_RUN_SEARCH_VECTOR_PG_INTEGRATION === '1' || hasTestDatabaseUrl
+    ? describe
+    : describe.skip;
+
+describeWithDb('generated substring search document schema lifecycle (db)', () => {
+  let testContainer: IV2NodeTestContainer;
+  let commandBus: ICommandBus;
+  let tableRepository: ITableRepository;
+  let recordQueryRepository: ITableRecordQueryRepository;
+  let taskRepository: TableQueryRemediationTaskRepository;
+  let reconciler: TableSearchVectorReconciler;
+  let statusReader: TableSearchVectorStatusReader;
+  let db: Kysely<UnknownPostgresDatabase>;
+
+  beforeAll(async () => {
+    testContainer = await createV2NodeTestContainer();
+    registerV2TableOps(testContainer.container);
+    await registerV2TableOpsPostgresAdapter(testContainer.container, { ensureSchema: true });
+
+    commandBus = testContainer.container.resolve<ICommandBus>(v2CoreTokens.commandBus);
+    tableRepository = testContainer.container.resolve<ITableRepository>(
+      v2CoreTokens.tableRepository
+    );
+    recordQueryRepository = testContainer.container.resolve<ITableRecordQueryRepository>(
+      v2CoreTokens.tableRecordQueryRepository
+    );
+    reconciler = testContainer.container.resolve<TableSearchVectorReconciler>(
+      v2TableOpsTokens.searchVectorReconciler
+    );
+    taskRepository = testContainer.container.resolve<TableQueryRemediationTaskRepository>(
+      v2TableOpsTokens.taskRepository
+    );
+    statusReader = testContainer.container.resolve<TableSearchVectorStatusReader>(
+      v2TableOpsTokens.searchVectorStatusReader
+    );
+    db = testContainer.dataDb as unknown as Kysely<UnknownPostgresDatabase>;
+    await sql.raw('CREATE EXTENSION IF NOT EXISTS pg_trgm').execute(db);
+  }, 120_000);
+
+  afterAll(async () => {
+    await testContainer?.dispose();
+  });
+
+  it('keeps the configured search field contract until an explicit rebuild', async () => {
+    const created = await createTable();
+    let table = created.table;
+    const titleField = fieldByName(table, 'Title');
+    const scoreField = fieldByName(table, 'Score');
+
+    await createSemanticRecords(table, titleField.id().toString(), scoreField.id().toString());
+    await insertPlannerFiller(table, titleField, scoreField, 30_000);
+
+    const initial = await reconciler.reconcile(context, {
+      table,
+      mode: 'create',
+      provider: 'pg_trgm',
+      languageConfig: 'simple',
+      searchProbe: 'lifecycleunique',
+      validationMode: 'real_ddl',
+      allowLargeTableRewrite: true,
+    });
+    expect(
+      initial.isOk(),
+      initial.isErr() ? JSON.stringify(initial.error) : 'initial reconciliation result missing'
+    ).toBe(true);
+    expect(initial._unsafeUnwrap()).toMatchObject({ action: 'created', status: 'ready' });
+    expect((await statusReader.read(context, table.id().toString()))._unsafeUnwrap()).toMatchObject(
+      {
+        state: 'ready',
+        configured: true,
+        languageConfig: 'simple',
+        coveredFieldCount: 2,
+      }
+    );
+    expect((await searchUsingRuntime(table, 'lifecycleunique')).searchAccessPath?.used).toBe(
+      'generated_text'
+    );
+
+    let config = await expectReadyConfig(table);
+    expect(await searchTotal(table, config, 'lifecycleunique')).toBe(1);
+
+    const regionFieldId = FieldId.mustGenerate().toString();
+    const addRegion = CreateFieldCommand.create({
+      baseId: table.baseId().toString(),
+      tableId: table.id().toString(),
+      field: { id: regionFieldId, type: 'singleLineText', name: 'Region' },
+    })._unsafeUnwrap();
+    const addRegionResult = await commandBus.execute<CreateFieldCommand, CreateFieldResult>(
+      context,
+      addRegion
+    );
+    table = addRegionResult._unsafeUnwrap().table;
+    const createRegionRecord = await commandBus.execute<CreateRecordCommand, CreateRecordResult>(
+      context,
+      CreateRecordCommand.create({
+        tableId: table.id().toString(),
+        fields: {
+          [titleField.id().toString()]: 'Regional order',
+          [scoreField.id().toString()]: '88',
+          [regionFieldId]: 'SingaporeWest',
+        },
+      })._unsafeUnwrap()
+    );
+    createRegionRecord._unsafeUnwrap();
+
+    const addCheckboxResult = await commandBus.execute<CreateFieldCommand, CreateFieldResult>(
+      context,
+      CreateFieldCommand.create({
+        baseId: table.baseId().toString(),
+        tableId: table.id().toString(),
+        field: { type: 'checkbox', name: 'Reviewed' },
+      })._unsafeUnwrap()
+    );
+    table = addCheckboxResult._unsafeUnwrap().table;
+
+    expect((await statusReader.read(context, table.id().toString()))._unsafeUnwrap()).toMatchObject(
+      {
+        state: 'ready',
+        configured: true,
+        coveredFieldCount: 2,
+      }
+    );
+    config = await expectReadyConfig(table);
+    expect(asStringArray(config.field_ids)).not.toContain(regionFieldId);
+    expect(await searchTotalAcrossAllFields(table, config, 'SingaporeWest')).toBe(0);
+    expect((await searchUsingRuntime(table, 'SingaporeWest')).total).toBe(0);
+    expect((await searchUsingRuntime(table, 'lifecycleunique')).total).toBe(1);
+    expect(await searchTotalWithDefaultPath(table, 'SingaporeWest')).toBe(1);
+
+    // An unrelated edit may queue repair but must not enroll the new Region
+    // field, nor force usable title coverage onto a table-wide fallback.
+    const renamed = await commandBus.execute<UpdateFieldCommand, UpdateFieldResult>(
+      context,
+      UpdateFieldCommand.create({
+        tableId: table.id().toString(),
+        fieldId: titleField.id().toString(),
+        field: { name: 'Order title' },
+      })._unsafeUnwrap()
+    );
+    table = renamed._unsafeUnwrap().table;
+    await expectPendingConfig(table);
+    const pendingSearch = await searchUsingRuntime(table, 'lifecycleunique');
+    expect(pendingSearch.total).toBe(1);
+    expect(pendingSearch.searchAccessPath?.used).toBe('generated_text');
+    await runPendingMaintenance();
+    expect((await searchUsingRuntime(table, 'SingaporeWest')).total).toBe(0);
+
+    const rebuilt = await reconciler.reconcile(context, {
+      table,
+      mode: 'rebuild',
+      provider: 'pg_trgm',
+      languageConfig: 'simple',
+      searchProbe: 'SingaporeWest',
+      validationMode: 'real_ddl',
+      allowLargeTableRewrite: true,
+    });
+    expect(rebuilt._unsafeUnwrap()).toMatchObject({ action: 'rebuilt', status: 'ready' });
+
+    config = await expectReadyConfig(table);
+    expect(asStringArray(config.field_ids)).toContain(regionFieldId);
+    expect(await searchTotalAcrossAllFields(table, config, 'SingaporeWest')).toBe(1);
+
+    const convertScore = UpdateFieldCommand.create({
+      tableId: table.id().toString(),
+      fieldId: scoreField.id().toString(),
+      field: { type: 'number' },
+    })._unsafeUnwrap();
+    const convertResult = await commandBus.execute<UpdateFieldCommand, UpdateFieldResult>(
+      context,
+      convertScore
+    );
+    table = convertResult._unsafeUnwrap().table;
+
+    await expectPendingConfig(table);
+    expect(await searchTotalWithDefaultPath(table, 'lifecycleunique')).toBe(1);
+    const convertedSearch = await searchUsingRuntime(table, 'lifecycleunique');
+    expect(convertedSearch.total).toBe(1);
+    expect(convertedSearch.searchAccessPath).toMatchObject({
+      used: 'default',
+    });
+    await runPendingMaintenance();
+
+    config = await expectReadyConfig(table);
+    // Conversion retains the canonical rounded-number search projection.
+    expect(asStringArray(config.field_ids)).toContain(scoreField.id().toString());
+    expect(await searchTotal(table, config, 'lifecycleunique')).toBe(1);
+    // The 30,000 planner filler rows repeat scores 0–99: 300 also match 88,
+    // in addition to the regional order. Both search paths must retain them.
+    const numericSearchTotal = await searchTotal(table, config, '88.00');
+    expect(numericSearchTotal).toBe(301);
+    expect(numericSearchTotal).toBe(await searchTotalWithDefaultPath(table, '88.00'));
+
+    const deleteRegion = DeleteFieldCommand.create({
+      baseId: table.baseId().toString(),
+      tableId: table.id().toString(),
+      fieldId: regionFieldId,
+    })._unsafeUnwrap();
+    const deleteResult = await commandBus.execute<DeleteFieldCommand, DeleteFieldResult>(
+      context,
+      deleteRegion
+    );
+    deleteResult._unsafeUnwrap();
+    table = await loadTable(table.id().toString());
+
+    await expectPendingConfig(table);
+    expect(await searchTotalWithDefaultPath(table, 'lifecycleunique')).toBe(1);
+    expect((await searchUsingRuntime(table, 'lifecycleunique')).total).toBe(1);
+    expect((await searchUsingRuntime(table, 'SingaporeWest')).total).toBe(0);
+    await runPendingMaintenance();
+
+    config = await expectReadyConfig(table);
+    expect(asStringArray(config.field_ids)).not.toContain(regionFieldId);
+    expect(await searchTotal(table, config, 'SingaporeWest')).toBe(0);
+    expect(await searchTotal(table, config, 'lifecycleunique')).toBe(1);
+
+    // Table-level kill switch: drop removes the managed objects, disables the
+    // config, and search keeps working through the default ILIKE path.
+    const dropResult = await reconciler.reconcile(context, { table, mode: 'drop' });
+    expect(dropResult._unsafeUnwrap()).toMatchObject({ action: 'dropped', status: 'disabled' });
+    expect((await statusReader.read(context, table.id().toString()))._unsafeUnwrap()).toMatchObject(
+      {
+        state: 'disabled',
+        configured: false,
+      }
+    );
+    const physicalAfterDrop = getTablePhysicalName(table)._unsafeUnwrap();
+    const droppedState = await sql<{ column_exists: boolean; index_exists: boolean }>`
+      SELECT
+        EXISTS (
+          SELECT 1
+          FROM pg_attribute a
+          JOIN pg_class c ON c.oid = a.attrelid
+          JOIN pg_namespace n ON n.oid = c.relnamespace
+          WHERE n.nspname = ${physicalAfterDrop.schema}
+            AND c.relname = ${physicalAfterDrop.tableName}
+            AND a.attname = ${config.generated_column_name}
+            AND NOT a.attisdropped
+        ) AS column_exists,
+        to_regclass(${`${quoteIdentifier(physicalAfterDrop.schema)}.${quoteIdentifier(config.index_name)}`}) IS NOT NULL AS index_exists
+    `.execute(db);
+    expect(droppedState.rows[0]).toEqual({ column_exists: false, index_exists: false });
+    expect(await searchTotalWithDefaultPath(table, 'lifecycleunique')).toBe(1);
+    expect((await searchUsingRuntime(table, 'lifecycleunique')).searchAccessPath?.used).toBe(
+      'default'
+    );
+  }, 120_000);
+  it('prefers ready bigm over stale trgm and retains selected coverage when physical indexes disappear', async (test) => {
+    const publisher = new PostgresTableSearchAccessPathMetadataPublisher(
+      testContainer.metaDb as unknown as Kysely<UnknownPostgresDatabase>,
+      db,
+      tableRepository
+    );
+    const available = await sql<{ available: boolean }>`
+      SELECT EXISTS (SELECT 1 FROM pg_available_extensions WHERE name = 'pg_bigm') AS available
+    `.execute(db);
+    if (!available.rows[0]?.available) test.skip();
+    await sql.raw('CREATE EXTENSION IF NOT EXISTS pg_bigm').execute(db);
+    let table = (await createTable()).table;
+    const title = fieldByName(table, 'Title');
+    const score = fieldByName(table, 'Score');
+    await createSemanticRecords(table, title.id().toString(), score.id().toString());
+    await insertPlannerFiller(table, title, score, 30_000);
+    (
+      await commandBus.execute<CreateRecordCommand, CreateRecordResult>(
+        context,
+        CreateRecordCommand.create({
+          tableId: table.id().toString(),
+          fields: {
+            [title.id().toString()]: 'Other order',
+            [score.id().toString()]: 'privatevalue',
+          },
+        })._unsafeUnwrap()
+      )
+    )._unsafeUnwrap();
+    (
+      await reconciler.reconcile(context, {
+        table,
+        mode: 'create',
+        provider: 'pg_trgm',
+        searchProbe: 'lifecycleunique',
+        validationMode: 'real_ddl',
+        allowLargeTableRewrite: true,
+      })
+    )._unsafeUnwrap();
+    const trgm = await expectReadyConfig(table);
+    expect((await searchUsingRuntime(table, 'privatevalue')).total).toBe(1);
+    // Model metadata drift while the old physical document still exists. Only
+    // Score's projection changes; Title remains usable before any rebuild.
+    await sql`
+      UPDATE field SET type = 'longText' WHERE id = ${score.id().toString()}
+    `.execute(testContainer.metaDb as unknown as Kysely<TableQueryOpsDatabase>);
+    table = await loadTable(table.id().toString());
+    const drifted = await searchUsingRuntime(table, 'lifecycleunique');
+    expect(drifted.total).toBe(1);
+    expect(drifted.searchAccessPath?.used).toBe('generated_text');
+    expect((await searchUsingRuntime(table, 'privatevalue')).total).toBe(0);
+    await sql`
+      UPDATE field SET deleted_time = now() WHERE id = ${score.id().toString()}
+    `.execute(testContainer.metaDb as unknown as Kysely<TableQueryOpsDatabase>);
+    table = await loadTable(table.id().toString());
+    expect((await searchUsingRuntime(table, 'lifecycleunique')).total).toBe(1);
+    expect((await searchUsingRuntime(table, 'privatevalue')).total).toBe(0);
+    const bigmResult = await reconciler.reconcile(context, {
+      table,
+      mode: 'rebuild',
+      provider: 'pg_bigm',
+      fieldIds: [title.id().toString()],
+      searchProbe: 'lifecycleunique',
+      validationMode: 'real_ddl',
+      allowLargeTableRewrite: true,
+    });
+    expect(bigmResult.isOk(), bigmResult.isErr() ? JSON.stringify(bigmResult.error) : '').toBe(
+      true
+    );
+    const bigm = bigmResult._unsafeUnwrap();
+    await sql`
+      UPDATE table_query_search_vector_config
+      SET last_modified_time = now() + interval '1 minute'
+      WHERE table_id = ${table.id().toString()} AND provider = 'pg_trgm'
+    `.execute(testContainer.metaDb as unknown as Kysely<TableQueryOpsDatabase>);
+    expect(resolveTableSearchAccessPath(await loadTable(table.id().toString()))).toMatchObject({
+      kind: 'generated_text',
+      provider: 'pg_bigm',
+      indexUsable: true,
+    });
+    expect((await searchUsingRuntime(table, 'lifecycleunique')).total).toBe(1);
+    expect((await searchUsingRuntime(table, 'privatevalue')).total).toBe(0);
+
+    const physical = getTablePhysicalName(table)._unsafeUnwrap();
+    await sql
+      .raw(`DROP INDEX ${quoteIdentifier(physical.schema)}.${quoteIdentifier(bigm.indexName)}`)
+      .execute(db);
+    (await publisher.refresh(context, table.id().toString()))._unsafeUnwrap();
+    expect(resolveTableSearchAccessPath(await loadTable(table.id().toString()))).toMatchObject({
+      kind: 'generated_text',
+      provider: 'pg_trgm',
+      indexUsable: true,
+    });
+    expect((await searchUsingRuntime(table, 'lifecycleunique')).total).toBe(1);
+    expect((await searchUsingRuntime(table, 'privatevalue')).total).toBe(0);
+
+    // Model an interrupted concurrent index build in this disposable test DB.
+    await sql`
+      UPDATE pg_index SET indisvalid = false
+      WHERE indexrelid = to_regclass(${`${quoteIdentifier(physical.schema)}.${quoteIdentifier(trgm.index_name)}`})
+    `.execute(db);
+    (await publisher.refresh(context, table.id().toString()))._unsafeUnwrap();
+    expect(resolveTableSearchAccessPath(await loadTable(table.id().toString()))).toMatchObject({
+      kind: 'generated_text',
+      indexUsable: false,
+    });
+    expect((await searchUsingRuntime(table, 'lifecycleunique')).total).toBe(1);
+    expect((await searchUsingRuntime(table, 'privatevalue')).total).toBe(0);
+  }, 120_000);
+
+  it('uses a compatible document without source dependency entries and still rejects projection drift', async () => {
+    let table = (await createTable()).table;
+    const title = fieldByName(table, 'Title');
+    const score = fieldByName(table, 'Score');
+    await createSemanticRecords(table, title.id().toString(), score.id().toString());
+    (
+      await commandBus.execute<CreateRecordCommand, CreateRecordResult>(
+        context,
+        CreateRecordCommand.create({
+          tableId: table.id().toString(),
+          fields: {
+            [title.id().toString()]: 'unrelated item',
+            [score.id().toString()]: 'projectiononlyunique',
+          },
+        })._unsafeUnwrap()
+      )
+    )._unsafeUnwrap();
+    await insertPlannerFiller(table, title, score, 30_000);
+    (
+      await reconciler.reconcile(context, {
+        table,
+        mode: 'create',
+        provider: 'pg_trgm',
+        searchProbe: 'lifecycleunique',
+        validationMode: 'real_ddl',
+        allowLargeTableRewrite: true,
+      })
+    )._unsafeUnwrap();
+    const config = await expectReadyConfig(table);
+    const physical = getTablePhysicalName(table)._unsafeUnwrap();
+    const tableSql = `${quoteIdentifier(physical.schema)}.${quoteIdentifier(physical.tableName)}`;
+
+    // Reproduce the observed catalog shape in this disposable database: the
+    // real generated expression and GIN remain, but only the self-dependency exists.
+    await sql`
+      DELETE FROM pg_depend dependency
+      USING pg_attrdef definition
+      WHERE dependency.classid = 'pg_attrdef'::regclass
+        AND dependency.objid = definition.oid
+        AND definition.adrelid = to_regclass(${tableSql})
+        AND definition.adnum = (
+          SELECT attnum FROM pg_attribute
+          WHERE attrelid = definition.adrelid AND attname = ${config.generated_column_name}
+        )
+        AND dependency.refclassid = 'pg_class'::regclass
+        AND dependency.refobjid = definition.adrelid
+        AND dependency.refobjsubid > 0
+        AND dependency.refobjsubid <> definition.adnum
+    `.execute(db);
+    const publisher = new PostgresTableSearchAccessPathMetadataPublisher(
+      testContainer.metaDb as unknown as Kysely<UnknownPostgresDatabase>,
+      db,
+      tableRepository
+    );
+    (await publisher.refresh(context, table.id().toString()))._unsafeUnwrap();
+
+    const indexed = await searchUsingRuntime(table, 'lifecycleunique');
+    expect(indexed.total).toBe(1);
+    expect(indexed.searchAccessPath?.used).toBe('generated_text');
+    expect((await searchUsingRuntime(table, 'projectiononlyunique')).total).toBe(1);
+
+    // Without a matching marker, physical projections must still prove coverage.
+    await sql
+      .raw(`COMMENT ON COLUMN ${tableSql}.${quoteIdentifier(config.generated_column_name)} IS NULL`)
+      .execute(db);
+    (await publisher.refresh(context, table.id().toString()))._unsafeUnwrap();
+    const unmarked = await searchUsingRuntime(table, 'lifecycleunique');
+    expect(unmarked.total).toBe(1);
+    expect(unmarked.searchAccessPath?.used).toBe('generated_text');
+
+    await sql`
+      UPDATE field SET type = 'longText' WHERE id = ${score.id().toString()}
+    `.execute(testContainer.metaDb as unknown as Kysely<TableQueryOpsDatabase>);
+    table = await loadTable(table.id().toString());
+    const drifted = resolveTableSearchAccessPath(table);
+    expect(drifted).toMatchObject({ kind: 'generated_text', indexUsable: true });
+    expect(
+      drifted?.kind === 'generated_text'
+        ? drifted.coveredFieldIds.map((fieldId) => fieldId.toString())
+        : []
+    ).toEqual([title.id().toString()]);
+    expect((await searchUsingRuntime(table, 'lifecycleunique')).total).toBe(1);
+    expect((await searchUsingRuntime(table, 'projectiononlyunique')).total).toBe(0);
+  }, 120_000);
+
+  it('preserves the serving path when same-definition rebuild validation fails', async () => {
+    const created = await createTable();
+    const table = created.table;
+    const titleField = fieldByName(table, 'Title');
+    const scoreField = fieldByName(table, 'Score');
+    await createSemanticRecords(table, titleField.id().toString(), scoreField.id().toString());
+    await insertPlannerFiller(table, titleField, scoreField, 30_000);
+
+    const initial = await reconciler.reconcile(context, {
+      table,
+      mode: 'create',
+      provider: 'pg_trgm',
+      languageConfig: 'simple',
+      searchProbe: 'lifecycleunique',
+      validationMode: 'real_ddl',
+      allowLargeTableRewrite: true,
+    });
+    expect(
+      initial.isOk(),
+      initial.isErr() ? JSON.stringify(initial.error) : 'initial reconciliation result missing'
+    ).toBe(true);
+    const config = await expectReadyConfig(table);
+
+    const failedRebuild = await reconciler.reconcile(context, {
+      table,
+      mode: 'rebuild',
+      provider: 'pg_trgm',
+      languageConfig: 'simple',
+      searchProbe: 'ordinary',
+      validationMode: 'real_ddl',
+      allowLargeTableRewrite: true,
+    });
+    expect(failedRebuild.isErr()).toBe(true);
+
+    const physical = getTablePhysicalName(table)._unsafeUnwrap();
+    const objectState = await sql<{ column_exists: boolean; index_exists: boolean }>`
+      SELECT
+        EXISTS (
+          SELECT 1
+          FROM pg_attribute a
+          JOIN pg_class c ON c.oid = a.attrelid
+          JOIN pg_namespace n ON n.oid = c.relnamespace
+          WHERE n.nspname = ${physical.schema}
+            AND c.relname = ${physical.tableName}
+            AND a.attname = ${config.generated_column_name}
+            AND NOT a.attisdropped
+        ) AS column_exists,
+        to_regclass(${`${quoteIdentifier(physical.schema)}.${quoteIdentifier(config.index_name)}`}) IS NOT NULL AS index_exists
+    `.execute(db);
+    expect(objectState.rows[0]).toEqual({ column_exists: true, index_exists: true });
+
+    const latestConfig = await sql<{ status: string }>`
+      SELECT status
+      FROM table_query_search_vector_config
+      WHERE table_id = ${table.id().toString()}
+      ORDER BY last_modified_time DESC NULLS LAST, created_time DESC
+      LIMIT 1
+    `.execute(testContainer.metaDb as unknown as Kysely<TableQueryOpsDatabase>);
+    expect(latestConfig.rows[0]?.status).toBe('ready');
+    const search = await searchUsingRuntime(table, 'lifecycleunique');
+    expect(search.total).toBe(1);
+    expect(search.searchAccessPath?.used).toBe('generated_text');
+  }, 120_000);
+
+  const createTable = async (): Promise<CreateTableResult> => {
+    const result = await commandBus.execute<CreateTableCommand, CreateTableResult>(
+      context,
+      CreateTableCommand.create({
+        baseId: testContainer.baseId.toString(),
+        name: 'Search Vector Lifecycle',
+        fields: [
+          { type: 'singleLineText', name: 'Title', isPrimary: true },
+          { type: 'singleLineText', name: 'Score' },
+        ],
+        views: [{ type: 'grid' }],
+      })._unsafeUnwrap()
+    );
+    return result._unsafeUnwrap();
+  };
+
+  const createSemanticRecords = async (
+    table: Table,
+    titleFieldId: string,
+    scoreFieldId: string
+  ) => {
+    const result = await commandBus.execute<CreateRecordsCommand, CreateRecordsResult>(
+      context,
+      CreateRecordsCommand.create({
+        tableId: table.id().toString(),
+        records: [
+          { fields: { [titleFieldId]: 'lifecycleunique order', [scoreFieldId]: '42' } },
+          { fields: { [titleFieldId]: 'ordinary order alpha', [scoreFieldId]: '7' } },
+          { fields: { [titleFieldId]: 'ordinary order beta', [scoreFieldId]: '9' } },
+        ],
+      })._unsafeUnwrap()
+    );
+    expect(result._unsafeUnwrap().records).toHaveLength(3);
+  };
+
+  const insertPlannerFiller = async (
+    table: Table,
+    titleField: ReturnType<typeof fieldByName>,
+    scoreField: ReturnType<typeof fieldByName>,
+    count: number
+  ) => {
+    const physical = getTablePhysicalName(table)._unsafeUnwrap();
+    const tableSql = `${quoteIdentifier(physical.schema)}.${quoteIdentifier(physical.tableName)}`;
+    const titleDbName = titleField.dbFieldName()._unsafeUnwrap().value()._unsafeUnwrap();
+    const scoreDbName = scoreField.dbFieldName()._unsafeUnwrap().value()._unsafeUnwrap();
+    await sql
+      .raw(
+        `INSERT INTO ${tableSql} ("__id", "__created_by", "__version", ${quoteIdentifier(
+          titleDbName
+        )}, ${quoteIdentifier(
+          scoreDbName
+        )}) SELECT 'rec_tqops_fill_' || g::text, 'system', 1, 'ordinary order ' || g::text, (g % 100)::text FROM generate_series(1, ${count}) AS g`
+      )
+      .execute(db);
+    await sql.raw(`ANALYZE ${tableSql}`).execute(db);
+  };
+
+  const expectReadyConfig = async (table: Table): Promise<SearchVectorConfig> => {
+    const configs = await sql<SearchVectorConfig>`
+      SELECT candidate_key, generated_column_name, index_name, field_ids, field_db_names,
+             search_scope, status, semantics, access_path, provider, operator_class
+      FROM table_query_search_vector_config
+      WHERE table_id = ${table.id().toString()}
+      ORDER BY last_modified_time DESC NULLS LAST, created_time DESC
+    `.execute(testContainer.metaDb as unknown as Kysely<TableQueryOpsDatabase>);
+    const ready = configs.rows.filter((row) => row.status === 'ready');
+    expect(ready).toHaveLength(1);
+    const config = ready[0] as SearchVectorConfig;
+    expect(config).toMatchObject({
+      semantics: 'substring',
+      access_path: 'generated_text',
+      provider: 'pg_trgm',
+      operator_class: 'gin_trgm_ops',
+    });
+
+    const physical = getTablePhysicalName(table)._unsafeUnwrap();
+    const state = await sql<SearchVectorPhysicalState>`
+      SELECT
+        pg_get_expr(ad.adbin, ad.adrelid) AS expression,
+        a.attgenerated AS generated,
+        i.indisvalid AS index_valid
+      FROM pg_attribute a
+      JOIN pg_class c ON c.oid = a.attrelid
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum
+      JOIN pg_index i ON i.indrelid = c.oid
+      JOIN pg_class idx ON idx.oid = i.indexrelid AND idx.relname = ${config.index_name}
+      WHERE n.nspname = ${physical.schema}
+        AND c.relname = ${physical.tableName}
+        AND a.attname = ${config.generated_column_name}
+    `.execute(db);
+    expect(state.rows).toHaveLength(1);
+    expect(state.rows[0]).toMatchObject({ generated: 's', index_valid: true });
+    for (const fieldDbName of asStringArray(config.field_db_names)) {
+      expect(state.rows[0]?.expression).toContain(fieldDbName);
+    }
+    return config;
+  };
+
+  const expectPendingConfig = async (table: Table): Promise<void> => {
+    const configs = await sql<Pick<SearchVectorConfig, 'status'>>`
+      SELECT status
+      FROM table_query_search_vector_config
+      WHERE table_id = ${table.id().toString()}
+      ORDER BY last_modified_time DESC NULLS LAST, created_time DESC
+      LIMIT 1
+    `.execute(testContainer.metaDb as unknown as Kysely<TableQueryOpsDatabase>);
+    expect(configs.rows[0]?.status).toBe('rebuild_pending');
+
+    const tasks = await sql<{ count: string }>`
+      SELECT count(*)::text AS count
+      FROM table_query_remediation_task
+      WHERE table_id = ${table.id().toString()}
+        AND kind = 'rebuild_search_access_path'
+        AND status = 'queued'
+    `.execute(testContainer.metaDb as unknown as Kysely<TableQueryOpsDatabase>);
+    expect(Number(tasks.rows[0]?.count)).toBe(1);
+  };
+
+  const runPendingMaintenance = async (): Promise<void> => {
+    const claimed = await taskRepository.claimNextAccepted(context, {
+      workerId: 'search-vector-lifecycle-e2e-worker',
+      now: new Date(),
+      allowedKinds: ['rebuild_search_access_path'],
+      allowManualIndexExecution: false,
+      allowPolicyIndexExecution: false,
+    });
+    const task = claimed._unsafeUnwrap();
+    expect(task).toBeDefined();
+    const result = await commandBus.execute<
+      RunTableQueryRemediationTaskCommand,
+      TableQueryRemediationTask
+    >(
+      context,
+      new RunTableQueryRemediationTaskCommand(
+        task!.snapshot().id,
+        false,
+        'search-vector-lifecycle-e2e-worker'
+      )
+    );
+    expect(result._unsafeUnwrap().snapshot().status).toBe('succeeded');
+  };
+
+  const searchTotal = async (table: Table, config: SearchVectorConfig, value: string) => {
+    const fieldIds = asStringArray(config.field_ids);
+    const coveredFieldIds = fieldIds.map((id) => FieldId.create(id)._unsafeUnwrap());
+    const result = await recordQueryRepository.find(context, table, undefined, {
+      search: { search: RecordSearch.fromTuple([value, fieldIds.join(','), true]) },
+      searchAccessPath: {
+        kind: 'generated_text',
+        generatedColumnName: config.generated_column_name,
+        provider: config.provider,
+        searchScope: 'selected_fields',
+        coveredFieldIds,
+      },
+    });
+    const value_ = result._unsafeUnwrap();
+    // Guard against silent fallback: every lifecycle assertion below would
+    // also pass on plain ILIKE, so require the indexed path to actually run.
+    expect(value_.searchAccessPath).toMatchObject({ used: 'generated_text' });
+    return value_.total;
+  };
+
+  const searchTotalWithDefaultPath = async (table: Table, value: string) => {
+    const result = await recordQueryRepository.find(context, table, undefined, {
+      search: { search: RecordSearch.fromTuple([value, '', true]) },
+    });
+    return result._unsafeUnwrap().total;
+  };
+
+  const searchTotalAcrossAllFields = async (
+    table: Table,
+    config: SearchVectorConfig,
+    value: string
+  ) => {
+    const coveredFieldIds = asStringArray(config.field_ids).map((id) =>
+      FieldId.create(id)._unsafeUnwrap()
+    );
+    const result = await recordQueryRepository.find(context, table, undefined, {
+      search: { search: RecordSearch.fromTuple([value, '', true]) },
+      searchAccessPath: {
+        kind: 'generated_text',
+        generatedColumnName: config.generated_column_name,
+        provider: config.provider,
+        searchScope: 'all_fields',
+        coveredFieldIds,
+      },
+    });
+    const value_ = result._unsafeUnwrap();
+    expect(value_.searchAccessPath).toMatchObject({ used: 'generated_text' });
+    return value_.total;
+  };
+
+  const searchUsingRuntime = async (table: Table, value: string) => {
+    table = await loadTable(table.id().toString());
+    const path = resolveTableSearchAccessPath(table);
+    const result = await recordQueryRepository.find(context, table, undefined, {
+      search: { search: RecordSearch.fromTuple([value, '', true]) },
+      searchAccessPath: path,
+    });
+    return result._unsafeUnwrap();
+  };
+
+  const loadTable = async (tableId: string) => {
+    const id = TableByIdSpec.create(TableId.create(tableId)._unsafeUnwrap());
+    return (await tableRepository.findOne(context, id))._unsafeUnwrap();
+  };
+});
+
+const fieldByName = (table: Table, name: string) =>
+  table.getField((field) => field.name().toString() === name)._unsafeUnwrap();

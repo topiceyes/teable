@@ -1,0 +1,430 @@
+/* eslint-disable @typescript-eslint/naming-convention */
+import { BadRequestException, Logger, RequestTimeoutException } from '@nestjs/common';
+import { HttpErrorCode } from '@teable/core';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { CustomHttpException } from '../custom.exception';
+import { MailDeliveryException } from '../features/mail-sender/mail-delivery-error';
+import { GlobalExceptionFilter } from './global-exception.filter';
+
+const { activeSpan, runtimeErrorCounter, sentryScope, captureException, withScope } = vi.hoisted(
+  () => {
+    const activeSpan = {
+      setAttributes: vi.fn(),
+      setStatus: vi.fn(),
+      recordException: vi.fn(),
+    };
+    const runtimeErrorCounter = {
+      add: vi.fn(),
+    };
+    const sentryScope = {
+      setContext: vi.fn(),
+      setTag: vi.fn(),
+      setUser: vi.fn(),
+    };
+    return {
+      activeSpan,
+      runtimeErrorCounter,
+      sentryScope,
+      captureException: vi.fn(),
+      withScope: vi.fn((callback: (scope: typeof sentryScope) => void) => callback(sentryScope)),
+    };
+  }
+);
+
+vi.mock('@opentelemetry/api', () => ({
+  metrics: {
+    getMeter: vi.fn(() => ({
+      createCounter: vi.fn(() => runtimeErrorCounter),
+    })),
+  },
+  SpanStatusCode: {
+    ERROR: 2,
+  },
+  trace: {
+    getActiveSpan: vi.fn(() => activeSpan),
+  },
+}));
+
+vi.mock('@sentry/nestjs', () => ({
+  captureException,
+  withScope,
+}));
+
+const userId = 'usr123';
+const userEmail = 'user@example.com';
+const spaceId = 'spc123';
+const dataDbConnectionId = 'dcn123';
+const dataDbUrlFingerprint = 'fp123';
+const dataDbErrorCode = 'data_db.database_missing';
+const dataDbOtelAttribute = {
+  errorCode: 'teable.data_db.error_code',
+  connectionId: 'teable.data_db.connection_id',
+  urlFingerprint: 'teable.data_db.url_fingerprint',
+  retryable: 'teable.data_db.retryable',
+  userActionable: 'teable.data_db.user_actionable',
+} as const;
+
+describe('GlobalExceptionFilter', () => {
+  const configService = {
+    getOrThrow: vi.fn(() => ({ enableGlobalErrorLogging: false })),
+  };
+
+  const response: {
+    status: ReturnType<typeof vi.fn>;
+    json: ReturnType<typeof vi.fn>;
+    setHeader: ReturnType<typeof vi.fn>;
+  } = {
+    status: vi.fn(),
+    json: vi.fn(),
+    setHeader: vi.fn(),
+  };
+  response.status.mockReturnValue(response);
+
+  const host = {
+    switchToHttp: () => ({
+      getRequest: () => ({ url: '/api/test' }),
+      getResponse: () => response,
+    }),
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+  });
+
+  it.each([
+    '/api/v2/queries/execute',
+    '/API/V2/QUERIES/EXECUTE/',
+    '/api/v2/queries/validate',
+    '/API/V2/QUERIES/VALIDATE/',
+  ])('sanitizes pre-controller JSON parsing errors on the enabled query route: %s', (path) => {
+    const sentinel = 'T7737_MALFORMED_JSON_UNIT_6bd402';
+    const exception = new BadRequestException(`Unexpected token in ${sentinel}`);
+    const filter = new GlobalExceptionFilter({
+      ...configService,
+      get: () => '1',
+    } as never);
+    const queryHost = {
+      switchToHttp: () => ({
+        getRequest: () => ({ method: 'POST', path, url: path }),
+        getResponse: () => response,
+      }),
+    };
+
+    filter.catch(exception, queryHost as never);
+
+    expect(response.status).toHaveBeenCalledWith(400);
+    expect(response.json).toHaveBeenCalledWith({
+      ok: false,
+      error: {
+        code: 'data_query.invalid_request',
+        message: 'Invalid data query request',
+        tags: ['validation'],
+      },
+    });
+    expect(activeSpan.recordException).toHaveBeenCalledWith(
+      expect.objectContaining({ message: 'Invalid data query request' })
+    );
+    expect(activeSpan.recordException).not.toHaveBeenCalledWith(exception);
+    expect(activeSpan.setStatus).not.toHaveBeenCalled();
+    expect(captureException).not.toHaveBeenCalled();
+    expect(Logger.prototype.error).not.toHaveBeenCalled();
+    expect(JSON.stringify(response.json.mock.calls)).not.toContain(sentinel);
+  });
+
+  it.each([
+    { flag: 'false', method: 'POST', path: '/api/v2/queries/execute' },
+    { flag: '1', method: 'POST', path: '/api/legacy' },
+    { flag: '1', method: 'GET', path: '/api/v2/queries/execute' },
+    { flag: '1', method: 'POST', path: '/api/v2/queries/execute/other' },
+  ])('preserves non-query parser error handling: %j', ({ flag, method, path }) => {
+    const exception = new BadRequestException('Legacy parser error');
+    const filter = new GlobalExceptionFilter({
+      ...configService,
+      get: () => flag,
+    } as never);
+    filter.catch(exception, {
+      switchToHttp: () => ({
+        getRequest: () => ({ method, path, url: path }),
+        getResponse: () => response,
+      }),
+    } as never);
+    expect(response.status).toHaveBeenCalledWith(400);
+    expect(response.json).toHaveBeenCalledWith(
+      expect.objectContaining({ message: 'Legacy parser error', status: 400 })
+    );
+    expect(activeSpan.recordException).toHaveBeenCalledWith(exception);
+  });
+
+  it('captures unexpected exceptions with CLS user and space context', () => {
+    const cls = {
+      get: vi.fn((key: string) => {
+        const values = new Map<string, unknown>([
+          ['user.id', userId],
+          ['user.email', userEmail],
+          ['spaceId', spaceId],
+        ]);
+        return values.get(key);
+      }),
+    };
+    const exception = new Error('boom');
+    const filter = new GlobalExceptionFilter(configService as never, cls as never);
+
+    filter.catch(exception, host as never);
+
+    expect(withScope).toHaveBeenCalledTimes(1);
+    expect(sentryScope.setUser).toHaveBeenNthCalledWith(1, null);
+    expect(sentryScope.setUser).toHaveBeenNthCalledWith(2, {
+      id: userId,
+      email: userEmail,
+    });
+    expect(sentryScope.setTag).toHaveBeenCalledWith('space.id', spaceId);
+    expect(captureException).toHaveBeenCalledWith(exception, {
+      mechanism: { handled: false, type: 'auto.function.nestjs.exception_captured' },
+    });
+  });
+
+  it('captures unexpected exceptions with V2 attribution context', () => {
+    const cls = {
+      get: vi.fn((key: string) => {
+        const values = new Map<string, unknown>([
+          ['spaceId', spaceId],
+          ['useV2', true],
+          ['v2Reason', 'space_feature'],
+          ['v2Feature', 'deleteField'],
+        ]);
+        return values.get(key);
+      }),
+    };
+    const exception = new Error('delete failed');
+    const filter = new GlobalExceptionFilter(configService as never, cls as never);
+
+    filter.catch(exception, host as never);
+
+    expect(response.setHeader).toHaveBeenCalledWith('x-teable-v2', 'true');
+    expect(response.setHeader).toHaveBeenCalledWith('x-teable-v2-reason', 'space_feature');
+    expect(response.setHeader).toHaveBeenCalledWith('x-teable-v2-feature', 'deleteField');
+    expect(sentryScope.setTag).toHaveBeenCalledWith('teable.version', 'v2');
+    expect(sentryScope.setTag).toHaveBeenCalledWith('teable.v2.enabled', 'true');
+    expect(sentryScope.setTag).toHaveBeenCalledWith('teable.v2.reason', 'space_feature');
+    expect(sentryScope.setTag).toHaveBeenCalledWith('teable.v2.feature', 'deleteField');
+    expect(sentryScope.setTag).toHaveBeenCalledWith('teable.request.attribution', 'v2');
+    expect(activeSpan.setAttributes).toHaveBeenCalledWith(
+      expect.objectContaining({
+        'teable.request.attribution': 'v2',
+        'teable.v2.enabled': true,
+        'teable.v2.reason': 'space_feature',
+        'teable.v2.feature': 'deleteField',
+      })
+    );
+  });
+
+  it('logs V2 attribution for request timeout HTTP exceptions that are not captured', () => {
+    const loggerError = vi.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    const cls = {
+      get: vi.fn((key: string) => {
+        const values = new Map<string, unknown>([
+          ['useV2', false],
+          ['v2Reason', 'disabled'],
+          ['v2Feature', 'deleteField'],
+        ]);
+        return values.get(key);
+      }),
+    };
+    const filter = new GlobalExceptionFilter(configService as never, cls as never);
+
+    filter.catch(new RequestTimeoutException('timeout'), host as never);
+
+    expect(withScope).not.toHaveBeenCalled();
+    expect(response.setHeader).toHaveBeenCalledWith('x-teable-v2', 'false');
+    expect(loggerError).toHaveBeenCalledWith(
+      expect.objectContaining({
+        url: '/api/test',
+        v2: {
+          attribution: 'v1',
+          enabled: false,
+          reason: 'disabled',
+          feature: 'deleteField',
+        },
+      }),
+      expect.any(String)
+    );
+  });
+
+  it('does not capture expected Nest HTTP exceptions', () => {
+    const filter = new GlobalExceptionFilter(configService as never);
+
+    filter.catch(new BadRequestException('bad input'), host as never);
+
+    expect(withScope).not.toHaveBeenCalled();
+    expect(captureException).not.toHaveBeenCalled();
+  });
+
+  it('does not error-log a localized 400, but still logs other localized statuses', () => {
+    const loggerError = vi.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    const filter = new GlobalExceptionFilter(configService as never);
+    const localization = { i18nKey: 'httpErrors.auth.emailOrPasswordIncorrect' as const };
+
+    filter.catch(
+      new CustomHttpException('Email or password is incorrect', HttpErrorCode.VALIDATION_ERROR, {
+        localization,
+      }),
+      host as never
+    );
+    expect(loggerError).not.toHaveBeenCalled();
+
+    filter.catch(
+      new CustomHttpException('Sandbox down', HttpErrorCode.GATEWAY_TIMEOUT, { localization }),
+      host as never
+    );
+    expect(loggerError).toHaveBeenCalledTimes(1);
+  });
+
+  it('answers a user SMTP rejection with 424 instead of capturing it', () => {
+    const filter = new GlobalExceptionFilter(configService as never);
+
+    filter.catch(
+      new MailDeliveryException('rejected', { responseCode: 554, host: 'smtp.example.com' }),
+      host as never
+    );
+
+    expect(captureException).not.toHaveBeenCalled();
+    expect(response.status).toHaveBeenCalledWith(424);
+    expect(response.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: HttpErrorCode.FAILED_DEPENDENCY,
+        data: { smtp: { responseCode: 554, host: 'smtp.example.com' } },
+      })
+    );
+  });
+
+  it('writes nothing once the response is already completed, but keeps telemetry', () => {
+    const sentResponse = {
+      status: vi.fn(),
+      json: vi.fn(),
+      setHeader: vi.fn(),
+      headersSent: true,
+    };
+    sentResponse.status.mockReturnValue(sentResponse);
+    const sentHost = {
+      switchToHttp: () => ({
+        getRequest: () => ({ url: '/api/oauth/authorize' }),
+        getResponse: () => sentResponse,
+      }),
+    };
+    const filter = new GlobalExceptionFilter(configService as never);
+
+    // e.g. a guard already redirected (EnsureLogin) and Nest raised
+    // ForbiddenException afterwards; writing again would crash with
+    // ERR_HTTP_HEADERS_SENT.
+    filter.catch(new Error('boom after redirect'), sentHost as never);
+
+    expect(sentResponse.setHeader).not.toHaveBeenCalled();
+    expect(sentResponse.status).not.toHaveBeenCalled();
+    expect(sentResponse.json).not.toHaveBeenCalled();
+    expect(captureException).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns a classified BYODB runtime error and annotates Sentry plus OTel', () => {
+    const cls = {
+      get: vi.fn((key: string) => {
+        const values = new Map<string, unknown>([
+          ['user.id', userId],
+          ['user.email', userEmail],
+          ['spaceId', spaceId],
+          [
+            'dataDb',
+            {
+              mode: 'byodb',
+              spaceId,
+              connectionId: dataDbConnectionId,
+              urlFingerprint: dataDbUrlFingerprint,
+              displayHost: 'db.example.com',
+              displayDatabase: 'customer_data',
+              internalSchema: 'teable_internal',
+            },
+          ],
+        ]);
+        return values.get(key);
+      }),
+    };
+    const exception = Object.assign(new Error('database "secret_customer_db" does not exist'), {
+      code: '3D000',
+    });
+    const filter = new GlobalExceptionFilter(configService as never, cls as never);
+
+    filter.catch(exception, host as never);
+
+    expect(response.status).toHaveBeenCalledWith(503);
+    expect(response.json).toHaveBeenCalledWith({
+      message:
+        'The data database bound to this space is currently unavailable. Please check the external database connection and try again.',
+      status: 503,
+      code: 'database_connection_unavailable',
+      data: {
+        dataDb: {
+          code: dataDbErrorCode,
+          retryable: false,
+          userActionable: true,
+          connectionId: dataDbConnectionId,
+          urlFingerprint: dataDbUrlFingerprint,
+          displayHost: 'db.example.com',
+          displayDatabase: 'customer_data',
+          internalSchema: 'teable_internal',
+        },
+      },
+    });
+    expect(JSON.stringify(response.json.mock.calls.at(-1)?.[0])).not.toContain(
+      'secret_customer_db'
+    );
+    expect(sentryScope.setTag).toHaveBeenCalledWith('data_db.error_code', dataDbErrorCode);
+    expect(sentryScope.setTag).toHaveBeenCalledWith('data_db.connection_id', dataDbConnectionId);
+    expect(sentryScope.setContext).toHaveBeenCalledWith(
+      'data_db',
+      expect.objectContaining({
+        errorCode: dataDbErrorCode,
+        driverCode: '3D000',
+        connectionId: dataDbConnectionId,
+        urlFingerprint: dataDbUrlFingerprint,
+      })
+    );
+    expect(activeSpan.setAttributes).toHaveBeenCalledWith(
+      expect.objectContaining({
+        [dataDbOtelAttribute.errorCode]: dataDbErrorCode,
+        [dataDbOtelAttribute.connectionId]: dataDbConnectionId,
+        [dataDbOtelAttribute.urlFingerprint]: dataDbUrlFingerprint,
+      })
+    );
+    expect(activeSpan.setStatus).toHaveBeenCalledWith({
+      code: 2,
+      message: dataDbErrorCode,
+    });
+    expect(runtimeErrorCounter.add).toHaveBeenCalledWith(1, {
+      [dataDbOtelAttribute.errorCode]: dataDbErrorCode,
+      [dataDbOtelAttribute.retryable]: false,
+      [dataDbOtelAttribute.userActionable]: true,
+    });
+  });
+
+  // NestInstrumentation used to do this on its handler span; it is disabled now, so the
+  // filter is the only thing left that sees a thrown exception with the span active.
+  it('records the exception on the span but leaves 4xx unmarked', () => {
+    const filter = new GlobalExceptionFilter(configService as never);
+    const exception = new BadRequestException('bad input');
+
+    filter.catch(exception, host as never);
+
+    expect(activeSpan.recordException).toHaveBeenCalledWith(exception);
+    expect(activeSpan.setStatus).not.toHaveBeenCalled();
+  });
+
+  it('marks the span as errored for a 5xx', () => {
+    const filter = new GlobalExceptionFilter(configService as never);
+    const exception = new Error('boom');
+
+    filter.catch(exception, host as never);
+
+    expect(activeSpan.recordException).toHaveBeenCalledWith(exception);
+    expect(activeSpan.setStatus).toHaveBeenCalledWith({ code: 2, message: 'boom' });
+  });
+});

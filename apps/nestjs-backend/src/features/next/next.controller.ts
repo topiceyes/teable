@@ -1,32 +1,107 @@
-import { Controller, Get, Req, Res } from '@nestjs/common';
+import { All, Body, Controller, Get, Next, Post, Req, Res } from '@nestjs/common';
 import { ApiExcludeEndpoint } from '@nestjs/swagger';
-import express from 'express';
+import type { IQueryParamsVo } from '@teable/openapi';
+import { IQueryParamsRo, queryParamsRoSchema } from '@teable/openapi';
+import { NextFunction, Request, Response } from 'express';
+import { ZodValidationPipe } from '../../zod.validation.pipe';
 import { Public } from '../auth/decorators/public.decorator';
 import { NextService } from './next.service';
 
 @Controller('/')
 export class NextController {
-  constructor(private nextService: NextService) {}
+  constructor(private readonly nextService: NextService) {}
+
+  /**
+   * StreamSaver mitm.html needs relaxed CSP to allow inline scripts
+   * The default CSP blocks inline scripts which prevents Service Worker registration
+   */
+  @ApiExcludeEndpoint()
+  @Public()
+  @Get('streamsaver/mitm.html')
+  public async streamSaverMitm(@Req() req: Request, @Res() res: Response) {
+    if (!this.nextService.server) {
+      return res.status(404).send('Not Found');
+    }
+    // Allow inline scripts for mitm.html (required for StreamSaver to work)
+    res.setHeader(
+      'Content-Security-Policy',
+      "default-src 'self'; script-src 'self' 'unsafe-inline'; frame-ancestors *"
+    );
+    await this.nextService.server.getRequestHandler()(req, res);
+  }
+
+  /**
+   * Service Worker file needs special headers for registration
+   * - Content-Type must be application/javascript
+   * - Service-Worker-Allowed header to allow broader scope
+   */
+  @ApiExcludeEndpoint()
+  @Public()
+  @Get('streamsaver/sw.js')
+  public async serviceWorker(@Req() req: Request, @Res() res: Response) {
+    if (!this.nextService.server) {
+      return res.status(404).send('Not Found');
+    }
+    res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+    res.setHeader('Service-Worker-Allowed', '/');
+    await this.nextService.server.getRequestHandler()(req, res);
+  }
 
   @ApiExcludeEndpoint()
   @Public()
   @Get([
     '/',
     'favicon.ico',
-    '_next/*',
-    '__nextjs*',
-    'images/*',
+    '_next/{*splat}',
+    '__nextjs{*splat}',
+    'images/{*splat}',
+    'streamsaver/{*splat}',
+    // The mobile app's Service Worker (`public/mobile-sw.js`, built by the app's postbuild).
+    'mobile-sw.js',
     'home',
-    '404/*',
-    'api/((?!table).)*',
-    'space/?*',
-    'auth/?*',
-    'base/?*',
-    'invite/?*',
-    'share/?*',
-    'setting/?*',
+    '404/{*splat}',
+    '403{/*splat}',
+    '402{/*splat}',
+    'space{/*splat}',
+    'auth{/*splat}',
+    'waitlist{/*splat}',
+    'base{/*splat}',
+    'invite{/*splat}',
+    'share{/*splat}',
+    'setting{/*splat}',
+    'admin{/*splat}',
+    'oauth{/*splat}',
+    'developer{/*splat}',
+    'public{/*splat}',
+    'enterprise{/*splat}',
+    'unsubscribe{/*splat}',
+    'integrations/authorize{/*splat}',
+    'integrations/google-sheet{/*splat}',
+    't{/*splat}',
+    's{/*splat}',
+    'artifact{/*splat}',
   ])
-  public async home(@Req() req: express.Request, @Res() res: express.Response) {
+  public async home(@Req() req: Request, @Res() res: Response) {
+    if (!this.nextService.server) {
+      return res.status(404).send('Not Found');
+    }
     await this.nextService.server.getRequestHandler()(req, res);
+  }
+
+  @ApiExcludeEndpoint()
+  @Public()
+  @All(['socket', 'socket/{*splat}'])
+  public async socket(@Req() req: Request, @Res() res: Response, @Next() next: NextFunction) {
+    if (!this.nextService.server) {
+      return next();
+    }
+    await this.nextService.server.getRequestHandler()(req, res);
+  }
+
+  @Post('api/query-params')
+  async saveQueryParams(
+    @Body(new ZodValidationPipe(queryParamsRoSchema)) saveQueryParamsRo: IQueryParamsRo
+  ): Promise<IQueryParamsVo> {
+    return await this.nextService.saveQueryParams(saveQueryParamsRo);
   }
 }

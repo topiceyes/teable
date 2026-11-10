@@ -1,115 +1,197 @@
-import { TimeFormatting, type IDateFieldOptions } from '@teable/core';
-import { Calendar, Input } from '@teable/ui-lib';
-import { zhCN, enUS } from 'date-fns/locale';
-import dayjs from 'dayjs';
+import { type IDateFieldOptions, TimeFormatting } from '@teable/core';
+import { Button, Calendar, cn, NavView } from '@teable/ui-lib';
+import { ar, de, enUS, es, fr, he, it, ja, ru, tr, uk, zhCN } from 'date-fns/locale';
+import { formatInTimeZone, toZonedTime, fromZonedTime } from 'date-fns-tz';
 import type { ForwardRefRenderFunction } from 'react';
 import { forwardRef, useContext, useImperativeHandle, useMemo, useRef, useState } from 'react';
 import { AppContext } from '../../../context';
+import { useTranslation } from '../../../context/app/i18n';
 import type { ICellEditor, IEditorRef } from '../type';
+import { TimePicker } from './TimePicker';
 
 export interface IDateEditorMain extends ICellEditor<string | null> {
   style?: React.CSSProperties;
   options?: IDateFieldOptions;
+  disableTimePicker?: boolean;
+  /**
+   * Radix `modal` for the calendar popover. Set it when this editor is
+   * rendered inside a modal container (dialog/drawer), so the popover joins
+   * the same dismissable layer instead of closing its parent on outside tap.
+   */
+  modal?: boolean;
 }
 
+// Remember to update in @nextjs-app/src/features/app/blocks/view/calendar/components/Calendar.tsx
 const LOCAL_MAP = {
   zh: zhCN,
   en: enUS,
+  ja: ja,
+  ru: ru,
+  fr: fr,
+  de: de,
+  es: es,
+  it: it,
+  tr: tr,
+  uk: uk,
+  ar: ar,
+  he: he,
 };
 
 const DateEditorMainBase: ForwardRefRenderFunction<IEditorRef<string>, IDateEditorMain> = (
   props,
   ref
 ) => {
-  const { value, style, className, onChange, readonly, options } = props;
-  const inputRef = useRef<HTMLInputElement | null>(null);
-  const { time } = options?.formatting || {};
-  const [date, setDate] = useState<string | null>(value || null);
-  const hasTimePicker = time !== TimeFormatting.None;
+  const { value, style, className, onChange, readonly, options, disableTimePicker = false } = props;
+  const { time, timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone } =
+    options?.formatting || {};
+  const [date, _setDate] = useState<string | null>(value || null);
+  const dateRef = useRef<string | null>(value || null);
+  const setDate = (val: string | null) => {
+    dateRef.current = val;
+    _setDate(val);
+  };
+  const [navView, setNavView] = useState<NavView>(NavView.Day);
+  const [displayMonth, setDisplayMonth] = useState<Date | undefined>(() =>
+    value ? toZonedTime(value, timeZone) : undefined
+  );
+  const notHaveTimePicker = disableTimePicker || time === TimeFormatting.None;
+  const [timePickerOpen, setTimePickerOpen] = useState(false);
   const defaultFocusRef = useRef<HTMLInputElement | null>(null);
   const { lang = 'en' } = useContext(AppContext);
+  const { t } = useTranslation();
 
   useImperativeHandle(ref, () => ({
     focus: () => defaultFocusRef.current?.focus?.(),
-    setValue: (value?: string) => setDate(value || null),
+    setValue: (value?: string) => {
+      setDate(value || null);
+      setDisplayMonth(value ? toZonedTime(value, timeZone) : undefined);
+    },
     saveValue,
   }));
 
+  // A hidden time is field-zone midnight. A shown time keeps the value's clock, or the current clock when the cell is empty.
+  const timeHidden = time === TimeFormatting.None;
   const onSelect = (value?: Date) => {
-    let curDatetime = dayjs(value);
-    const prevDatetime = dayjs(date);
-    if (!curDatetime.isValid()) onChange?.(null);
+    if (!value) return onChange?.(null);
 
-    if (prevDatetime.isValid()) {
-      const hours = prevDatetime.get('hour');
-      const minutes = prevDatetime.get('minute');
-      curDatetime = curDatetime.set('hour', hours).set('minute', minutes);
-    } else {
-      curDatetime = curDatetime.set('hour', 8).set('minute', 0).set('second', 0);
-    }
+    const clock = toZonedTime(date ?? new Date(), timeZone);
+    const datetime = new Date(
+      value.getFullYear(),
+      value.getMonth(),
+      value.getDate(),
+      timeHidden ? 0 : clock.getHours(),
+      timeHidden ? 0 : clock.getMinutes(),
+      timeHidden ? 0 : clock.getSeconds()
+    );
 
-    const dateStr = curDatetime.toISOString();
-
+    const dateStr = fromZonedTime(datetime, timeZone).toISOString();
     setDate(dateStr);
     onChange?.(dateStr);
   };
 
   const timeValue = useMemo(() => {
-    const datetime = dayjs(date);
-    if (!datetime.isValid()) return '';
-    return datetime.format('HH:mm');
-  }, [date]);
+    if (!date) return '';
+    return formatInTimeZone(date, timeZone, 'HH:mm');
+  }, [date, timeZone]);
 
   const selectedDate = useMemo(() => {
-    const dateTime = dayjs(date);
-    return dateTime.isValid() ? dateTime.toDate() : undefined;
-  }, [date]);
+    if (!date) {
+      return;
+    }
 
-  const onTimeChange: React.ChangeEventHandler<HTMLInputElement> = (e) => {
-    const datetime = dayjs(date);
-    if (!datetime.isValid()) return;
-    const timeValue = e.target.value;
-    const hours = Number.parseInt(timeValue.split(':')[0] || '00', 10);
-    const minutes = Number.parseInt(timeValue.split(':')[1] || '00', 10);
-    const modifiedDatetime = datetime.set('hour', hours).set('minute', minutes);
-    setDate(modifiedDatetime.toISOString());
+    return toZonedTime(date, timeZone);
+  }, [date, timeZone]);
+
+  const onTimeChange = (timeStr: string) => {
+    const datetime = toZonedTime(date ?? new Date(), timeZone);
+
+    const hours = Number.parseInt(timeStr.split(':')[0] || '00', 10);
+    const minutes = Number.parseInt(timeStr.split(':')[1] || '00', 10);
+
+    datetime.setHours(hours);
+    datetime.setMinutes(minutes);
+
+    const dateStr = fromZonedTime(datetime, timeZone).toISOString();
+    setDate(dateStr);
+    onChange?.(dateStr);
   };
 
-  const saveValue = () => {
-    if (value == date) return;
-    onChange?.(date || null);
+  const saveValue = (nowDate?: string) => {
+    const val = nowDate || dateRef.current;
+
+    if (value == val) return;
+    setDate(val);
+    onChange?.(val);
+  };
+
+  const defaultTimeValue = useMemo(
+    () => formatInTimeZone(new Date(), timeZone, 'HH:mm'),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [timeZone]
+  );
+
+  const closeTimePicker = (e: React.MouseEvent) => {
+    if (timePickerOpen) {
+      e.stopPropagation();
+      setTimePickerOpen(false);
+    }
   };
 
   return (
-    <>
+    <div role="presentation" onMouseDown={closeTimePicker}>
       <Calendar
         locale={LOCAL_MAP[lang as keyof typeof LOCAL_MAP]}
         style={style}
         mode="single"
+        timeZone={timeZone}
         selected={selectedDate}
-        defaultMonth={selectedDate}
+        month={displayMonth}
+        onMonthChange={setDisplayMonth}
         onSelect={onSelect}
         className={className}
         disabled={readonly}
-        fromYear={1970}
-        toYear={2100}
-        captionLayout="dropdown-buttons"
         footer={
-          hasTimePicker && date ? (
-            <div className="flex items-center p-1">
-              <Input
-                ref={inputRef}
-                type="time"
+          <div
+            className={cn(
+              'flex items-center mt-1.5',
+              notHaveTimePicker ? 'justify-center' : 'justify-between',
+              navView === NavView.Year && 'hidden'
+            )}
+          >
+            {!notHaveTimePicker ? (
+              <TimePicker
                 value={timeValue}
+                defaultValue={defaultTimeValue}
+                open={timePickerOpen}
+                onOpenChange={setTimePickerOpen}
                 onChange={onTimeChange}
-                onBlur={saveValue}
               />
-            </div>
-          ) : null
+            ) : null}
+            <Button
+              className="h-[34px] text-sm"
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                const todayZoned = toZonedTime(new Date(), timeZone);
+                if (time === TimeFormatting.None) {
+                  todayZoned.setHours(0, 0, 0, 0);
+                } else if (date) {
+                  const existingZoned = toZonedTime(date, timeZone);
+                  todayZoned.setHours(existingZoned.getHours());
+                  todayZoned.setMinutes(existingZoned.getMinutes());
+                  todayZoned.setSeconds(existingZoned.getSeconds());
+                }
+                saveValue(fromZonedTime(todayZoned, timeZone).toISOString());
+              }}
+            >
+              {t('editor.date.today')}
+            </Button>
+          </div>
         }
+        onNavViewChange={(navView) => setNavView(navView)}
       />
-      <input className="size-0 opacity-0" ref={defaultFocusRef} />
-    </>
+      <input className="absolute size-0 opacity-0" ref={defaultFocusRef} />
+    </div>
   );
 };
 

@@ -1,13 +1,20 @@
+/* eslint-disable sonarjs/no-duplicate-string */
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { Colors, FieldType } from '@teable/core';
+import type { IUserCellValue } from '@teable/core';
+import { Colors, FieldType, UserFieldCore } from '@teable/core';
 import type { PrismaService } from '@teable/db-main-prisma';
+import { plainToInstance } from 'class-transformer';
 import { vi } from 'vitest';
 import { mockDeep, mockReset } from 'vitest-mock-extended';
+import { getError } from '../../../test/utils/get-error';
 import type { AttachmentsStorageService } from '../attachments/attachments-storage.service';
+import type { CollaboratorService } from '../collaborator/collaborator.service';
+import type { DataLoaderService } from '../data-loader/data-loader.service';
 import type { FieldConvertingService } from '../field/field-calculate/field-converting.service';
 import type { IFieldInstance } from '../field/model/factory';
-import type { LinkFieldDto } from '../field/model/field-dto/link-field.dto';
 import type { SingleSelectFieldDto } from '../field/model/field-dto/single-select-field.dto';
+import type { UserFieldDto } from '../field/model/field-dto/user-field.dto';
+import type { CrossBaseLinkAccessService } from './cross-base-link-access.service';
 import type { RecordService } from './record.service';
 import { TypeCastAndValidate } from './typecast.validate';
 
@@ -23,12 +30,19 @@ describe('TypeCastAndValidate', () => {
   const fieldConvertingService = mockDeep<FieldConvertingService>();
   const recordService = mockDeep<RecordService>();
   const attachmentsStorageService = mockDeep<AttachmentsStorageService>();
+  const collaboratorService = mockDeep<CollaboratorService>();
+  const dataLoaderService = mockDeep<DataLoaderService>();
+
+  const crossBaseLinkAccess = { assertForeignTablesReadable: vi.fn().mockResolvedValue(undefined) };
 
   const services = {
     prismaService,
     fieldConvertingService,
     recordService,
     attachmentsStorageService,
+    collaboratorService,
+    dataLoaderService,
+    crossBaseLinkAccess: crossBaseLinkAccess as unknown as CrossBaseLinkAccessService,
   };
   const tableId = 'tableId';
 
@@ -36,6 +50,8 @@ describe('TypeCastAndValidate', () => {
     mockReset(fieldConvertingService);
     mockReset(prismaService);
     mockReset(recordService);
+    mockReset(collaboratorService);
+    mockReset(dataLoaderService);
   });
 
   describe('typecastCellValuesWithField', () => {
@@ -103,6 +119,24 @@ describe('TypeCastAndValidate', () => {
     });
   });
 
+  describe('castToLink cross-base read check', () => {
+    // A structured id write (typecast=false) reaches the foreign table just like
+    // a title lookup does, so the foreign-base read check must run on every link
+    // write, not only the typecast branch.
+    it('asserts foreign-table readability even when typecast is false', async () => {
+      crossBaseLinkAccess.assertForeignTablesReadable.mockClear();
+      const field = mockDeep<IFieldInstance>({ type: FieldType.Link, isComputed: false });
+      const typeCastAndValidate = new TypeCastAndValidate({ services, field, tableId }); // typecast omitted
+      vi.spyOn(typeCastAndValidate as any, 'mapFieldsCellValuesWithValidate').mockResolvedValue([]);
+
+      await (typeCastAndValidate as any).castToLink([{ id: 'rec1111111111111111' }]);
+
+      expect(crossBaseLinkAccess.assertForeignTablesReadable).toHaveBeenCalledWith(tableId, [
+        field.id,
+      ]);
+    });
+  });
+
   describe('valueToStringArray', () => {
     const typeCastAndValidate = new TypeCastAndValidate({
       services,
@@ -154,6 +188,23 @@ describe('TypeCastAndValidate', () => {
     });
   });
 
+  it('should bypass notNull for computed fields', async () => {
+    const field = mockDeep<IFieldInstance>({
+      type: FieldType.Formula,
+      isComputed: true,
+      notNull: true,
+      validateCellValue: vi.fn().mockReturnValue({ success: true, data: null }),
+      validateCellValueWithNotNull: vi.fn().mockReturnValue({ success: true, data: null }),
+    });
+    const typeCastAndValidate = new TypeCastAndValidate({ services, field, tableId });
+    const result = (typeCastAndValidate as any).mapFieldsCellValuesWithValidate(
+      [null],
+      (v: any) => v
+    );
+    expect(result[0]).toBeNull();
+    expect(field.validateCellValueWithNotNull).toHaveBeenCalled();
+  });
+
   describe('mapFieldsCellValuesWithValidate', () => {
     const field = mockDeep<IFieldInstance>({ id: 'fldxxxx' });
     const typeCastAndValidate = new TypeCastAndValidate({
@@ -166,12 +217,10 @@ describe('TypeCastAndValidate', () => {
       const cellValues = [1];
       const callback = vi.fn(() => 'value');
 
-      // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-      // @ts-ignore-next-line
-      field.validateCellValue.mockReturnValue({
+      field.validateCellValueWithNotNull = vi.fn().mockReturnValue({
         success: false,
         error: 'error',
-      });
+      }) as any;
 
       const result = typeCastAndValidate['mapFieldsCellValuesWithValidate'](cellValues, callback);
 
@@ -179,7 +228,7 @@ describe('TypeCastAndValidate', () => {
       expect(callback).toBeCalledWith(1);
     });
 
-    it('should throw error when validate fails', () => {
+    it('should throw error when validate fails', async () => {
       const cellValues = [1];
 
       const typeCastAndValidate = new TypeCastAndValidate({
@@ -188,29 +237,31 @@ describe('TypeCastAndValidate', () => {
         tableId,
       });
 
-      // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-      // @ts-ignore-next-line
-      field.validateCellValue.mockReturnValue({
+      field.validateCellValueWithNotNull = vi.fn().mockReturnValue({
         success: false,
         error: 'error',
-      });
+      }) as any;
 
-      expect(() => {
-        typeCastAndValidate['mapFieldsCellValuesWithValidate'](cellValues, vi.fn());
-      }).toThrow('Bad Request');
+      const error = await getError(async () =>
+        typeCastAndValidate['mapFieldsCellValuesWithValidate'](cellValues, vi.fn())
+      );
+      expect(error).toBeDefined();
+      expect(error?.status).toBe(400);
     });
 
-    it('should return original record if typecast is false', () => {
-      const field = mockDeep<IFieldInstance>();
+    it('should return null if typecast is false', () => {
+      const field = mockDeep<IFieldInstance>({
+        validateCellValueWithNotNull: vi.fn().mockReturnValue({ success: true, data: null }),
+      }) as any;
       const typeCastAndValidate = new TypeCastAndValidate({
         services,
         field,
         tableId,
       });
 
-      field.validateCellValue.mockReturnValue({
+      field.validateCellValue = vi.fn().mockReturnValue({
         success: true,
-      } as any);
+      }) as any;
 
       const cellValues = [1];
 
@@ -219,19 +270,15 @@ describe('TypeCastAndValidate', () => {
         () => 'value'
       );
 
-      expect(result).toEqual(cellValues);
+      expect(result).toEqual([null]);
     });
 
     it('should not throw error if no field value', () => {
-      const cellValues = [1];
-
-      field.validateCellValue.mockReturnValue({
-        success: true,
-      } as any);
+      const cellValues = [undefined];
 
       const result = typeCastAndValidate['mapFieldsCellValuesWithValidate'](cellValues, vi.fn());
 
-      expect(result).toEqual(cellValues);
+      expect(result).toEqual([undefined]);
     });
   });
 
@@ -301,7 +348,10 @@ describe('TypeCastAndValidate', () => {
     const field = mockDeep<SingleSelectFieldDto>({
       id: 'fldxxxx',
       type: FieldType.SingleSelect,
-      options: { choices: [{ id: '1', name: 'option 1', color: Colors.Blue }] },
+      options: {
+        choices: [{ id: '1', name: 'option 1', color: Colors.Blue }],
+        preventAutoNewOptions: false,
+      },
     });
     const cellValues = ['value'];
     const typeCastAndValidate = new TypeCastAndValidate({
@@ -325,13 +375,50 @@ describe('TypeCastAndValidate', () => {
       expect(typeCastAndValidate['createOptionsIfNotExists']).toBeCalledWith(['value']);
       expect(result).toEqual('value');
     });
+
+    it('preserves omitted values when preventAutoNewOptions is enabled', async () => {
+      const field = mockDeep<SingleSelectFieldDto>({
+        id: 'fldxxxx',
+        type: FieldType.SingleSelect,
+        options: {
+          choices: [{ id: '1', name: 'Open', color: Colors.Blue }],
+          preventAutoNewOptions: true,
+        },
+      });
+      const typeCastAndValidate = new TypeCastAndValidate({
+        services,
+        field,
+        tableId,
+        typecast: true,
+      });
+      (typeCastAndValidate as any).cache.choicesMap = {
+        Open: { id: '1', name: 'Open', color: Colors.Blue },
+      };
+
+      vi.spyOn(typeCastAndValidate as any, 'mapFieldsCellValuesWithValidate').mockReturnValue([
+        undefined,
+        'Open',
+        'Missing',
+      ]);
+
+      const result = await typeCastAndValidate['castToSingleSelect']([
+        undefined,
+        'Open',
+        'Missing',
+      ]);
+
+      expect(result).toEqual([undefined, 'Open', null]);
+    });
   });
 
   describe('castToMultipleSelect', () => {
     const field = mockDeep<SingleSelectFieldDto>({
       id: 'fldxxxx',
       type: FieldType.SingleSelect,
-      options: { choices: [{ id: '1', name: 'option 1', color: Colors.Blue }] },
+      options: {
+        choices: [{ id: '1', name: 'option 1', color: Colors.Blue }],
+        preventAutoNewOptions: false,
+      },
     });
     const cellValues = ['value'];
     const typeCastAndValidate = new TypeCastAndValidate({
@@ -357,77 +444,114 @@ describe('TypeCastAndValidate', () => {
     });
   });
 
-  describe('getLinkTableRecordMap', () => {
-    const field = mockDeep<LinkFieldDto>({
-      id: 'fldxxxx',
-      type: FieldType.Link,
-      options: { foreignTableId: 'foreignTableId' },
-    });
-    const typeCastAndValidate = new TypeCastAndValidate({
-      services,
-      field,
-      tableId,
-      typecast: true,
-    });
-    it('should call dependencies correctly and return recordMap', async () => {
-      recordService.getRecordsWithPrimary.mockResolvedValue([{ id: '1', title: 'title1' }]);
-
-      const result = await typeCastAndValidate['getLinkTableRecordMap'](['title1']);
-
-      expect(recordService.getRecordsWithPrimary).toBeCalledWith('foreignTableId', ['title1']);
-      expect(result).toEqual({
-        title1: '1',
-      });
-    });
-  });
-
-  describe('castToLinkOne', () => {
-    const typeCastAndValidate = new TypeCastAndValidate({
-      services,
-      field: mockDeep<IFieldInstance>(),
-      tableId,
-      typecast: true,
-    });
-
-    it('should cast value correctly and return one linkCellValue', () => {
-      typeCastAndValidate['field'].isMultipleCellValue = true;
-      const result = typeCastAndValidate['castToLinkOne'](['a', 'b', 'c'], { a: '1', b: '2' });
-
-      expect(result).toEqual([
-        { title: 'a', id: '1' },
-        { title: 'b', id: '2' },
+  describe('castToUser', () => {
+    const bobCv: IUserCellValue = {
+      id: '1',
+      title: 'bob',
+      email: 'bob@example.com',
+      avatarUrl: expect.stringContaining('api/attachments/read/public/avatar/1'),
+    };
+    const tomCv: IUserCellValue = {
+      id: '2',
+      title: 'tom',
+      email: 'tom@example.com',
+      avatarUrl: expect.stringContaining('api/attachments/read/public/avatar/2'),
+    };
+    beforeEach(() => {
+      collaboratorService.getUserCollaboratorsByTableId.mockResolvedValue([
+        { id: '1', name: 'bob', email: 'bob@example.com', avatar: null, isSystem: false },
+        { id: '2', name: 'tom', email: 'tom@example.com', avatar: null, isSystem: false },
       ]);
     });
 
-    it('should cast value correctly and return multipleCellValue linkCellValue', () => {
-      typeCastAndValidate['field'].isMultipleCellValue = false;
-      const result = typeCastAndValidate['castToLinkOne'](['a', 'b', 'c'], { a: '1', b: '2' });
-
-      expect(result).toEqual({ title: 'a', id: '1' });
-    });
-  });
-
-  describe('castToLink', () => {
-    const field = mockDeep<LinkFieldDto>();
-    const cellValues = ['value'];
-    const typeCastAndValidate = new TypeCastAndValidate({
-      services,
-      field,
-      tableId,
-      typecast: true,
-    });
-    it('should call dependencies correctly and return map by typecast', async () => {
-      vi.spyOn(typeCastAndValidate as any, 'getLinkTableRecordMap').mockResolvedValue({});
+    it('string cell value', async () => {
+      const field = mockDeep<UserFieldDto>({
+        id: 'fldxxxx',
+        type: FieldType.User,
+      });
+      field.convertStringToCellValue.mockImplementation((value: string, ctx: any) => {
+        return new UserFieldCore().convertStringToCellValue(value, ctx);
+      });
+      const cellValues = ['bob', '1', 'bob@example.com', 'xxxx', 'bob,tom'];
+      const typeCastAndValidate = new TypeCastAndValidate({
+        services,
+        field,
+        tableId,
+        typecast: true,
+      });
 
       vi.spyOn(typeCastAndValidate as any, 'mapFieldsCellValuesWithValidate').mockImplementation(
-        (...args: any[]) => (args[1] as any)('title')
+        (...args: any[]) => args[0].map((v: any) => (args[1] as any)(v))
       );
 
-      vi.spyOn(typeCastAndValidate as any, 'castToLinkOne').mockReturnValue({ title1: '1' } as any);
+      const expectedCv: (IUserCellValue | null)[] = [bobCv, bobCv, bobCv, null, bobCv];
 
-      const result = await typeCastAndValidate['castToLink'](cellValues);
+      const result = await typeCastAndValidate['castToUser'](cellValues);
+      expect(result).toEqual(expectedCv);
+    });
 
-      expect(result).toEqual({ title1: '1' });
+    it('multiple cell value', async () => {
+      const field = mockDeep<UserFieldDto>({
+        id: 'fldxxxx',
+        type: FieldType.User,
+        isMultipleCellValue: true,
+      });
+      field.convertStringToCellValue.mockImplementation((value: string, ctx: any) => {
+        return plainToInstance(UserFieldCore, {
+          isMultipleCellValue: true,
+        }).convertStringToCellValue(value, ctx);
+      });
+      const cellValues = ['bob', '1', 'bob@example.com', 'xxxx', 'bob,tom'];
+      const typeCastAndValidate = new TypeCastAndValidate({
+        services,
+        field,
+        tableId,
+        typecast: true,
+      });
+      vi.spyOn(typeCastAndValidate as any, 'mapFieldsCellValuesWithValidate').mockImplementation(
+        (...args: any[]) => args[0].map((v: any) => (args[1] as any)(v))
+      );
+      const result = await typeCastAndValidate['castToUser'](cellValues);
+      const expectedCv: (IUserCellValue | IUserCellValue[] | null)[] = [
+        [bobCv],
+        [bobCv],
+        [bobCv],
+        null,
+        [bobCv, tomCv],
+      ];
+      expect(result).toEqual(expectedCv);
+    });
+
+    it('object cell value', async () => {
+      const field = mockDeep<UserFieldDto>({
+        id: 'fldxxxx',
+        type: FieldType.User,
+      });
+
+      const cellValues = [
+        { id: '1' },
+        { name: 'bob' },
+        { email: 'bob@example.com' },
+        null,
+        { title: 'bob' },
+      ];
+
+      field.convertStringToCellValue.mockImplementation((value: string, ctx: any) => {
+        return new UserFieldCore().convertStringToCellValue(value, ctx);
+      });
+
+      const typeCastAndValidate = new TypeCastAndValidate({
+        services,
+        field,
+        tableId,
+        typecast: true,
+      });
+      vi.spyOn(typeCastAndValidate as any, 'mapFieldsCellValuesWithValidate').mockImplementation(
+        (...args: any[]) => args[0].map((v: any) => (args[1] as any)(v))
+      );
+      const result = await typeCastAndValidate['castToUser'](cellValues);
+
+      expect(result).toEqual([bobCv, bobCv, bobCv, null, bobCv]);
     });
   });
 });

@@ -1,0 +1,841 @@
+import type { OnApplicationBootstrap, OnModuleDestroy } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { DiscoveryService, ModuleRef, Reflector } from '@nestjs/core';
+import type { InstanceWrapper } from '@nestjs/core/injector/instance-wrapper';
+import { COMPUTE_ACTIVITY_CHANGED, getActionTriggerChannel } from '@teable/core';
+import type { IPgPoolLease } from '@teable/db-main-prisma';
+import { PgPoolRegistry } from '@teable/db-main-prisma';
+import {
+  ShareDbBackendPresencePublisher,
+  ShareDbPubSubPublisher,
+  registerV2ShareDbRealtime,
+  v2ShareDbTokens,
+} from '@teable/v2-adapter-realtime-sharedb';
+import {
+  IComputedOutboxWakeupPublisher,
+  IDomainEventWakeupPublisher,
+  noopComputedOutboxWakeupPublisher,
+  noopDomainEventWakeupPublisher,
+  v2RecordRepositoryPostgresTokens,
+  type ComputedUpdateOutboxConfig,
+} from '@teable/v2-adapter-table-repository-postgres';
+import { KeyvUndoRedoStore } from '@teable/v2-adapter-undo-redo-keyv';
+import {
+  createV2NodePgContainer,
+  disposeV2NodePgContainer,
+  type IV2NodePgContainerOptions,
+} from '@teable/v2-container-node';
+import type {
+  AttachmentValueDecoratorService,
+  IAttachmentLookupService,
+  IComputedOutboxAdmin,
+  IExecutionContext,
+} from '@teable/v2-core';
+import { ActorId, v2CoreTokens } from '@teable/v2-core';
+import type { DependencyContainer } from '@teable/v2-di';
+import { registerV2ImportServices } from '@teable/v2-import';
+import {
+  executablePhase1RemediationKindValues,
+  startTableQueryOpsAnalyzerIfEnabled,
+  startTableQueryOpsTaskWorkerIfEnabled,
+  type ExecutablePhase1RemediationKind,
+  type TableQueryOpsRunnerHandle,
+} from '@teable/v2-table-query-ops';
+import { createSsrfSafeFetch, setSafeFetch } from '@teable/v2-utils';
+import { ClsService } from 'nestjs-cls';
+import { PinoLogger } from 'nestjs-pino';
+import { CacheService } from '../../cache/cache.service';
+import { IThresholdConfig, ThresholdConfig } from '../../configs/threshold.config';
+import {
+  resolveByodbDataDbPoolSettings,
+  resolveByodbSchemaCoordinationSettings,
+} from '../../global/byodb-data-db-pool-budget';
+import { DataDbClientManager } from '../../global/data-db-client-manager.service';
+import type {
+  IComputedOutboxMaintenanceTarget,
+  IDataDbRoutingSnapshot,
+} from '../../global/data-db-client-manager.service';
+import {
+  DataDbRuntimeCacheService,
+  V2_CONTAINER_CACHE_NAMESPACE,
+} from '../../global/data-db-runtime-cache.service';
+import { ShareDbService } from '../../share-db/share-db.service';
+import type { IClsStore } from '../../types/cls';
+import { AttachmentsStorageService } from '../attachments/attachments-storage.service';
+import { ComputedOutboxClaimConcurrencyService } from './computed-outbox-trigger/computed-outbox-claim-concurrency.service';
+import {
+  COMPUTED_OUTBOX_ADMIN,
+  COMPUTED_OUTBOX_WAKEUP_PUBLISHER,
+} from './computed-outbox-trigger/constants';
+import { DOMAIN_EVENT_OUTBOX_WAKEUP_PUBLISHER } from './domain-event-outbox-trigger/constants';
+import { TableQueryObservationRuntimeService } from './table-query-observation-runtime.service';
+import { TableQuerySearchMetricsService } from './table-query-search-observability';
+import { resolveTableQuerySearchVectorRuntimeMode } from './table-query-search-vector-runtime.service';
+import { V2AttachmentUrlSignerService } from './v2-attachment-url-signer.service';
+import { CommandBusTracingMiddleware } from './v2-command-bus-tracing.middleware';
+import { resolveBoolean, resolvePositiveInteger } from './v2-config-parsers';
+import { PinoLoggerAdapter } from './v2-logger.adapter';
+import {
+  V2_PROJECTION_REGISTRAR_METADATA,
+  isV2ProjectionRegistrar,
+  type IV2ProjectionRegistrar,
+} from './v2-projection-registrar';
+import { QueryBusTracingMiddleware } from './v2-query-bus-tracing.middleware';
+import { V2QueryCancellationMiddleware } from './v2-query-cancellation.middleware';
+import { V2RecordChangedValueDecoratorService } from './v2-record-changed-value-decorator.service';
+import { OpenTelemetryTracer } from './v2-tracer.adapter';
+
+const resolveNonNegativeInteger = (value: unknown): number | undefined => {
+  const parsed =
+    typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : Number.NaN;
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : undefined;
+};
+
+const resolveTableQueryOpsWorkerId = (configured: unknown): string => {
+  const hostname = process.env.HOSTNAME?.trim();
+  const instanceId = hostname && hostname.length > 0 ? hostname : String(process.pid);
+  if (typeof configured === 'string' && configured.trim().length > 0) {
+    return `${configured.trim()}:${instanceId}`;
+  }
+  return `nestjs-${instanceId}`;
+};
+
+// Default is shadow: decisions and reasons are logged for the admin page without
+// executing any DDL until V2_TABLE_QUERY_OPS_AUTO_ACCEPT=auto is set explicitly.
+export const resolveTableQueryAutoAcceptMode = (value: unknown): 'off' | 'shadow' | 'auto' => {
+  if (typeof value !== 'string') return 'shadow';
+  const normalized = value.trim().toLowerCase();
+  return normalized === 'auto' || normalized === 'off' ? normalized : 'shadow';
+};
+
+const buildComputedUpdateOptions = (
+  computedUpdateMode: string | undefined,
+  wakeupPublisher: NonNullable<IV2NodePgContainerOptions['computedUpdate']>['wakeupPublisher'],
+  outboxConfig?: NonNullable<IV2NodePgContainerOptions['computedUpdate']>['outboxConfig'],
+  runtimeConfig?: NonNullable<IV2NodePgContainerOptions['computedUpdate']>['runtimeConfig']
+): IV2NodePgContainerOptions['computedUpdate'] => {
+  const shared = {
+    wakeupPublisher,
+    ...(outboxConfig && Object.keys(outboxConfig).length > 0 ? { outboxConfig } : {}),
+    ...(runtimeConfig && Object.keys(runtimeConfig).length > 0 ? { runtimeConfig } : {}),
+  };
+  if (computedUpdateMode === 'sync') {
+    return {
+      mode: 'sync',
+      fieldBackfillConfig: { mode: 'sync' },
+      ...shared,
+    };
+  }
+  return shared;
+};
+
+const executablePhase1RemediationKinds = [
+  ...executablePhase1RemediationKindValues,
+] as const satisfies ReadonlyArray<ExecutablePhase1RemediationKind>;
+
+const defaultAllowedRemediationKinds = (input: {
+  readonly allowIndexExecution: boolean;
+  readonly searchVectorRuntimeEnabled: boolean;
+}): ReadonlyArray<ExecutablePhase1RemediationKind> => {
+  if (input.allowIndexExecution) return executablePhase1RemediationKinds;
+  if (input.searchVectorRuntimeEnabled) {
+    // Schema-change maintenance and reclaim share the search runtime worker.
+    return [
+      'rebuild_search_access_path',
+      'rebuild_search_vector',
+      'drop_search_access_path',
+      'manual_investigation',
+    ];
+  }
+  return ['manual_investigation'];
+};
+
+const parseAllowedRemediationKinds = (
+  value: unknown
+): ReadonlyArray<ExecutablePhase1RemediationKind> | undefined => {
+  if (typeof value !== 'string') return undefined;
+  const allowed = new Set<ExecutablePhase1RemediationKind>(executablePhase1RemediationKinds);
+  const parsed = value
+    .split(',')
+    .map((kind) => kind.trim())
+    .filter((kind): kind is ExecutablePhase1RemediationKind =>
+      allowed.has(kind as ExecutablePhase1RemediationKind)
+    );
+  return parsed.length > 0 ? parsed : undefined;
+};
+
+@Injectable()
+export class V2ContainerService implements OnApplicationBootstrap, OnModuleDestroy {
+  private readonly logger = new Logger(V2ContainerService.name);
+  private readonly byodbPoolSettings = resolveByodbDataDbPoolSettings();
+  private readonly tableQueryOpsRunnerHandles = new WeakMap<
+    DependencyContainer,
+    ReadonlyArray<TableQueryOpsRunnerHandle>
+  >();
+  private readonly poolLeases = new WeakMap<DependencyContainer, ReadonlyArray<IPgPoolLease>>();
+  private readonly claimConcurrencyUnregisters = new WeakMap<DependencyContainer, () => void>();
+  private readonly containerRouteSignatures = new WeakMap<DependencyContainer, string>();
+  private readonly containersPendingTableQueryOpsRunners = new WeakSet<DependencyContainer>();
+
+  constructor(
+    private readonly configService: ConfigService,
+    private readonly pinoLogger: PinoLogger,
+    private readonly shareDbService: ShareDbService,
+    private readonly cacheService: CacheService,
+    private readonly attachmentsStorageService: AttachmentsStorageService,
+    @ThresholdConfig() private readonly thresholdConfig: IThresholdConfig,
+    private readonly reflector: Reflector,
+    private readonly discoveryService: DiscoveryService,
+    private readonly moduleRef: ModuleRef,
+    private readonly dataDbClientManager: DataDbClientManager,
+    private readonly runtimeCache: DataDbRuntimeCacheService,
+    private readonly pgPoolRegistry: PgPoolRegistry,
+    private readonly tableQueryObservationRuntime: TableQueryObservationRuntimeService,
+    private readonly cls: ClsService<IClsStore>,
+    @Optional()
+    @Inject(COMPUTED_OUTBOX_WAKEUP_PUBLISHER)
+    private readonly computedOutboxWakeupPublisher: IComputedOutboxWakeupPublisher = noopComputedOutboxWakeupPublisher,
+    @Optional()
+    @Inject(DOMAIN_EVENT_OUTBOX_WAKEUP_PUBLISHER)
+    private readonly domainEventWakeupPublisher: IDomainEventWakeupPublisher = noopDomainEventWakeupPublisher,
+    @Optional()
+    private readonly claimConcurrency?: ComputedOutboxClaimConcurrencyService
+  ) {}
+
+  async onApplicationBootstrap(): Promise<void> {
+    await this.getContainer();
+  }
+
+  async getContainer(): Promise<DependencyContainer> {
+    return await this.getContainerForDataDb('meta-fallback', this.getMetaConnectionString());
+  }
+
+  async getContainerForSpace(spaceId: string): Promise<DependencyContainer> {
+    const dataDb = await this.dataDbClientManager.getDataDatabaseForSpace(spaceId);
+    return await this.getContainerForDataDb(
+      dataDb.cacheKey,
+      dataDb.connectionUrl ?? dataDb.url,
+      dataDb.internalSchema
+    );
+  }
+
+  async getContainerForRoutingSnapshot(
+    snapshot: IDataDbRoutingSnapshot
+  ): Promise<DependencyContainer> {
+    const dataDb = await this.dataDbClientManager.getDataDatabaseFromRoutingSnapshot(snapshot);
+    return this.getContainerForDataDb(
+      dataDb.cacheKey,
+      dataDb.connectionUrl ?? dataDb.url,
+      dataDb.internalSchema
+    );
+  }
+
+  async getContainerForBase(baseId: string): Promise<DependencyContainer> {
+    const dataDb = await this.dataDbClientManager.getDataDatabaseForBase(baseId);
+    return await this.getContainerForDataDb(
+      dataDb.cacheKey,
+      dataDb.connectionUrl ?? dataDb.url,
+      dataDb.internalSchema
+    );
+  }
+
+  async getContainerForTable(tableId: string): Promise<DependencyContainer> {
+    const dataDb = await this.dataDbClientManager.getDataDatabaseForTable(tableId);
+    return await this.getContainerForDataDb(
+      dataDb.cacheKey,
+      dataDb.connectionUrl ?? dataDb.url,
+      dataDb.internalSchema
+    );
+  }
+
+  /**
+   * Resolves only a metadata-proven current route. A cold route may initialize the same cached
+   * container used by normal requests, but initialization is explicitly non-migrating and does
+   * not start background workers. A later normal acquisition promotes that container's workers.
+   */
+  async getPreviewContainerForTable(tableId: string): Promise<DependencyContainer | null> {
+    const dataDb = await this.dataDbClientManager.getDataDatabaseForTablePreviewReadOnly(tableId);
+    if (!dataDb) return null;
+    const dataConnectionString = dataDb.connectionUrl ?? dataDb.url;
+    const signature = this.containerRouteSignature(dataConnectionString, dataDb.internalSchema);
+    const cached = await this.runtimeCache.get<DependencyContainer>(
+      V2_CONTAINER_CACHE_NAMESPACE,
+      dataDb.cacheKey
+    );
+    if (cached) {
+      return this.containerRouteSignatures.get(cached) === signature ? cached : null;
+    }
+
+    const container = await this.runtimeCache.getOrCreate(
+      V2_CONTAINER_CACHE_NAMESPACE,
+      dataDb.cacheKey,
+      async () => {
+        const created = await this.createContainer(dataConnectionString, dataDb.internalSchema, {
+          previewReadOnly: true,
+        });
+        this.containerRouteSignatures.set(created, signature);
+        return created;
+      },
+      (created) => this.destroyContainer(created)
+    );
+    return this.containerRouteSignatures.get(container) === signature ? container : null;
+  }
+
+  isTableQuerySearchVectorRuntimeEnabled(): boolean {
+    return (
+      resolveTableQuerySearchVectorRuntimeMode(
+        this.configService.get('V2_TABLE_QUERY_OPS_SEARCH_ACCESS_PATH_RUNTIME') ??
+          this.configService.get('V2_TABLE_QUERY_OPS_SEARCH_VECTOR_RUNTIME')
+      ) === 'auto'
+    );
+  }
+
+  async getContainerForMaintenanceTarget(
+    target: IComputedOutboxMaintenanceTarget
+  ): Promise<DependencyContainer> {
+    return this.getContainerForDataDb(
+      target.cacheKey,
+      target.connectionUrl ?? target.url,
+      target.internalSchema
+    );
+  }
+
+  private resolveComputedOutboxAdmin(): IComputedOutboxAdmin | undefined {
+    try {
+      return this.moduleRef.get<IComputedOutboxAdmin>(COMPUTED_OUTBOX_ADMIN, { strict: false });
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async getContainerForDataDb(
+    cacheKey: string,
+    dataConnectionString: string,
+    dataSchema?: string
+  ): Promise<DependencyContainer> {
+    const container = await this.runtimeCache.getOrCreate(
+      V2_CONTAINER_CACHE_NAMESPACE,
+      cacheKey,
+      async () => {
+        const created = await this.createContainer(dataConnectionString, dataSchema);
+        this.containerRouteSignatures.set(
+          created,
+          this.containerRouteSignature(dataConnectionString, dataSchema)
+        );
+        return created;
+      },
+      (created) => this.destroyContainer(created)
+    );
+    if (this.containersPendingTableQueryOpsRunners.has(container)) {
+      this.startTableQueryOpsRunners(container);
+      this.containersPendingTableQueryOpsRunners.delete(container);
+    }
+    return container;
+  }
+
+  private containerRouteSignature(dataConnectionString: string, dataSchema?: string): string {
+    return `${dataConnectionString}\u0000${dataSchema ?? ''}`;
+  }
+
+  private getMetaConnectionString(): string {
+    return (
+      this.configService.get<string>('PRISMA_META_DATABASE_URL') ??
+      this.configService.get<string>('PRISMA_DATABASE_URL') ??
+      this.configService.getOrThrow<string>('DATABASE_URL')
+    );
+  }
+
+  private acquireDataPoolLease(
+    dataConnectionString: string,
+    metaConnectionString: string,
+    metaPoolLease: IPgPoolLease,
+    dataSchema?: string
+  ): IPgPoolLease {
+    if (dataConnectionString === metaConnectionString && !dataSchema) {
+      return metaPoolLease;
+    }
+    return this.pgPoolRegistry.acquire(dataConnectionString, {
+      ...(dataSchema ? this.byodbPoolSettings : undefined),
+    });
+  }
+
+  /**
+   * A coordination pool is created per cached data-database container and uses
+   * the **meta** connection string, so the process-wide coordination connections
+   * are `containers × maxConnections` against the meta server — not against the
+   * BYODB customer database.
+   *
+   * BYODB containers use the larger coordination default and a short acquire
+   * timeout (`resolveByodbSchemaCoordinationSettings`), because their lease can
+   * span a customer data-pool wait; the meta-server budget must still fit
+   * `pods × warm containers × maxConnections`. Shared-database containers keep
+   * the adapter defaults unless the deployment sets the knobs explicitly.
+   */
+  private resolveSchemaCoordinationOptions(
+    isByodb: boolean
+  ): { connectionTimeoutMillis?: number; maxConnections?: number } | undefined {
+    const maxConnections = resolvePositiveInteger(
+      this.configService.get('V2_SCHEMA_COORDINATION_MAX_CONNECTIONS')
+    );
+    const connectionTimeoutMillis = resolveNonNegativeInteger(
+      this.configService.get('V2_SCHEMA_COORDINATION_CONNECTION_TIMEOUT_MS')
+    );
+    if (isByodb) {
+      const settings = resolveByodbSchemaCoordinationSettings({
+        ...process.env,
+        ...(maxConnections !== undefined
+          ? { V2_SCHEMA_COORDINATION_MAX_CONNECTIONS: String(maxConnections) }
+          : {}),
+        ...(connectionTimeoutMillis !== undefined
+          ? { V2_SCHEMA_COORDINATION_CONNECTION_TIMEOUT_MS: String(connectionTimeoutMillis) }
+          : {}),
+      });
+      return {
+        maxConnections: settings.maxConnections,
+        connectionTimeoutMillis: settings.connectionTimeoutMillis,
+      };
+    }
+    if (maxConnections === undefined && connectionTimeoutMillis === undefined) {
+      return undefined;
+    }
+    return {
+      ...(maxConnections !== undefined ? { maxConnections } : {}),
+      ...(connectionTimeoutMillis !== undefined ? { connectionTimeoutMillis } : {}),
+    };
+  }
+
+  private resolveComputedOutboxAdminOption(): {
+    computedOutboxAdmin?: IComputedOutboxAdmin;
+  } {
+    const computedOutboxAdmin = this.resolveComputedOutboxAdmin();
+    return computedOutboxAdmin ? { computedOutboxAdmin } : {};
+  }
+
+  private resolveTableRowLimitOption(): {
+    tableMaxRowLimit?: number;
+    maxFreeRowLimit?: number;
+  } {
+    const tableMaxRowLimit = resolvePositiveInteger(
+      this.configService.get('TABLE_LIMIT_RECORDS_PER_TABLE_MAX')
+    );
+    if (tableMaxRowLimit) return { tableMaxRowLimit };
+    const legacyMaxFreeRowLimit = resolvePositiveInteger(
+      this.configService.get('MAX_FREE_ROW_LIMIT')
+    );
+    if (legacyMaxFreeRowLimit) return { maxFreeRowLimit: legacyMaxFreeRowLimit };
+    return {};
+  }
+
+  private async createContainer(
+    dataConnectionString: string,
+    dataSchema?: string,
+    options: { previewReadOnly?: boolean } = {}
+  ): Promise<DependencyContainer> {
+    const metaConnectionString = this.getMetaConnectionString();
+    const metaPoolLease = this.pgPoolRegistry.acquire(metaConnectionString);
+    const dataPoolLease = this.acquireDataPoolLease(
+      dataConnectionString,
+      metaConnectionString,
+      metaPoolLease,
+      dataSchema
+    );
+    const poolLeases =
+      dataPoolLease === metaPoolLease ? [metaPoolLease] : [metaPoolLease, dataPoolLease];
+
+    try {
+      const logger = new PinoLoggerAdapter(this.pinoLogger);
+      const tracer = new OpenTelemetryTracer();
+      const tableQueryObservability = new TableQuerySearchMetricsService();
+      const commandBusMiddlewares = [new CommandBusTracingMiddleware()];
+      const queryBusMiddlewares = [
+        new QueryBusTracingMiddleware(),
+        new V2QueryCancellationMiddleware(this.cls),
+      ];
+      const computedUpdateMode = process.env.V2_COMPUTED_UPDATE_MODE;
+      const tableQueryOps = await this.resolveContainerTableQueryOpsOptions(options);
+      const taskStatementTimeoutMs = resolveNonNegativeInteger(
+        this.configService.get('V2_COMPUTED_OUTBOX_TASK_STATEMENT_TIMEOUT_MS')
+      );
+      const inlineStatementTimeoutMs = resolveNonNegativeInteger(
+        this.configService.get('V2_COMPUTED_INLINE_STATEMENT_TIMEOUT_MS')
+      );
+      const fieldBackfillBatchSize = resolvePositiveInteger(
+        this.configService.get('V2_COMPUTED_OUTBOX_FIELD_BACKFILL_BATCH_SIZE')
+      );
+      const continuationRelayClaimEnabled = resolveBoolean(
+        this.configService.get('V2_COMPUTED_OUTBOX_CONTINUATION_RELAY_CLAIM_ENABLED'),
+        true
+      );
+      const lockStarvationEscalationAgeMs = resolveNonNegativeInteger(
+        this.configService.get('V2_COMPUTED_OUTBOX_LOCK_STARVATION_ESCALATION_AGE_MS')
+      );
+      const lockStarvationEscalationWaitMs = resolveNonNegativeInteger(
+        this.configService.get('V2_COMPUTED_OUTBOX_LOCK_STARVATION_ESCALATION_WAIT_MS')
+      );
+      const claimDefaults = this.claimConcurrency?.processDefault;
+      const computedUpdate = buildComputedUpdateOptions(
+        computedUpdateMode,
+        this.computedOutboxWakeupPublisher,
+        {
+          ...(taskStatementTimeoutMs !== undefined ? { taskStatementTimeoutMs } : {}),
+          ...(fieldBackfillBatchSize !== undefined ? { fieldBackfillBatchSize } : {}),
+          ...(lockStarvationEscalationAgeMs !== undefined ? { lockStarvationEscalationAgeMs } : {}),
+          ...(lockStarvationEscalationWaitMs !== undefined
+            ? { lockStarvationEscalationWaitMs }
+            : {}),
+          continuationRelayClaimEnabled,
+          ...(claimDefaults
+            ? {
+                maxConcurrentProcessingPerBase: claimDefaults.perBase,
+                maxConcurrentProcessingPerSeedTable: claimDefaults.perSeedTable,
+              }
+            : {}),
+        },
+        inlineStatementTimeoutMs !== undefined ? { inlineStatementTimeoutMs } : undefined
+      );
+
+      this.logger.log('Initializing V2 container');
+      const schemaCoordination = this.resolveSchemaCoordinationOptions(Boolean(dataSchema));
+      const container = await createV2NodePgContainer({
+        metaConnectionString,
+        dataConnectionString,
+        dataSchema,
+        ...(options.previewReadOnly ? { ensureSchema: false } : {}),
+        metaDbDependencies: { pool: metaPoolLease.pool },
+        dataDbDependencies: { pool: dataPoolLease.pool },
+        logger,
+        tracer,
+        tableQueryObservability,
+        commandBusMiddlewares,
+        queryBusMiddlewares,
+        computedUpdate,
+        tableQueryOps,
+        domainEventWakeupPublisher: this.domainEventWakeupPublisher,
+        // The postgres adapter writes record_trash markers inside the v2 delete
+        // transaction, so the delete-undo purge guard is sound here.
+        undoRedoRestorePurgeGuard: true,
+        ...this.resolveComputedOutboxAdminOption(),
+        schemaCoordination,
+        ...this.resolveTableRowLimitOption(),
+      });
+
+      registerV2ShareDbRealtime(container, {
+        publisher: new ShareDbPubSubPublisher(this.shareDbService.pubsub),
+        presence: new ShareDbBackendPresencePublisher(this.shareDbService),
+        computeActivitySignal: {
+          resolveChannel: getActionTriggerChannel,
+          actionKey: COMPUTE_ACTIVITY_CHANGED,
+        },
+      });
+      const attachmentLookupService = container.resolve<IAttachmentLookupService>(
+        v2CoreTokens.attachmentLookupService
+      );
+      container.registerInstance(
+        v2CoreTokens.attachmentUrlSignerService,
+        new V2AttachmentUrlSignerService(
+          this.attachmentsStorageService,
+          attachmentLookupService,
+          this.cacheService
+        )
+      );
+      const attachmentValueDecoratorService = container.resolve<AttachmentValueDecoratorService>(
+        v2CoreTokens.attachmentValueDecoratorService
+      );
+      container.registerInstance(
+        v2CoreTokens.recordChangedValueDecoratorService,
+        new V2RecordChangedValueDecoratorService(attachmentValueDecoratorService)
+      );
+      container.registerInstance(
+        v2CoreTokens.undoRedoStore,
+        new KeyvUndoRedoStore(this.cacheService.getKeyv(), {
+          keyPrefix: 'v2:undo-redo',
+          ttlMs: this.thresholdConfig.undoExpirationTime * 1000,
+          maxEntries: this.thresholdConfig.maxUndoStackSize,
+        })
+      );
+      const importFetch = createSsrfSafeFetch();
+      // Legacy ImportCsv/Papaparse paths still resolve the process registry.
+      setSafeFetch(importFetch);
+      registerV2ImportServices(container, { fetch: importFetch });
+      if (tableQueryOps) {
+        this.registerTableQueryOpsRunners(container, options.previewReadOnly);
+      }
+
+      for (const registrar of this.discoverProjectionRegistrars()) {
+        registrar.registerProjections(container);
+      }
+
+      // Only primary-storage containers follow the runtime claim-cap override;
+      // BYODB pools are sized against the env defaults at deploy time.
+      if (this.claimConcurrency && dataPoolLease === metaPoolLease) {
+        const outboxConfig = container.resolve<ComputedUpdateOutboxConfig>(
+          v2RecordRepositoryPostgresTokens.computedUpdateOutboxConfig
+        );
+        this.claimConcurrencyUnregisters.set(
+          container,
+          this.claimConcurrency.registerOutboxConfig(outboxConfig)
+        );
+      }
+
+      this.poolLeases.set(container, poolLeases);
+      this.logger.log('V2 container initialized');
+      return container;
+    } catch (error) {
+      await Promise.all(poolLeases.map((lease) => lease.release()));
+      throw error;
+    }
+  }
+
+  /**
+   * Table query ops options for a new container. Preview initialization stays non-migrating: it
+   * never initializes the observation runtime and disables schema work.
+   */
+  private async resolveContainerTableQueryOpsOptions(options: {
+    previewReadOnly?: boolean;
+  }): Promise<IV2NodePgContainerOptions['tableQueryOps']> {
+    const config = this.resolveTableQueryOpsOptions();
+    if (!config) return undefined;
+    const observationRuntime = options.previewReadOnly
+      ? undefined
+      : await this.tableQueryObservationRuntime.get();
+    return {
+      ...config,
+      ensureSchema: options.previewReadOnly ? false : config.ensureSchema,
+      ensureObservationSchema: false,
+      observationPublisher: this.tableQueryObservationRuntime,
+      observationReader: this.tableQueryObservationRuntime,
+      observationSink: this.tableQueryObservationRuntime,
+      ...(observationRuntime
+        ? { observationDb: observationRuntime.db }
+        : { observationDisabled: true }),
+    };
+  }
+
+  /** Preview containers park their runners until a normal request promotes the container. */
+  private registerTableQueryOpsRunners(
+    container: DependencyContainer,
+    previewReadOnly: boolean | undefined
+  ): void {
+    if (previewReadOnly) {
+      this.containersPendingTableQueryOpsRunners.add(container);
+      return;
+    }
+    this.startTableQueryOpsRunners(container);
+  }
+
+  private resolveTableQueryOpsOptions(): IV2NodePgContainerOptions['tableQueryOps'] | undefined {
+    if (!resolveBoolean(this.configService.get('V2_TABLE_QUERY_OPS_ENABLED'), false)) {
+      return undefined;
+    }
+
+    const workerId = resolveTableQueryOpsWorkerId(
+      this.configService.get('V2_TABLE_QUERY_OPS_WORKER_ID')
+    );
+    const allowManualIndexExecution = resolveBoolean(
+      this.configService.get('V2_TABLE_QUERY_OPS_ALLOW_MANUAL_INDEX_EXECUTION')
+    );
+    const autoAcceptMode = resolveTableQueryAutoAcceptMode(
+      this.configService.get('V2_TABLE_QUERY_OPS_AUTO_ACCEPT')
+    );
+    const policyAutoExecutionEnabled = autoAcceptMode === 'auto';
+    const allowIndexExecution = allowManualIndexExecution || policyAutoExecutionEnabled;
+    const searchVectorRuntimeEnabled =
+      resolveTableQuerySearchVectorRuntimeMode(
+        this.configService.get('V2_TABLE_QUERY_OPS_SEARCH_ACCESS_PATH_RUNTIME') ??
+          this.configService.get('V2_TABLE_QUERY_OPS_SEARCH_VECTOR_RUNTIME')
+      ) === 'auto';
+    const configuredAllowedKinds =
+      parseAllowedRemediationKinds(
+        this.configService.get('V2_TABLE_QUERY_OPS_ALLOWED_TASK_KINDS')
+      ) ?? defaultAllowedRemediationKinds({ allowIndexExecution, searchVectorRuntimeEnabled });
+    const allowedKinds = configuredAllowedKinds;
+    const analyzerIntervalMs = resolvePositiveInteger(
+      this.configService.get('V2_TABLE_QUERY_OPS_ANALYZER_INTERVAL_MS')
+    );
+    const analyzerLookbackMs = resolvePositiveInteger(
+      this.configService.get('V2_TABLE_QUERY_OPS_ANALYZER_LOOKBACK_MS')
+    );
+    const analyzerBatchSize = resolvePositiveInteger(
+      this.configService.get('V2_TABLE_QUERY_OPS_ANALYZER_BATCH_SIZE')
+    );
+    const taskWorkerIntervalMs = resolvePositiveInteger(
+      this.configService.get('V2_TABLE_QUERY_OPS_TASK_WORKER_INTERVAL_MS')
+    );
+    const sqlSampleMaxLength = resolvePositiveInteger(
+      this.configService.get('V2_TABLE_QUERY_OPS_SQL_SAMPLE_MAX_LENGTH')
+    );
+    const maxDiagnosticsPerObservation = resolvePositiveInteger(
+      this.configService.get('V2_TABLE_QUERY_OPS_SQL_DIAGNOSTICS_MAX_PER_OBSERVATION')
+    );
+
+    return {
+      ensureSchema: resolveBoolean(
+        this.configService.get('V2_TABLE_QUERY_OPS_ENSURE_SCHEMA'),
+        true
+      ),
+      sqlDiagnosticsConfig: {
+        captureSqlSample: resolveBoolean(
+          this.configService.get('V2_TABLE_QUERY_OPS_CAPTURE_SQL_SAMPLE')
+        ),
+        ...(sqlSampleMaxLength ? { maxSampleLength: sqlSampleMaxLength } : {}),
+        ...(maxDiagnosticsPerObservation ? { maxDiagnosticsPerObservation } : {}),
+      },
+      decisionPolicyConfig: {
+        autoAcceptMode,
+      },
+      analyzerConfig: {
+        enabled: resolveBoolean(
+          this.configService.get('V2_TABLE_QUERY_OPS_ANALYZER_ENABLED'),
+          false
+        ),
+        workerId: `${workerId}:analyzer`,
+        intervalMs: analyzerIntervalMs ?? 5 * 60 * 1000,
+        ...(analyzerLookbackMs ? { lookbackMs: analyzerLookbackMs } : {}),
+        ...(analyzerBatchSize ? { batchSize: analyzerBatchSize } : {}),
+      },
+      taskWorkerConfig: {
+        enabled: resolveBoolean(
+          this.configService.get('V2_TABLE_QUERY_OPS_TASK_WORKER_ENABLED'),
+          searchVectorRuntimeEnabled || policyAutoExecutionEnabled
+        ),
+        workerId: `${workerId}:task-worker`,
+        allowManualIndexExecution,
+        allowPolicyIndexExecution: policyAutoExecutionEnabled,
+        allowedKinds,
+        ...(taskWorkerIntervalMs ? { intervalMs: taskWorkerIntervalMs } : {}),
+      },
+    };
+  }
+
+  private startTableQueryOpsRunners(container: DependencyContainer): void {
+    const context = this.createTableQueryOpsContext(container);
+    if (!context) return;
+    const resolveExecution = async (tableId: string) => {
+      const target = await this.getContainerForTable(tableId);
+      const targetContext = this.createTableQueryOpsContext(target);
+      if (!targetContext) throw new Error('Unable to initialize table query task context');
+      return { container: target, context: targetContext };
+    };
+
+    const handles = [
+      startTableQueryOpsAnalyzerIfEnabled(container, context, resolveExecution),
+      startTableQueryOpsTaskWorkerIfEnabled(container, context, resolveExecution),
+    ].filter((handle): handle is TableQueryOpsRunnerHandle => Boolean(handle));
+
+    if (handles.length === 0) {
+      this.logger.log('V2 Table Query Ops registered');
+      return;
+    }
+
+    this.tableQueryOpsRunnerHandles.set(container, handles);
+    this.logger.log(`V2 Table Query Ops started ${handles.length} runner(s)`);
+  }
+
+  private createTableQueryOpsContext(
+    container: DependencyContainer
+  ): IExecutionContext | undefined {
+    const actorId = ActorId.create('system');
+    if (actorId.isErr()) {
+      this.logger.warn(`Failed to create V2 Table Query Ops actor: ${actorId.error.message}`);
+      return undefined;
+    }
+
+    return {
+      actorId: actorId.value,
+      tracer: container.resolve(v2CoreTokens.tracer),
+      requestId: 'v2-table-query-ops:nest',
+      $t: (key) => key,
+    };
+  }
+
+  private discoverProjectionRegistrars(): IV2ProjectionRegistrar[] {
+    const seen = new Set<IV2ProjectionRegistrar>();
+    const registrars: IV2ProjectionRegistrar[] = [];
+
+    for (const wrapper of this.discoveryService.getProviders()) {
+      const registrar = this.getProjectionRegistrar(wrapper);
+      if (!registrar || seen.has(registrar)) {
+        continue;
+      }
+
+      seen.add(registrar);
+      registrars.push(registrar);
+    }
+
+    return registrars;
+  }
+
+  private getProjectionRegistrar(wrapper: InstanceWrapper): IV2ProjectionRegistrar | null {
+    const target =
+      !wrapper.metatype || wrapper.inject ? wrapper.instance?.constructor : wrapper.metatype;
+    if (!target || !this.reflector.get(V2_PROJECTION_REGISTRAR_METADATA, target)) {
+      return null;
+    }
+
+    const name = target.name || wrapper.name || String(wrapper.token);
+    if (!wrapper.isDependencyTreeStatic()) {
+      throw new Error(`V2 projection registrar "${name}" must be statically scoped`);
+    }
+
+    if (!isV2ProjectionRegistrar(wrapper.instance)) {
+      throw new Error(`V2 projection registrar "${name}" is not instantiated during bootstrap`);
+    }
+
+    return wrapper.instance;
+  }
+
+  async onModuleDestroy(): Promise<void> {
+    await this.runtimeCache.deleteByNamespace(V2_CONTAINER_CACHE_NAMESPACE);
+    await this.tableQueryObservationRuntime.dispose();
+  }
+
+  private async destroyContainer(container: DependencyContainer): Promise<void> {
+    this.stopTableQueryOpsRunners(container);
+    // Stop the async activity flusher before destroying the pools — a pending
+    // debounce/retry timer firing afterwards would retry against the dead pool.
+    try {
+      container
+        .resolve<{
+          disposeAsyncFlusher(): void;
+        }>(v2RecordRepositoryPostgresTokens.computedActivityProjector)
+        .disposeAsyncFlusher();
+    } catch {
+      // Container without the record adapter registered — nothing to stop.
+    }
+    try {
+      container
+        .resolve<{
+          dispose(): void;
+        }>(v2ShareDbTokens.presence)
+        .dispose();
+    } catch {
+      // Container without the ShareDB realtime adapter — nothing to release.
+    }
+    this.claimConcurrencyUnregisters.get(container)?.();
+    this.claimConcurrencyUnregisters.delete(container);
+    const poolLeases = this.poolLeases.get(container) ?? [];
+    this.poolLeases.delete(container);
+    try {
+      // Owns coordination plus every unique meta/data Kysely handle.
+      await disposeV2NodePgContainer(container);
+    } catch (error) {
+      this.logger.error(
+        'Failed to dispose the V2 PostgreSQL container',
+        error instanceof Error ? error.stack : String(error)
+      );
+    } finally {
+      await Promise.all(poolLeases.map((lease) => lease.release()));
+    }
+  }
+
+  private stopTableQueryOpsRunners(container: DependencyContainer): void {
+    const handles = this.tableQueryOpsRunnerHandles.get(container);
+    if (!handles) return;
+
+    for (const handle of handles) {
+      handle.stop();
+    }
+    this.tableQueryOpsRunnerHandles.delete(container);
+  }
+}

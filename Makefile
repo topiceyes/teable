@@ -23,7 +23,7 @@ else
 	RESET        := ""
 endif
 
-ENV_PATH ?= apps/nextjs-app
+ENV_PATH ?= ./apps/nextjs-app
 
 DOCKER_COMPOSE ?= docker compose
 
@@ -42,10 +42,9 @@ SCRATCH ?= /tmp
 
 UNAME_S := $(shell uname -s)
 
-# prisma database url defaults
-SQLITE_PRISMA_DATABASE_URL ?= file:../../db/main.db
-# set param statement_cache_size=1 to avoid query error `ERROR: cached plan must not change result type` after alter column type (modify field type)
-POSTGES_PRISMA_DATABASE_URL ?= postgresql://teable:teable@127.0.0.1:5432/teable?schema=public\&statement_cache_size=1
+# Disable prepared statement caching to avoid `ERROR: cached plan must not change result type`
+# after field schema changes in tests.
+POSTGRES_PRISMA_DATABASE_URL ?= postgresql://teable:teable\@127.0.0.1:5432/teable?schema=public\&statement_cache_size=0
 
 # If the first make argument is "start", "stop"...
 ifeq (docker.start,$(firstword $(MAKECMDGOALS)))
@@ -112,17 +111,15 @@ DOCKER_COMPOSE_ARGS := DOCKER_UID=$(shell id -u) \
 
 define print_db_mode_options
 @echo -e "\nSelect a database to start.\n"
-@echo -e "1)sqlite			Lightweight embedded, ideal for mobile and embedded systems, simple, resource-efficient, easy integration (default database)"
-@echo -e "2)postges(pg)			Powerful and scalable, suitable for complex enterprise needs, highly customizable, rich community support\n"
+@echo -e "1)postgres(pg)			Powerful and scalable, suitable for complex enterprise needs, highly customizable, rich community support\n"
 endef
 
 define print_db_push_options
 @echo -e "The 'db pull' command connects to your database and adds Prisma models to your Prisma schema that reflect the current database schema.\n"
-@echo -e "1) sqlite"
-@echo -e "2) postges(pg)\n"
+@echo -e "1) postgres(pg)\n"
 endef
 
-.PHONY: db-mode sqlite.mode postgres.mode gen-prisma-schema gen-sqlite-prisma-schema gen-postgres-prisma-schema
+.PHONY: db-mode postgres.mode gen-prisma-schema gen-postgres-prisma-schema
 .DEFAULT_GOAL := help
 
 docker.create.network:
@@ -199,39 +196,26 @@ build.db-migrate:
 		  --tag=teable-db-migrate:develop
 
 
-sqlite.integration.test:
-	@export PRISMA_DATABASE_URL='file:../../db/main.db'; \
-	make sqlite.mode; \
-	pnpm -F "./packages/**" run build; \
-	pnpm g:test-e2e
-
 postgres.integration.test: docker.create.network
 	@TEST_PG_CONTAINER_NAME=teable-postgres-$(CI_JOB_ID); \
 	docker rm -fv $$TEST_PG_CONTAINER_NAME | true; \
 	$(DOCKER_COMPOSE_ARGS) $(DOCKER_COMPOSE) $(COMPOSE_FILE_ARGS) run -p 25432:5432 -d -T --no-deps --rm --name $$TEST_PG_CONTAINER_NAME teable-postgres; \
+	make docker.up teable-cache; \
+	make docker.await teable-cache; \
 	chmod +x scripts/wait-for; \
 	scripts/wait-for 127.0.0.1:25432 --timeout=15 -- echo 'pg database started successfully' && \
-		export PRISMA_DATABASE_URL=postgresql://teable:teable@127.0.0.1:25432/e2e_test_teable?schema=public\&statement_cache_size=1 && \
+		export PRISMA_DATABASE_URL=postgresql://teable:teable@127.0.0.1:25432/e2e_test_teable?schema=public\&statement_cache_size=0\&connection_limit=20 && \
 		make postgres.mode && \
 		pnpm -F "./packages/**" run build && \
-		pnpm g:test-e2e && \
+		pnpm g:test-e2e-cover && \
 		docker rm -fv $$TEST_PG_CONTAINER_NAME
-
-gen-sqlite-prisma-schema:
-	@cd ./packages/db-main-prisma; \
-		echo '{ "PRISMA_PROVIDER": "sqlite" }' | pnpm mustache - ./prisma/template.prisma > ./prisma/sqlite/schema.prisma
-	@echo 'generate【 prisma/sqlite/schema.prisma 】success.'
 
 gen-postgres-prisma-schema:
 	@cd ./packages/db-main-prisma; \
 		echo '{ "PRISMA_PROVIDER": "postgres" }' | pnpm mustache - ./prisma/template.prisma > ./prisma/postgres/schema.prisma
 	@echo 'generate【 prisma/postgres/schema.prisma 】success.'
 
-gen-prisma-schema: gen-sqlite-prisma-schema gen-postgres-prisma-schema		## Generate 'schema.prisma' files for all versions of the system
-
-sqlite-db.push:		## db.push by sqlite
-	@cd ./packages/db-main-prisma; \
-		pnpm prisma-db-push --schema ./prisma/sqlite/schema.prisma
+gen-prisma-schema: gen-postgres-prisma-schema		## Generate 'schema.prisma' files for all versions of the system
 
 postgres-db.push:		## db.push by postgres
 	@cd ./packages/db-main-prisma; \
@@ -240,19 +224,10 @@ postgres-db.push:		## db.push by postgres
 db.push:		## connects to your database and adds Prisma models to your Prisma schema that reflect the current database schema.
 	$(print_db_push_options)
 	@read -p "Enter a command: " command; \
-    if [ "$$command" = "1" ] || [ "$$command" = "sqlite" ]; then \
-      make gen-sqlite-prisma-schema; \
-      make sqlite-db.push; \
-    elif [ "$$command" = "2" ] || [ "$$command" = "postges" ] || [ "$$command" = "pg" ]; then \
+    if [ "$$command" = "1" ] || [ "$$command" = "postgres" ] || [ "$$command" = "pg" ]; then \
       	make gen-postgres-prisma-schema; \
 		make postgres-db.push; \
     else echo "Unknown command.";  fi
-
-sqlite-db-migration:
-	@_MIGRATION_NAME=$(if $(_MIGRATION_NAME),$(_MIGRATION_NAME),`read -p "Enter name of the migration (sqlite): " migration_name; echo $$migration_name`); \
-	make gen-sqlite-prisma-schema; \
-	PRISMA_DATABASE_URL=file:../../db/.shadow/main.db \
-	pnpm -F @teable/db-main-prisma prisma-migrate dev --schema ./prisma/sqlite/schema.prisma --name $$_MIGRATION_NAME
 
 postgres-db-migration:
 	@_MIGRATION_NAME=$(if $(_MIGRATION_NAME),$(_MIGRATION_NAME),`read -p "Enter name of the migration (postgres): " migration_name; echo $$migration_name`); \
@@ -262,46 +237,42 @@ postgres-db-migration:
 
 db-migration:		## Reruns the existing migration history in the shadow database in order to detect schema drift (edited or deleted migration file, or a manual changes to the database schema)
 	@read -p "Enter name of the migration: " migration_name; \
-  	make sqlite-db-migration _MIGRATION_NAME=$$migration_name; \
   	make postgres-db-migration _MIGRATION_NAME=$$migration_name
 
-sqlite.mode:		## sqlite.mode
-	@cd ./packages/db-main-prisma; \
-		pnpm prisma-generate --schema ./prisma/sqlite/schema.prisma; \
-		pnpm prisma-migrate deploy --schema ./prisma/sqlite/schema.prisma
-
+# The prisma CLI reads its datasource through dotenv-flow. The committed .env files carry no
+# credentials, so default NODE_ENV to development here: that loads .env.development, which
+# `switch.prisma.env` rewrites for the selected database mode. An exported PRISMA_DATABASE_URL
+# (the e2e targets above) still wins, because dotenv never overrides the environment.
 postgres.mode:		## postgres.mode
 	@cd ./packages/db-main-prisma; \
-		pnpm prisma-generate --schema ./prisma/postgres/schema.prisma; \
+		export NODE_ENV="$${NODE_ENV:-development}"; \
+		pnpm prisma-generate; \
 		pnpm prisma-migrate deploy --schema ./prisma/postgres/schema.prisma
-
+	@cd ./packages/db-data-prisma; \
+		export NODE_ENV="$${NODE_ENV:-development}"; \
+		pnpm prisma-generate; \
+		pnpm prisma-migrate deploy --schema ./prisma/schema.prisma
 # Override environment variable files based on variables
-RUN_DB_MODE ?= sqlite
+RUN_DB_MODE ?= postgres
 FILE_ENV_PATHS = $(ENV_PATH)/.env.development* $(ENV_PATH)/.env.test*
 switch.prisma.env:
-ifeq ($(CI)-$(RUN_DB_MODE),0-sqlite)
+ifeq ($(CI)-$(RUN_DB_MODE),0-postgres)
 	@for file in $(FILE_ENV_PATHS); do \
-		sed -i '' 's~^PRISMA_DATABASE_URL=.*~PRISMA_DATABASE_URL=$(SQLITE_PRISMA_DATABASE_URL)~' $$file; \
-	done
-else ifeq ($(CI)-$(RUN_DB_MODE),0-postges)
-	@for file in $(FILE_ENV_PATHS); do \
-		sed -i '' 's~^PRISMA_DATABASE_URL=.*~PRISMA_DATABASE_URL=$(POSTGES_PRISMA_DATABASE_URL)~' $$file; \
+		echo $$file; \
+		perl -i -pe 's~^PRISMA_DATABASE_URL=.*~PRISMA_DATABASE_URL=$(POSTGRES_PRISMA_DATABASE_URL)~' $$file; \
 	done
 endif
 
 switch-db-mode:		## Switch Database environment
 	$(print_db_mode_options)
 	@read -p "Enter a command: " command; \
-    if [ "$$command" = "1" ] || [ "$$command" = "sqlite" ]; then \
-		make switch.prisma.env RUN_DB_MODE=sqlite; \
-      	make sqlite.mode; \
-    elif [ "$$command" = "2" ] || [ "$$command" = "postges" ] || [ "$$command" = "pg" ]; then \
-      	make switch.prisma.env RUN_DB_MODE=postges; \
+	if [ "$$command" = "1" ] || [ "$$command" = "postgres" ] || [ "$$command" = "pg" ]; then \
+		make switch.prisma.env RUN_DB_MODE=postgres; \
 		make docker.up teable-postgres; \
-    	make docker.await teable-postgres; \
-    	make postgres.mode; \
-    else \
-      	echo "Unknown command.";  fi
+		make docker.await teable-postgres; \
+		make postgres.mode; \
+	else \
+		echo "Unknown command.";  fi
 
 help:   ## show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-30s\033[0m %s\n", $$1, $$2}'

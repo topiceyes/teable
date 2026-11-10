@@ -1,0 +1,411 @@
+import type { IFieldVo, IGetFieldsQuery, IRecord, IViewVo } from '@teable/core';
+import { FieldKeyType } from '@teable/core';
+import type {
+  AcceptInvitationLinkRo,
+  AcceptInvitationLinkVo,
+  IGetBaseVo,
+  IGetDefaultViewIdVo,
+  IGetSpaceVo,
+  IUpdateNotifyStatusRo,
+  ListSpaceCollaboratorVo,
+  ListSpaceUniqueCollaboratorVo,
+  ShareViewGetVo,
+  ITableFullVo,
+  ITableListVo,
+  ISettingVo,
+  IUserMeVo,
+  IRecordsVo,
+  ITableVo,
+  IGetSharedBaseVo,
+  IGroupPointsRo,
+  IGroupPointsVo,
+  ListSpaceCollaboratorRo,
+  ListSpaceUniqueCollaboratorRo,
+  IPublicSettingVo,
+  IGetDashboardVo,
+  IGetDashboardListVo,
+  IGetBasePermissionVo,
+  ITablePermissionVo,
+  IGetPinListVo,
+  ISubscriptionSummaryVo,
+  LastVisitResourceType,
+  IUserLastVisitVo,
+  IUsageVo,
+  IUserLastVisitListBaseVo,
+  IUserLastVisitBaseNodeVo,
+  IGetUserLastVisitBaseNodeRo,
+  IBaseNodeListVo,
+  ICreateBaseRo,
+  ICreateBaseVo,
+  ITemplatePermalinkVo,
+  IShortLinkVo,
+  IGetBaseShareVo,
+} from '@teable/openapi';
+import {
+  IS_TEMPLATE_HEADER,
+  X_CANARY_HEADER,
+  BASE_SHARE_ID_HEADER,
+  CREATE_SOURCE_HEADER,
+  CREATE_SOURCE_AUTO,
+  ACCEPT_INVITATION_LINK,
+  CREATE_BASE,
+  GET_BASE,
+  GET_BASE_ALL,
+  GET_BASE_SHARE,
+  GET_DASHBOARD,
+  GET_DASHBOARD_LIST,
+  GET_DEFAULT_VIEW_ID,
+  GET_FIELD_LIST,
+  GET_GROUP_POINTS,
+  GET_PUBLIC_SETTING,
+  GET_RECORDS_URL,
+  GET_RECORD_URL,
+  GET_SETTING,
+  GET_SHARED_BASE,
+  GET_SPACE,
+  GET_SPACE_LIST,
+  GET_TABLE,
+  GET_TABLE_LIST,
+  GET_VIEW_LIST,
+  SHARE_VIEW_GET,
+  SPACE_COLLABORATE_LIST,
+  SPACE_COLLABORATE_UNIQUE_LIST,
+  UPDATE_NOTIFICATION_STATUS,
+  USER_ME,
+  GET_BASE_PERMISSION,
+  GET_TABLE_PERMISSION,
+  urlBuilder,
+  GET_PIN_LIST,
+  GET_SUBSCRIPTION_SUMMARY,
+  GET_SUBSCRIPTION_SUMMARY_LIST,
+  GET_USER_LAST_VISIT,
+  GET_INSTANCE_USAGE,
+  GET_USER_LAST_VISIT_LIST_BASE,
+  GET_USER_LAST_VISIT_BASE_NODE,
+  GET_BASE_NODE_LIST,
+  GET_TEMPLATE_PERMALINK,
+  GET_SHORT_LINK,
+} from '@teable/openapi';
+import { INITIAL_LOAD_PAGE_SIZE } from '@teable/sdk/utils/record-window';
+import type { AxiosInstance } from 'axios';
+import { getAxios } from './axios';
+
+export class SsrApi {
+  axios: AxiosInstance;
+
+  disableLastVisit: boolean = false;
+
+  constructor() {
+    this.axios = getAxios();
+  }
+
+  /**
+   * Configure axios interceptors for base-specific headers (template, canary, etc.)
+   */
+  configureBaseHeaders(base: IGetBaseVo | undefined) {
+    const templateHeader = base?.template?.headers;
+    if (templateHeader) {
+      this.disableLastVisit = true;
+      this.axios.interceptors.request.use((config) => {
+        config.headers[IS_TEMPLATE_HEADER] = templateHeader;
+        return config;
+      });
+    }
+
+    if (base?.isCanary) {
+      this.axios.interceptors.request.use((config) => {
+        config.headers[X_CANARY_HEADER] = 'true';
+        return config;
+      });
+    }
+  }
+
+  /**
+   * Configure axios interceptors for share-specific headers
+   */
+  configureShareHeaders(shareId: string) {
+    this.disableLastVisit = true;
+    this.axios.interceptors.request.use((config) => {
+      config.headers[BASE_SHARE_ID_HEADER] = shareId;
+      return config;
+    });
+  }
+
+  async getTable(
+    baseId: string,
+    tableId: string,
+    viewId?: string,
+    preloadedViews?: IViewVo[]
+  ): Promise<ITableFullVo & { extra: IRecordsVo['extra'] }> {
+    const viewsPromise = preloadedViews
+      ? Promise.resolve(preloadedViews)
+      : this.axios.get<IViewVo[]>(urlBuilder(GET_VIEW_LIST, { tableId })).then(({ data }) => data);
+
+    // Records depend on the current view's group config, so chain off views;
+    // gracefully handle records fetch errors (e.g., invalid filter in view)
+    // to prevent SSR crash when view has corrupted filter data
+    const recordsPromise = viewsPromise
+      .then((views) => {
+        const currentView = views.find((view) => view.id === viewId);
+        return this.axios.get<IRecordsVo>(urlBuilder(GET_RECORDS_URL, { baseId, tableId }), {
+          params: {
+            viewId,
+            fieldKeyType: FieldKeyType.Id,
+            groupBy: currentView?.group ? JSON.stringify(currentView.group) : undefined,
+            // must equal the grid's first window size — the seeded rows back
+            // that query verbatim, and any gap renders as blank rows
+            take: INITIAL_LOAD_PAGE_SIZE,
+          },
+        });
+      })
+      .then(({ data }) => data)
+      .catch((error): IRecordsVo | undefined => {
+        // Log error but continue - client-side will show appropriate error toast
+        console.error('[SSR] Failed to fetch records, view may have invalid filter:', error);
+        return undefined;
+      });
+
+    const [fields, views, table, recordsResult] = await Promise.all([
+      // the field providers need every field: a view-scoped list drops the
+      // view's hidden fields, so the first frame would miscount hidden columns
+      // and lose hidden-field dependencies until the field subscription lands
+      this.getFields(tableId),
+      viewsPromise,
+      this.axios
+        .get<ITableVo>(urlBuilder(GET_TABLE, { baseId, tableId }), {
+          params: {
+            includeContent: true,
+            viewId,
+            fieldKeyType: FieldKeyType.Id,
+          },
+        })
+        .then(({ data }) => data),
+      recordsPromise,
+    ]);
+
+    return {
+      ...table,
+      records: recordsResult?.records ?? [],
+      views,
+      fields,
+      extra: recordsResult?.extra,
+    };
+  }
+
+  async getFields(tableId: string, query?: IGetFieldsQuery) {
+    return this.axios
+      .get<IFieldVo[]>(urlBuilder(GET_FIELD_LIST, { tableId }), { params: query })
+      .then(({ data }) => data);
+  }
+
+  async getViewList(tableId: string) {
+    return this.axios
+      .get<IViewVo[]>(urlBuilder(GET_VIEW_LIST, { tableId }))
+      .then(({ data }) => data);
+  }
+
+  async getTables(baseId: string) {
+    return this.axios
+      .get<ITableListVo>(urlBuilder(GET_TABLE_LIST, { baseId }))
+      .then(({ data }) => data);
+  }
+
+  async getDefaultViewId(baseId: string, tableId: string) {
+    return this.axios
+      .get<IGetDefaultViewIdVo>(urlBuilder(GET_DEFAULT_VIEW_ID, { baseId, tableId }))
+      .then(({ data }) => data);
+  }
+
+  async getRecord(tableId: string, recordId: string) {
+    return this.axios
+      .get<IRecord>(urlBuilder(GET_RECORD_URL, { tableId, recordId }), {
+        params: { fieldKeyType: FieldKeyType.Id },
+      })
+      .then(({ data }) => data);
+  }
+
+  async getBaseById(baseId: string) {
+    return await this.axios
+      .get<IGetBaseVo>(urlBuilder(GET_BASE, { baseId }))
+      .then(({ data }) => data);
+  }
+
+  async getSpaceById(spaceId: string) {
+    return await this.axios
+      .get<IGetSpaceVo>(urlBuilder(GET_SPACE, { spaceId }))
+      .then(({ data }) => data);
+  }
+
+  async getSpaceList() {
+    return await this.axios.get<IGetSpaceVo[]>(urlBuilder(GET_SPACE_LIST)).then(({ data }) => data);
+  }
+
+  async getBaseList() {
+    return await this.axios.get<IGetBaseVo[]>(GET_BASE_ALL).then(({ data }) => data);
+  }
+
+  async getPinList() {
+    return await this.axios.get<IGetPinListVo[]>(GET_PIN_LIST).then(({ data }) => data);
+  }
+
+  async getBasePermission(baseId: string) {
+    return await this.axios
+      .get<IGetBasePermissionVo>(urlBuilder(GET_BASE_PERMISSION, { baseId }))
+      .then((res) => res.data);
+  }
+
+  async getTablePermission(baseId: string, tableId: string) {
+    return await this.axios
+      .get<ITablePermissionVo>(urlBuilder(GET_TABLE_PERMISSION, { baseId, tableId }))
+      .then((res) => res.data);
+  }
+
+  async getSpaceCollaboratorList(spaceId: string, query?: ListSpaceCollaboratorRo) {
+    return await this.axios
+      .get<ListSpaceCollaboratorVo>(urlBuilder(SPACE_COLLABORATE_LIST, { spaceId }), {
+        params: query,
+      })
+      .then(({ data }) => data);
+  }
+
+  async getSpaceUniqueCollaboratorList(spaceId: string, query?: ListSpaceUniqueCollaboratorRo) {
+    return await this.axios
+      .get<ListSpaceUniqueCollaboratorVo>(urlBuilder(SPACE_COLLABORATE_UNIQUE_LIST, { spaceId }), {
+        params: query,
+      })
+      .then(({ data }) => data);
+  }
+
+  async getSubscriptionSummary(spaceId: string) {
+    return await this.axios
+      .get<ISubscriptionSummaryVo>(urlBuilder(GET_SUBSCRIPTION_SUMMARY, { spaceId }))
+      .then(({ data }) => data);
+  }
+
+  async getSubscriptionSummaryList() {
+    return await this.axios
+      .get<ISubscriptionSummaryVo[]>(urlBuilder(GET_SUBSCRIPTION_SUMMARY_LIST))
+      .then(({ data }) => data);
+  }
+
+  async acceptInvitationLink(acceptInvitationLinkRo: AcceptInvitationLinkRo) {
+    return this.axios
+      .post<AcceptInvitationLinkVo>(ACCEPT_INVITATION_LINK, acceptInvitationLinkRo)
+      .then(({ data }) => data);
+  }
+
+  async getShareView(shareId: string) {
+    return this.axios
+      .get<ShareViewGetVo>(urlBuilder(SHARE_VIEW_GET, { shareId }))
+      .then(({ data }) => data);
+  }
+
+  async getBaseShare(shareId: string) {
+    return this.axios
+      .get<IGetBaseShareVo>(urlBuilder(GET_BASE_SHARE, { shareId }))
+      .then(({ data }) => data);
+  }
+
+  async updateNotificationStatus(notificationId: string, data: IUpdateNotifyStatusRo) {
+    return this.axios
+      .patch<void>(urlBuilder(UPDATE_NOTIFICATION_STATUS, { notificationId }), data)
+      .then(({ data }) => data);
+  }
+
+  async getSetting() {
+    return this.axios.get<ISettingVo>(GET_SETTING).then(({ data }) => data);
+  }
+
+  async getPublicSetting() {
+    return this.axios.get<IPublicSettingVo>(GET_PUBLIC_SETTING).then(({ data }) => data);
+  }
+
+  async getUserMe() {
+    return this.axios.get<IUserMeVo>(USER_ME).then(({ data }) => data);
+  }
+
+  async getSharedBase() {
+    return this.axios.get<IGetSharedBaseVo[]>(GET_SHARED_BASE).then(({ data }) => data);
+  }
+
+  async getGroupPoints(tableId: string, query: IGroupPointsRo) {
+    return this.axios
+      .get<IGroupPointsVo>(urlBuilder(GET_GROUP_POINTS, { tableId }), {
+        params: {
+          ...query,
+          filter: JSON.stringify(query?.filter),
+          groupBy: JSON.stringify(query?.groupBy),
+        },
+      })
+      .then(({ data }) => data);
+  }
+
+  async getDashboard(baseId: string, dashboardId: string) {
+    return this.axios
+      .get<IGetDashboardVo>(urlBuilder(GET_DASHBOARD, { baseId, id: dashboardId }))
+      .then(({ data }) => data);
+  }
+
+  async getDashboardList(baseId: string) {
+    return this.axios
+      .get<IGetDashboardListVo>(urlBuilder(GET_DASHBOARD_LIST, { baseId }))
+      .then(({ data }) => data);
+  }
+
+  async getUserLastVisit(resourceType: LastVisitResourceType, parentResourceId: string) {
+    if (this.disableLastVisit) return undefined;
+    return this.axios
+      .get<IUserLastVisitVo | undefined>(GET_USER_LAST_VISIT, {
+        params: { resourceType, parentResourceId },
+      })
+      .then(({ data }) => data);
+  }
+
+  async getUserLastVisitBaseNode(params: IGetUserLastVisitBaseNodeRo) {
+    if (this.disableLastVisit) return undefined;
+    return this.axios
+      .get<IUserLastVisitBaseNodeVo | undefined>(GET_USER_LAST_VISIT_BASE_NODE, { params })
+      .then(({ data }) => data);
+  }
+
+  async getBaseNodeList(baseId: string) {
+    return this.axios
+      .get<IBaseNodeListVo>(urlBuilder(GET_BASE_NODE_LIST, { baseId }))
+      .then(({ data }) => data);
+  }
+
+  async getInstanceUsage() {
+    return this.axios.get<IUsageVo>(GET_INSTANCE_USAGE).then(({ data }) => data);
+  }
+
+  async getRecentlyBase() {
+    return this.axios
+      .get<IUserLastVisitListBaseVo>(GET_USER_LAST_VISIT_LIST_BASE)
+      .then(({ data }) => data);
+  }
+
+  /**
+   * Only used by the empty-space auto-create redirect (see pages/space/[spaceId].tsx),
+   * hence the `auto` source header: analytics must not count these as user-initiated
+   * base creations. If you reuse this for a user-triggered flow, make the header a param.
+   */
+  async createBase(createBaseRo: ICreateBaseRo) {
+    return this.axios
+      .post<ICreateBaseVo>(CREATE_BASE, createBaseRo, {
+        headers: { [CREATE_SOURCE_HEADER]: CREATE_SOURCE_AUTO },
+      })
+      .then(({ data }) => data);
+  }
+
+  async getTemplatePermalink(identifier: string) {
+    return this.axios
+      .get<ITemplatePermalinkVo>(urlBuilder(GET_TEMPLATE_PERMALINK, { identifier }))
+      .then(({ data }) => data);
+  }
+
+  async getShortLink(code: string) {
+    return this.axios
+      .get<IShortLinkVo>(urlBuilder(GET_SHORT_LINK, { code }))
+      .then(({ data }) => data);
+  }
+}

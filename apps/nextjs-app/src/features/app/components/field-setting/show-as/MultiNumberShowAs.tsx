@@ -1,8 +1,14 @@
 import { ColorUtils, Colors, MultiNumberDisplayType } from '@teable/core';
 import type { IMultiNumberShowAs } from '@teable/core';
-import { Button, Popover, PopoverContent, PopoverTrigger } from '@teable/ui-lib/shadcn';
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+  Tabs,
+  TabsList,
+  TabsTrigger,
+} from '@teable/ui-lib/shadcn';
 import { Label } from '@teable/ui-lib/shadcn/ui/label';
-import classNames from 'classnames';
 import { useTranslation } from 'next-i18next';
 import { tableConfig } from '@/features/i18n/table.config';
 import { ColorPicker } from '../options/SelectOptions';
@@ -62,32 +68,22 @@ export const MultiNumberShowAs: React.FC<IMultiNumberShowAsProps> = (props) => {
   return (
     <div className="flex w-full flex-col gap-2" data-testid="multi-number-show-as">
       <Label className="font-normal">{t('table:field.editor.showAs')}</Label>
-      <div className="flex justify-between">
-        {MULTI_NUMBER_DISPLAY_INFOS.map(({ type, text }) => {
-          return (
-            <Button
-              key={type}
-              variant="outline"
-              size="sm"
-              className={classNames(
-                'font-normal',
-                type === selectedType &&
-                  'bg-foreground text-accent hover:bg-foreground hover:text-accent'
-              )}
-              onClick={() => updateDisplayType(type)}
-            >
+      <Tabs value={selectedType} onValueChange={updateDisplayType} className="w-full">
+        <TabsList className="flex w-full  gap-2">
+          {MULTI_NUMBER_DISPLAY_INFOS.map(({ type, text }) => (
+            <TabsTrigger key={type} value={type} className="flex-1 font-normal">
               {text}
-            </Button>
-          );
-        })}
-      </div>
+            </TabsTrigger>
+          ))}
+        </TabsList>
+      </Tabs>
+
       {showAs != null && (
-        <div className="flex items-center justify-between">
-          <Label className="font-normal">{t('table:field.editor.color')}</Label>
+        <div className="flex h-8 items-center gap-2">
           <Popover>
             <PopoverTrigger>
               <div
-                className="ml-4 size-5 rounded-full p-[2px]"
+                className="ms-4 size-5 rounded-full p-[2px]"
                 style={{ border: `1px solid ${ColorUtils.getHexForColor(color)}` }}
               >
                 <div
@@ -100,6 +96,7 @@ export const MultiNumberShowAs: React.FC<IMultiNumberShowAsProps> = (props) => {
               <ColorPicker color={color} onSelect={updateColor} />
             </PopoverContent>
           </Popover>
+          <Label className="font-normal">{t('table:field.editor.color')}</Label>
         </div>
       )}
     </div>

@@ -1,11 +1,17 @@
 import { useMutation } from '@tanstack/react-query';
+import { HttpErrorCode, type HttpError } from '@teable/core';
 import { sendResetPasswordEmail } from '@teable/openapi';
-import { Spin } from '@teable/ui-lib/base';
-import { Button, Input, Label, Separator, useToast } from '@teable/ui-lib/shadcn';
+import { getHttpErrorMessage } from '@teable/sdk/context';
+import type { ILocaleFunction } from '@teable/sdk/context/app/i18n';
+import { Spin, Error } from '@teable/ui-lib/base';
+import { Button, Input, Label, Separator } from '@teable/ui-lib/shadcn';
+import { toast } from '@teable/ui-lib/shadcn/ui/sonner';
 import { useTranslation } from 'next-i18next';
 import { useState } from 'react';
 import { z } from 'zod';
-import { Error } from '@/components/Error';
+import { useAutoFavicon } from '@/features/app/hooks/useAutoFavicon';
+import { useCutDown } from '@/features/app/hooks/useCutDown';
+import { usePublicSettingQuery } from '@/features/app/hooks/useSetting';
 import { authConfig } from '@/features/i18n/auth.config';
 import { LayoutMain } from '../components/LayoutMain';
 
@@ -13,15 +19,32 @@ export const ForgetPasswordPage = () => {
   const [error, setError] = useState<string>();
   const [email, setEmail] = useState<string>();
   const { t } = useTranslation(authConfig.i18nNamespaces);
-  const { toast } = useToast();
+  useAutoFavicon();
+  const { countdown, setCountdown } = useCutDown();
+  const { data: setting } = usePublicSettingQuery();
+  const { resetPasswordSendMailRate } = setting ?? {};
 
-  const { mutateAsync: sendResetPasswordEmailMutate, isLoading } = useMutation({
+  const { mutate: sendResetPasswordEmailMutate, isPending: isLoading } = useMutation({
     mutationFn: sendResetPasswordEmail,
     onSuccess: () => {
-      toast({
-        title: t('auth:forgetPassword.success.title'),
+      toast.success(t('auth:forgetPassword.success.title'), {
         description: t('auth:forgetPassword.success.description'),
       });
+      if (typeof resetPasswordSendMailRate === 'number' && resetPasswordSendMailRate > 0) {
+        setCountdown(resetPasswordSendMailRate);
+      }
+    },
+    onError: (err: HttpError) => {
+      if (
+        err.code === HttpErrorCode.TOO_MANY_REQUESTS &&
+        err.data &&
+        typeof err.data === 'object' &&
+        'seconds' in err.data
+      ) {
+        setError(t('auth:forgetPassword.sendMailRateLimit', { seconds: err.data.seconds }));
+        return;
+      }
+      setError(getHttpErrorMessage(err, t as unknown as ILocaleFunction, 'sdk'));
     },
   });
 
@@ -65,9 +88,10 @@ export const ForgetPasswordPage = () => {
             if (error || isLoading || !email) return;
             sendResetPasswordEmailMutate({ email });
           }}
+          disabled={isLoading || countdown > 0}
         >
           {isLoading && <Spin />}
-          {t('auth:forgetPassword.buttonText')}
+          {countdown > 0 ? `${countdown}s` : t('auth:forgetPassword.buttonText')}
         </Button>
       </div>
     </LayoutMain>

@@ -1,13 +1,16 @@
 import type { INotifyVo, UploadType } from '@teable/openapi';
 import { getSignature, notify } from '@teable/openapi';
-import axios from 'axios';
+import axios, { CanceledError } from 'axios';
 import { noop } from 'lodash';
+import { openUsageLimitModalFromError } from '../../../billing/store/usage-limit-modal';
 
 interface IUploadTask {
   file: IFile;
   status: Status;
   progress: number;
   type: UploadType;
+  baseId?: string;
+  abortController?: AbortController;
   successCallback: ISuccessCallback;
   errorCallback: IErrorCallback;
   progressCallback: IProgressCallback;
@@ -20,7 +23,7 @@ export interface IFile {
 
 type ISuccessCallback = (file: IFile, attachment: INotifyVo) => void;
 
-type IErrorCallback = (file: IFile, error?: string) => void;
+type IErrorCallback = (file: IFile, error?: string, code?: number) => void;
 
 type IProgressCallback = (file: IFile, progress: number) => void;
 
@@ -33,11 +36,37 @@ export enum Status {
 export class AttachmentManager {
   limit: number;
   uploadQueue: IUploadTask[];
+  uploadingQueue: IUploadTask[];
   shareId?: string;
+  onUploadingTaskChange?: (uploadingTasks: IUploadTask[], pendingTasks: IUploadTask[]) => void;
 
-  constructor(limit: number) {
+  constructor(
+    limit: number,
+    options: {
+      onUploadingTaskChange?: (uploadingTasks: IUploadTask[], pendingTasks: IUploadTask[]) => void;
+    } = {}
+  ) {
     this.limit = limit;
     this.uploadQueue = [];
+    this.uploadingQueue = [];
+    this.onUploadingTaskChange = options.onUploadingTaskChange || noop;
+  }
+
+  private notifyUploadingTaskChange() {
+    this.onUploadingTaskChange?.(this.uploadingQueue, this.uploadQueue);
+  }
+
+  private addToUploadingQueue(uploadTask: IUploadTask) {
+    this.uploadingQueue.push(uploadTask);
+    this.notifyUploadingTaskChange();
+  }
+
+  private removeFromUploadingQueue(uploadTask: IUploadTask) {
+    const index = this.uploadingQueue.findIndex((task) => task.file.id === uploadTask.file.id);
+    if (index !== -1) {
+      this.uploadingQueue.splice(index, 1);
+      this.notifyUploadingTaskChange();
+    }
   }
 
   upload(
@@ -47,7 +76,8 @@ export class AttachmentManager {
       successCallback?: ISuccessCallback;
       errorCallback?: IErrorCallback;
       progressCallback?: IProgressCallback;
-    }
+    },
+    baseId?: string
   ) {
     const { successCallback = noop, errorCallback = noop, progressCallback = noop } = callbackFn;
     for (let i = 0; i < files.length; i++) {
@@ -58,22 +88,20 @@ export class AttachmentManager {
         status: Status.Pending,
         progress: 0,
         type,
+        baseId,
         successCallback: successCallback,
         errorCallback: errorCallback,
         progressCallback: progressCallback,
       };
-
-      if (this.uploadQueue.length < this.limit) {
-        this.executeUpload(uploadTask);
-      } else {
-        this.uploadQueue.push(uploadTask);
-      }
+      this.uploadQueue.push(uploadTask);
+      this.nextUpload();
     }
   }
 
   async executeUpload(uploadTask: IUploadTask) {
     uploadTask.status = Status.Uploading;
-
+    this.addToUploadingQueue(uploadTask);
+    uploadTask.abortController = new AbortController();
     try {
       const fileInstance = uploadTask.file.instance;
       const res = await getSignature(
@@ -81,6 +109,7 @@ export class AttachmentManager {
           type: uploadTask.type,
           contentLength: fileInstance.size,
           contentType: fileInstance.type,
+          baseId: uploadTask?.baseId,
         },
         this.shareId
       ); // Assuming you have an AttachmentApi that provides the upload URL
@@ -89,9 +118,11 @@ export class AttachmentManager {
         return;
       }
       const { url, uploadMethod, token, requestHeaders } = res.data;
+      delete requestHeaders['Content-Length'];
       await axios(url, {
         method: uploadMethod,
         data: fileInstance,
+        signal: uploadTask.abortController?.signal,
         onUploadProgress: (progressEvent) => {
           const progress = Math.round((progressEvent.loaded * 100) / (progressEvent.total || 0));
           uploadTask.progress = progress;
@@ -103,25 +134,55 @@ export class AttachmentManager {
         },
       });
 
-      const notifyRes = await notify(token, this.shareId);
+      const notifyRes = await notify(token, this.shareId, fileInstance.name);
       if (!notifyRes.data) {
         uploadTask.errorCallback(uploadTask.file);
         return;
       }
       this.completeUpload(uploadTask, notifyRes.data);
-    } catch (error) {
-      uploadTask.errorCallback(uploadTask.file);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } catch (error: any) {
+      // Skip error callback when the upload was intentionally cancelled
+      if (error instanceof CanceledError || error?.name === 'AbortError') {
+        return;
+      }
+      // The signature/notify calls bypass react-query, so its global onError
+      // never sees plan-limit failures — surface the usage-limit modal here.
+      // The error callback still runs so the per-file UI shows the failure.
+      openUsageLimitModalFromError(error);
+      uploadTask.errorCallback(uploadTask.file, error?.message, error?.status);
+    } finally {
+      this.removeFromUploadingQueue(uploadTask);
+      this.nextUpload();
+    }
+  }
+
+  cancelTask(fileId: string) {
+    // 1. from uploadQueue（pending） remove
+    const pendingIdx = this.uploadQueue.findIndex((t) => t.file.id === fileId);
+    if (pendingIdx !== -1) {
+      this.uploadQueue.splice(pendingIdx, 1);
+      return;
+    }
+    // 2. abort the uploading request
+    const uploadingTask = this.uploadingQueue.find((t) => t.file.id === fileId);
+    if (uploadingTask?.abortController) {
+      uploadingTask.abortController.abort();
     }
   }
 
   completeUpload(uploadTask: IUploadTask, attachment: INotifyVo) {
     uploadTask.status = Status.Completed;
     uploadTask.successCallback(uploadTask.file, attachment);
+  }
 
-    // Check if there are pending upload tasks
-    if (this.uploadQueue.length > 0) {
+  nextUpload() {
+    // Start as many uploads as possible up to the limit
+    while (this.uploadingQueue.length < this.limit && this.uploadQueue.length > 0) {
       const nextTask = this.uploadQueue.shift();
-      nextTask && this.executeUpload(nextTask);
+      if (nextTask) {
+        this.executeUpload(nextTask);
+      }
     }
   }
 }

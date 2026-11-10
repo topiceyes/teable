@@ -10,9 +10,9 @@ export const UPDATE_FIELD = '/table/{tableId}/field/{fieldId}';
 export const UpdateFieldRoute: RouteConfig = registerRoute({
   method: 'patch',
   path: UPDATE_FIELD,
-  summary: 'Update a field',
+  summary: 'Update field',
   description:
-    'Only for common props, include name, description and dbFieldName. for other properties, you should use the convert field api',
+    'Patch field properties. On v2, also patch unique/notNull constraints, the options supported by the current field type, its lookup/link configuration, or audit trackedFieldIds. Patched options must be valid for the current field type; unsupported ones are rejected. An empty trackedFieldIds array tracks all editable fields. Field type changes, and constraint/option updates on v1, use the conversion endpoint.',
   request: {
     params: z.object({
       tableId: z.string(),

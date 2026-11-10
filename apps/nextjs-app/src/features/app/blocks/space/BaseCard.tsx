@@ -1,44 +1,62 @@
+/* eslint-disable jsx-a11y/no-static-element-interactions */
+/* eslint-disable jsx-a11y/click-events-have-key-events */
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { hasPermission } from '@teable/core';
-import { Database, MoreHorizontal } from '@teable/icons';
+import { LayoutGrid, MoreHorizontal, Share2 } from '@teable/icons';
 import type { IGetBaseVo } from '@teable/openapi';
-import { deleteBase, updateBase } from '@teable/openapi';
-import { Button, Card, CardContent, Input } from '@teable/ui-lib/shadcn';
-import classNames from 'classnames';
-import { useRouter } from 'next/router';
+import { PinType, deleteBase, permanentDeleteBase, updateBase } from '@teable/openapi';
+import { ReactQueryKeys } from '@teable/sdk/config';
+import { useContentDir } from '@teable/sdk/hooks';
+import { Button, Card, CardContent, cn, Input } from '@teable/ui-lib/shadcn';
+import { useTranslation } from 'next-i18next';
 import { useState, type FC, useRef } from 'react';
+import { getBaseDisplayName } from '@/features/app/utils/base-name';
+import { spaceConfig } from '@/features/i18n/space.config';
 import { Emoji } from '../../components/emoji/Emoji';
 import { EmojiPicker } from '../../components/emoji/EmojiPicker';
+import { ColorBg } from './ColorBg';
 import { BaseActionTrigger } from './component/BaseActionTrigger';
+import { StarButton } from './space-side-bar/StarButton';
+import { useEnterBase } from './useEnterBase';
 
 interface IBaseCard {
   base: IGetBaseVo;
   className?: string;
+  spaceName?: string;
 }
 
 export const BaseCard: FC<IBaseCard> = (props) => {
-  const { base, className } = props;
-  const router = useRouter();
+  const contentDir = useContentDir();
+  const { t } = useTranslation(spaceConfig.i18nNamespaces);
+  const { base, className, spaceName } = props;
   const queryClient = useQueryClient();
-  const routerSpaceId = router.query.spaceId;
   const [renaming, setRenaming] = useState<boolean>();
   const inputRef = useRef<HTMLInputElement>(null);
-  const [baseName, setBaseName] = useState<string>(base.name);
+  // An unnamed base starts the rename input empty; the placeholder shows what it is called
+  const [baseName, setBaseName] = useState<string>(base.name ?? '');
+  const { enterBase, enterBaseOverlay } = useEnterBase();
 
   const { mutateAsync: updateBaseMutator } = useMutation({
     mutationFn: updateBase,
     onSuccess: () => {
       queryClient.invalidateQueries({
-        queryKey: routerSpaceId ? ['base-list', routerSpaceId] : ['base-all'],
+        queryKey: ReactQueryKeys.baseAll(),
+      });
+      queryClient.invalidateQueries({
+        queryKey: ReactQueryKeys.recentlyBase(),
       });
     },
   });
 
   const { mutate: deleteBaseMutator } = useMutation({
-    mutationFn: deleteBase,
+    mutationFn: ({ baseId, permanent }: { baseId: string; permanent?: boolean }) =>
+      permanent ? permanentDeleteBase(baseId) : deleteBase(baseId),
     onSuccess: () => {
       queryClient.invalidateQueries({
-        queryKey: routerSpaceId ? ['base-list', routerSpaceId] : ['base-all'],
+        queryKey: ReactQueryKeys.baseAll(),
+      });
+      queryClient.invalidateQueries({
+        queryKey: ReactQueryKeys.recentlyBase(),
       });
     },
   });
@@ -62,48 +80,59 @@ export const BaseCard: FC<IBaseCard> = (props) => {
     e.stopPropagation();
   };
 
-  const intoBase = () => {
-    if (renaming) {
-      return;
-    }
-    router.push({
-      pathname: '/base/[baseId]',
-      query: {
-        baseId: base.id,
-      },
-    });
-  };
-
-  const iconChange = (icon: string) => {
+  const iconChange = (icon: string | null) => {
     updateBaseMutator({
       baseId: base.id,
       updateBaseRo: { icon },
     });
   };
 
-  const hasReadPermission = hasPermission(base.role, 'base|read');
-  const hasUpdatePermission = hasPermission(base.role, 'base|update');
-  const hasDeletePermission = hasPermission(base.role, 'base|delete');
+  const intoBase = () => {
+    if (renaming) {
+      return;
+    }
+    enterBase(base);
+  };
+
+  const hasUpdatePermission = base.restrictedAuthority
+    ? false
+    : hasPermission(base.role, 'base|update');
+  const hasDeletePermission = base.restrictedAuthority
+    ? false
+    : hasPermission(base.role, 'base|delete');
+  const hasMovePermission = base.restrictedAuthority
+    ? false
+    : hasPermission(base.role, 'space|create');
+
   return (
     <Card
-      className={classNames('group cursor-pointer hover:shadow-md', className)}
+      className={cn(
+        'relative group cursor-pointer hover:shadow-md overflow-x-hidden shadow-none',
+        className
+      )}
       onClick={intoBase}
     >
-      <CardContent className="flex size-full items-center px-4 py-6">
-        {/* eslint-disable-next-line jsx-a11y/no-static-element-interactions, jsx-a11y/click-events-have-key-events */}
+      {enterBaseOverlay}
+      <ColorBg emoji={base.icon || undefined} />
+      <CardContent className="relative flex size-full items-center gap-3 px-4 py-0">
         <div onClick={(e) => hasUpdatePermission && clickStopPropagation(e)}>
-          <EmojiPicker disabled={!hasUpdatePermission || renaming} onChange={iconChange}>
-            {base.icon ? (
-              <div className="size-14 min-w-[3.5rem] text-[3.5rem] leading-none">
-                <Emoji emoji={base.icon} size={56} />
-              </div>
-            ) : (
-              <Database className="size-14 min-w-[3.5rem]" />
-            )}
+          <EmojiPicker
+            disabled={!hasUpdatePermission || renaming}
+            icon={base.icon}
+            onChange={iconChange}
+            onRemove={() => iconChange(null)}
+          >
+            <div className="size-12 rounded-lg bg-background bg-gradient-to-br from-background to-muted p-3 outline outline-1 outline-border transition-all group-hover:outline-border hover:shadow-lg">
+              {base.icon ? (
+                <Emoji emoji={base.icon} size={24} />
+              ) : (
+                <LayoutGrid className="size-6" />
+              )}
+            </div>
           </EmojiPicker>
         </div>
-        <div className="h-full flex-1 overflow-hidden">
-          <div className="flex items-center justify-between gap-3 p-0.5">
+        <div className="flex grow">
+          <div className="flex grow justify-between">
             {renaming ? (
               <form
                 onSubmit={(e) => {
@@ -113,31 +142,66 @@ export const BaseCard: FC<IBaseCard> = (props) => {
               >
                 <Input
                   ref={inputRef}
-                  className="h-7 flex-1"
+                  className="flex-1"
+                  size="sm"
                   value={baseName}
+                  placeholder={t('common:untitledBase')}
                   onChange={(e) => setBaseName(e.target.value)}
                   onBlur={toggleRenameBase}
                   onClick={clickStopPropagation}
+                  onMouseDown={clickStopPropagation}
                 />
               </form>
             ) : (
-              <h3 className="line-clamp-2 flex-1 px-4	" title={base.name}>
-                {base.name}
-              </h3>
+              <div className="flex-1">
+                <div className="flex items-center gap-1">
+                  <h3
+                    dir={contentDir}
+                    className="line-clamp-2 text-sm"
+                    title={getBaseDisplayName(base.name, t)}
+                  >
+                    {getBaseDisplayName(base.name, t)}
+                  </h3>
+                  {base.isShared && <Share2 className="size-3.5 shrink-0 text-muted-foreground" />}
+                </div>
+                {spaceName && (
+                  <p
+                    dir={contentDir}
+                    className="mt-0.5 truncate text-xs text-muted-foreground"
+                    title={spaceName}
+                  >
+                    {spaceName}
+                  </p>
+                )}
+              </div>
             )}
-            <div className="shrink-0">
+          </div>
+          <div className="absolute end-0 top-1 flex gap-2 px-1 md:opacity-0 md:group-hover:opacity-100">
+            <StarButton
+              className="size-6 rounded-full bg-gray-100/50 p-1 shadow backdrop-blur-sm transition-colors hover:bg-gray-200/80"
+              id={base.id}
+              type={PinType.Base}
+            />
+            <div
+              className="shrink-0"
+              onClick={(e) => e.stopPropagation()}
+              onMouseDown={(e) => e.stopPropagation()}
+            >
               <BaseActionTrigger
                 base={base}
                 showRename={hasUpdatePermission}
-                showDuplicate={hasReadPermission}
+                showDuplicate={hasUpdatePermission}
                 showDelete={hasDeletePermission}
-                onDelete={() => deleteBaseMutator(base.id)}
+                showExport={hasUpdatePermission}
+                showMove={hasMovePermission}
+                showShare={hasUpdatePermission}
+                onDelete={(permanent) => deleteBaseMutator({ baseId: base.id, permanent })}
                 onRename={onRename}
               >
                 <Button
-                  className="sm:opacity-0 sm:group-hover:opacity-100"
-                  variant="outline"
+                  variant="ghost"
                   size={'xs'}
+                  className="size-6 rounded-full bg-gray-100/50 p-1 shadow backdrop-blur-sm transition-colors hover:bg-gray-200/80"
                 >
                   <MoreHorizontal className="size-4" />
                 </Button>

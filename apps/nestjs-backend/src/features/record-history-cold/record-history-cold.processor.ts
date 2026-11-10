@@ -1,0 +1,197 @@
+import { InjectQueue, OnWorkerEvent, WorkerHost } from '@nestjs/bullmq';
+import { Injectable, Logger } from '@nestjs/common';
+import type { Job } from 'bullmq';
+import { Queue } from 'bullmq';
+import { RedisNativeService } from '../../cache/redis-native.service';
+import { Processor } from '../../utils/queue-processor';
+import { chainCatchupFlush } from '../cold-archive/catchup-chain';
+import { runCompactionScan } from '../cold-archive/compaction-pending';
+import { COLD_WORKER_OPTIONS } from '../cold-archive/worker-options';
+import { RecordHistoryColdStorageService } from './record-history-cold-storage.service';
+import {
+  RECORD_HISTORY_COMPACT_PENDING_KEY,
+  recordHistoryColdConfig,
+} from './record-history-cold.config';
+import type { ICompactMonthResult } from './record-history-compactor.service';
+import { RecordHistoryCompactorService } from './record-history-compactor.service';
+import type { IColdFlushRunResult } from './record-history-flusher.service';
+import { RecordHistoryFlusherService } from './record-history-flusher.service';
+
+export const RECORD_HISTORY_COLD_QUEUE = 'record-history-cold-queue';
+
+const FLUSH_JOB_ID = 'record-history-cold:flush';
+const FLUSH_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const COMPACT_JOB_ID = 'record-history-cold:compact';
+/** 04:10 UTC on the 2nd of each month: every closed month has fully flushed */
+const COMPACT_CRON = '10 4 2 * *';
+// BullMQ accepts ':' in scheduler ids and job NAMES (both proven in prod) but
+// rejects it in CUSTOM job ids ("Custom Id cannot contain :"), so every id
+// passed to queue.add() below must stay colon-free
+const CATCHUP_JOB_ID_PREFIX = 'record-history-cold-flush-catchup';
+
+/**
+ * Daily incremental flush plus monthly compaction of the record_history
+ * write buffer / cold parts. Both schedulers are env-gated so only
+ * deployments that opted in run them.
+ */
+@Injectable()
+@Processor(RECORD_HISTORY_COLD_QUEUE, COLD_WORKER_OPTIONS)
+export class RecordHistoryColdProcessor extends WorkerHost {
+  private readonly logger = new Logger(RecordHistoryColdProcessor.name);
+
+  constructor(
+    private readonly flusher: RecordHistoryFlusherService,
+    private readonly compactor: RecordHistoryCompactorService,
+    private readonly coldStorage: RecordHistoryColdStorageService,
+    @InjectQueue(RECORD_HISTORY_COLD_QUEUE) private readonly queue: Queue,
+    private readonly redis: RedisNativeService
+  ) {
+    super();
+  }
+
+  async onApplicationBootstrap() {
+    const config = recordHistoryColdConfig();
+    if (!config.flushSchedulerEnabled && !config.compactSchedulerEnabled) {
+      // kill-switched process: consume nothing (a paused worker on a shared
+      // redis leaves the jobs to any still-enabled pods)
+      if (typeof this.worker?.pause === 'function') {
+        await this.worker.pause(true);
+        this.logger.log('record-history cold worker paused (cold feature disabled here)');
+      }
+      // deliberately NO scheduler removal here: no process can tell "the
+      // feature was disabled everywhere" from "other pods still run it",
+      // and removing from the shared redis would tear down their schedule.
+      // With a fleet-wide kill switch the schedulers' jobs are skipped at
+      // execution by process() and sit as at most a couple of delayed jobs
+      // per day until re-enable (or a manual scheduler cleanup).
+      return;
+    }
+    // the redis-less fallback queue has no job schedulers; skip silently there
+    if (typeof this.queue.upsertJobScheduler !== 'function') {
+      this.logger.warn('record-history cold schedulers unavailable without redis');
+      return;
+    }
+    // schedulers are only ever ADDED here, never removed: no process can
+    // tell a fleet-wide rollback from "that scheduler belongs to another
+    // pod" (API pods, or flush/compact split across worker pods), and a
+    // removal on restart would silently tear down a peer's schedule. A
+    // rolled-back flag is neutralized by the execution-time gate in
+    // process(); clearing the leftover scheduler entry is a manual op.
+    try {
+      if (config.flushSchedulerEnabled) {
+        // creating the scheduler fires its first run immediately (that is
+        // what starts the migration on a fresh install); on upgrade deploys
+        // the next slot is at most a day away. Deliberately NO boot-time
+        // kick beyond that: a fixed-id kick job needs a fleet-wide dedupe
+        // marker, and BullMQ's lazy retention pruning turns that marker
+        // into a footgun (see the 2026-07-08 stalls). If a backlog must
+        // drain sooner than the next daily slot, run the EE cold runner
+        // once (flush --max-rows=0 --max-bytes=0) — a deliberate op, not
+        // boot magic.
+        await this.queue.upsertJobScheduler(
+          FLUSH_JOB_ID,
+          { every: FLUSH_INTERVAL_MS },
+          { name: FLUSH_JOB_ID }
+        );
+        this.logger.log(`record-history cold flush scheduled (every ${FLUSH_INTERVAL_MS / 1000}s)`);
+      }
+      if (config.compactSchedulerEnabled) {
+        await this.queue.upsertJobScheduler(
+          COMPACT_JOB_ID,
+          { pattern: COMPACT_CRON },
+          { name: COMPACT_JOB_ID }
+        );
+        this.logger.log(`record-history cold compaction scheduled (cron ${COMPACT_CRON})`);
+      }
+    } catch (error) {
+      this.logger.error('failed to register record-history cold schedulers', error);
+    }
+  }
+
+  async process(job: Job): Promise<IColdFlushRunResult | ICompactMonthResult[] | undefined> {
+    // execution gate: an enabled process executes WHATEVER cold job it
+    // receives (per-name gating would let a pod "complete" a peer's job
+    // without running it); a kill-switched process skips everything, so a
+    // stale scheduler or an already-enqueued job cannot outlive a fleet-wide
+    // disable
+    const config = recordHistoryColdConfig();
+    if (!config.flushSchedulerEnabled && !config.compactSchedulerEnabled) {
+      this.logger.warn('skipping cold maintenance job: this process has no cold scheduler flags');
+      return undefined;
+    }
+    if (job.name === COMPACT_JOB_ID) {
+      return this.runCompaction();
+    }
+    // monthly safety sweep: on the 1st the daily run ignores the BYODB
+    // bookmarks, so a space whose activity signal was ever missed (however
+    // that might happen) is stranded for at most a month instead of forever
+    const result = await this.flusher.runFlush({
+      mode: 'incremental',
+      ignoreBookmarks: new Date().getUTCDate() === 1,
+    });
+    this.logger.log(
+      `record-history cold flush: tables=${result.tables.length} rows=${result.totalRows} ` +
+        `parts=${result.totalParts} bytes=${result.totalCompressedBytes} in ${result.durationMs}ms` +
+        (result.totalTruncatedValues ? ` truncated=${result.totalTruncatedValues}` : '') +
+        (result.leftoverTables ? ` (deferred ${result.leftoverTables} table(s))` : '') +
+        ` backlog=${result.backlogRows}`
+    );
+    if (result.budgetExhausted) {
+      await this.chainCatchupFlush(job);
+    }
+    return result;
+  }
+
+  // BullMQ keeps a thrown job's reason in redis and logs nothing itself
+  @OnWorkerEvent('failed')
+  onFailed(job: Job | undefined, error: Error) {
+    this.logger.error(
+      `record-history cold job ${job?.name ?? 'unknown'} failed: ${error?.stack ?? error}`
+    );
+  }
+
+  /**
+   * backlog drain (e.g. right after an upgrade): chain a catch-up run
+   * instead of one marathon. The jobId carries the hop number because BullMQ
+   * dedups an .add() whose id matches ANY existing job INCLUDING the one
+   * currently executing — a fixed id would end the chain at hop one. Unique
+   * ids alone would let a daily run spawn a second chain next to a live one
+   * (its hop numbering restarts), so before adding we check the queue for
+   * any other pending/active catch-up and skip if one exists.
+   */
+  private async chainCatchupFlush(job: Job): Promise<void> {
+    const config = recordHistoryColdConfig();
+    await chainCatchupFlush({
+      job,
+      queue: this.queue,
+      flushJobId: FLUSH_JOB_ID,
+      catchupJobIdPrefix: CATCHUP_JOB_ID_PREFIX,
+      delayMs: config.catchupDelayMs,
+      maxHops: config.maxCatchupHops,
+      logger: this.logger,
+    });
+  }
+
+  /**
+   * compact the closed months (day parts → month parts) of every table the
+   * flusher marked pending, or of every cold table until the pending set is
+   * bootstrapped (or without redis)
+   */
+  private async runCompaction(): Promise<ICompactMonthResult[]> {
+    const scan = await runCompactionScan<ICompactMonthResult>({
+      redis: this.redis,
+      key: RECORD_HISTORY_COMPACT_PENDING_KEY,
+      subsystem: 'record-history',
+      logger: this.logger,
+      listAll: () => this.coldStorage.listTables(),
+      compact: (tableId) => this.compactor.compactTable(tableId),
+    });
+    const merged = scan.results.filter((result) => !result.skippedReason);
+    this.logger.log(
+      `record-history cold compaction: mode=${scan.mode} pending=${scan.pending} ` +
+        `tables=${scan.candidates} deferred=${scan.deferred} monthsMerged=${merged.length} ` +
+        `rows=${merged.reduce((sum, item) => sum + item.rows, 0)}`
+    );
+    return scan.results;
+  }
+}

@@ -1,5 +1,5 @@
 import { useMutation } from '@tanstack/react-query';
-import { Database, LayoutTemplate } from '@teable/icons';
+import { LayoutGrid, LayoutTemplate } from '@teable/icons';
 import { createBase } from '@teable/openapi';
 import {
   Button,
@@ -13,7 +13,8 @@ import { useRouter } from 'next/router';
 import { useTranslation } from 'next-i18next';
 import type { ReactNode } from 'react';
 import { spaceConfig } from '@/features/i18n/space.config';
-import { useEnv } from '../../hooks/useEnv';
+import { TemplateModal } from './template';
+import { TemplateContext } from './template/context';
 
 export const CreateBaseModalTrigger = ({
   spaceId,
@@ -24,7 +25,7 @@ export const CreateBaseModalTrigger = ({
 }) => {
   const { t } = useTranslation(spaceConfig.i18nNamespaces);
   const router = useRouter();
-  const { mutate: createBaseMutator, isLoading: createBaseLoading } = useMutation({
+  const { mutate: createBaseMutator, isPending: createBaseLoading } = useMutation({
     mutationFn: createBase,
     onSuccess: ({ data }) => {
       router.push({
@@ -33,36 +34,38 @@ export const CreateBaseModalTrigger = ({
       });
     },
   });
-  const { templateSiteLink } = useEnv();
 
   return (
-    <Dialog>
-      <DialogTrigger asChild>{children}</DialogTrigger>
-      <DialogContent className="sm:max-w-[425px]">
-        <DialogHeader>
-          <DialogTitle>{t('space:baseModal.howToCreate')}</DialogTitle>
-        </DialogHeader>
-        <div className="flex justify-around pt-4">
-          <Button
-            className="flex h-auto grow flex-col items-center gap-4 border-r"
-            variant="ghost"
-            onClick={() => createBaseMutator({ spaceId })}
-            disabled={createBaseLoading}
-          >
-            <Database className="size-8" />
-            {t('space:baseModal.fromScratch')}
-          </Button>
-          <Button
-            className="flex h-auto grow flex-col items-center gap-4"
-            variant="ghost"
-            disabled={!templateSiteLink}
-            onClick={() => (window.location.href = templateSiteLink as string)}
-          >
-            <LayoutTemplate className="size-8" />
-            {t('space:baseModal.fromTemplate')}
-          </Button>
-        </div>
-      </DialogContent>
-    </Dialog>
+    <div>
+      <Dialog>
+        <DialogTrigger asChild>{children}</DialogTrigger>
+        <DialogContent className="sm:max-w-[425px]">
+          <DialogHeader>
+            <DialogTitle>{t('space:baseModal.howToCreate')}</DialogTitle>
+          </DialogHeader>
+          <div className="flex justify-around pt-4">
+            <Button
+              className="flex h-auto grow flex-col items-center gap-4"
+              variant="ghost"
+              onClick={() => {
+                createBaseMutator({ spaceId });
+              }}
+              disabled={createBaseLoading}
+            >
+              <LayoutGrid className="size-8" />
+              {t('space:baseModal.fromScratch')}
+            </Button>
+            <TemplateContext.Provider value={{ spaceId }}>
+              <TemplateModal spaceId={spaceId}>
+                <Button className="flex h-auto grow flex-col items-center gap-4" variant="ghost">
+                  <LayoutTemplate className="size-8" />
+                  {t('space:baseModal.fromTemplate')}
+                </Button>
+              </TemplateModal>
+            </TemplateContext.Provider>
+          </div>
+        </DialogContent>
+      </Dialog>
+    </div>
   );
 };

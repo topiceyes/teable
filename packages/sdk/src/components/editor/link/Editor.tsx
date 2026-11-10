@@ -1,18 +1,24 @@
-import type { IGetRecordsRo, ILinkCellValue, ILinkFieldOptions } from '@teable/core';
+import type { ILinkCellValue, ILinkFieldOptions } from '@teable/core';
 import { isMultiValueLink } from '@teable/core';
 import { Plus } from '@teable/icons';
-import { Button, Dialog, DialogContent, DialogTrigger, useToast } from '@teable/ui-lib';
-import { useState, useRef, useMemo, useEffect, useCallback } from 'react';
-import { AnchorProvider } from '../../../context';
+import type { IGetRecordsRo } from '@teable/openapi';
+import { Button, Dialog, DialogContent, DialogTrigger, sonner } from '@teable/ui-lib';
+import { useContext, useState, useRef, useMemo, useCallback } from 'react';
+import { LinkViewProvider, RowCountProvider, ShareViewContext } from '../../../context';
 import { useTranslation } from '../../../context/app/i18n';
-import { ExpandRecorder } from '../../expand-record';
+import { LinkFilterProvider } from '../../../context/query/LinkFilterProvider';
+import { useIsTouchDevice } from '../../../hooks/use-is-touch-device';
+import { ExpandRecorder, isLinkedRecordOpen } from '../../expand-record';
 import type { ILinkEditorMainRef } from './EditorMain';
 import { LinkEditorMain } from './EditorMain';
 import { LinkListType } from './interface';
 import { LinkCard } from './LinkCard';
 import type { ILinkListRef } from './LinkList';
 import { LinkList } from './LinkList';
+import { buildLinkRecordQueryBase } from './LinkRecordQuery';
+import { LinkTag } from './LinkTag';
 
+const { toast } = sonner;
 interface ILinkEditorProps {
   options: ILinkFieldOptions;
   fieldId: string;
@@ -21,55 +27,63 @@ interface ILinkEditorProps {
   className?: string;
   cellValue?: ILinkCellValue | ILinkCellValue[];
   displayType?: LinkDisplayType;
-  onChange?: (value?: ILinkCellValue | ILinkCellValue[]) => void;
+  isSelectedRowBgVisible?: boolean;
+  onChange?: (value: ILinkCellValue | ILinkCellValue[] | null) => void;
 }
 
 export enum LinkDisplayType {
   Grid = 'grid',
   List = 'list',
+  Tags = 'tags',
 }
 
 export const LinkEditor = (props: ILinkEditorProps) => {
   const {
-    fieldId,
-    recordId,
     cellValue,
     options,
     onChange,
     readonly,
     className,
     displayType = LinkDisplayType.Grid,
+    isSelectedRowBgVisible,
   } = props;
-  const { toast } = useToast();
   const listRef = useRef<ILinkListRef>(null);
   const linkEditorMainRef = useRef<ILinkEditorMainRef>(null);
+  const dialogContentRef = useRef<HTMLDivElement>(null);
+  const isTouchDevice = useIsTouchDevice();
   const [isEditing, setEditing] = useState<boolean>(false);
-  const [values, setValues] = useState<ILinkCellValue[]>();
   const [expandRecordId, setExpandRecordId] = useState<string>();
   const { t } = useTranslation();
+  const { shareId } = useContext(ShareViewContext);
 
   const { foreignTableId, relationship } = options;
   const isMultiple = isMultiValueLink(relationship);
-  const cvArray = Array.isArray(cellValue) || !cellValue ? cellValue : [cellValue];
+  const cvArray = useMemo(() => {
+    return Array.isArray(cellValue) || !cellValue ? cellValue : [cellValue];
+  }, [cellValue]);
   const recordIds = cvArray?.map((cv) => cv.id);
   const selectedRowCount = recordIds?.length ?? 0;
 
+  const selectedRecordIds = useMemo(() => {
+    return Array.isArray(cellValue)
+      ? cellValue.map((v) => v.id)
+      : cellValue?.id
+        ? [cellValue.id]
+        : [];
+  }, [cellValue]);
+
   const recordQuery = useMemo((): IGetRecordsRo => {
     return {
-      filterLinkCellSelected: recordId ? [fieldId, recordId] : fieldId,
+      ...buildLinkRecordQueryBase(options),
+      selectedRecordIds,
     };
-  }, [fieldId, recordId]);
-
-  useEffect(() => {
-    if (cellValue == null) return setValues(cellValue);
-    setValues(Array.isArray(cellValue) ? cellValue : [cellValue]);
-  }, [cellValue]);
+  }, [options, selectedRecordIds]);
 
   const updateExpandRecordId = (recordId?: string) => {
     if (recordId) {
-      const existed = document.getElementById(`${foreignTableId}-${recordId}`);
+      const existed = isLinkedRecordOpen(foreignTableId, recordId);
       if (existed) {
-        toast({ description: 'This record is already open.' });
+        toast.warning(t('editor.link.alreadyOpen'));
         return;
       }
     }
@@ -82,26 +96,23 @@ export const LinkEditor = (props: ILinkEditorProps) => {
 
   const onRecordDelete = (recordId: string) => {
     onChange?.(
-      isMultiple ? (cellValue as ILinkCellValue[])?.filter((cv) => cv.id !== recordId) : undefined
+      isMultiple ? (cellValue as ILinkCellValue[])?.filter((cv) => cv.id !== recordId) : null
     );
   };
 
-  const onRecordListChange = useCallback((value?: ILinkCellValue[]) => {
-    setValues(value);
-  }, []);
+  const onRecordListChange = useCallback(
+    (value?: ILinkCellValue[]) => {
+      if (!value || value.length === 0) {
+        return onChange?.(null);
+      }
+      onChange?.(isMultiple ? value : value[0]);
+    },
+    [isMultiple, onChange]
+  );
 
   const onOpenChange = (open: boolean) => {
     if (open) return setEditing?.(true);
     return linkEditorMainRef.current?.onReset();
-  };
-
-  const onExpandRecord = (recordId: string) => {
-    setExpandRecordId(recordId);
-  };
-
-  const onConfirm = () => {
-    if (values == null) return onChange?.(undefined);
-    onChange?.(isMultiple ? values : values[0]);
   };
 
   return (
@@ -109,19 +120,42 @@ export const LinkEditor = (props: ILinkEditorProps) => {
       {Boolean(selectedRowCount) &&
         (displayType === LinkDisplayType.Grid ? (
           <div className="relative h-40 w-full overflow-hidden rounded-md border">
-            <AnchorProvider tableId={foreignTableId}>
-              <LinkList
-                ref={listRef}
-                type={LinkListType.Selected}
-                rowCount={selectedRowCount}
+            <LinkViewProvider linkFieldId={props.fieldId}>
+              <LinkFilterProvider
+                filterLinkCellCandidate={
+                  props.recordId ? [props.fieldId, props.recordId] : props.fieldId
+                }
+                selectedRecordIds={props.recordId ? undefined : selectedRecordIds}
+              >
+                <RowCountProvider>
+                  <LinkList
+                    ref={listRef}
+                    type={LinkListType.Selected}
+                    rowCount={selectedRowCount}
+                    readonly={readonly}
+                    cellValue={cellValue}
+                    isMultiple={isMultiple}
+                    recordQuery={recordQuery}
+                    onChange={onRecordListChange}
+                    onExpand={onRecordExpand}
+                    isSelectedRowBgVisible={isSelectedRowBgVisible}
+                  />
+                </RowCountProvider>
+              </LinkFilterProvider>
+            </LinkViewProvider>
+          </div>
+        ) : displayType === LinkDisplayType.Tags ? (
+          <div className="flex flex-wrap gap-1">
+            {cvArray?.map(({ id, title }) => (
+              <LinkTag
+                key={id}
+                id={id}
+                title={title}
                 readonly={readonly}
-                cellValue={cellValue}
-                isMultiple={isMultiple}
-                recordQuery={recordQuery}
-                onChange={onRecordListChange}
-                onExpand={onRecordExpand}
+                onClick={() => onRecordExpand(id)}
+                onDelete={() => onRecordDelete(id)}
               />
-            </AnchorProvider>
+            ))}
           </div>
         ) : (
           cvArray?.map(({ id, title }) => (
@@ -135,39 +169,48 @@ export const LinkEditor = (props: ILinkEditorProps) => {
           ))
         ))}
       {!readonly && (
-        <>
-          <div className="flex justify-between">
-            <Dialog open={isEditing} onOpenChange={onOpenChange}>
-              <DialogTrigger asChild>
-                <Button variant="outline" size={'sm'} className={className}>
-                  <Plus />
-                  {t('editor.link.selectRecord')}
-                </Button>
-              </DialogTrigger>
-              <DialogContent className="flex h-[520px] max-w-4xl flex-col">
-                <LinkEditorMain
-                  {...props}
-                  ref={linkEditorMainRef}
-                  isEditing={isEditing}
-                  setEditing={setEditing}
-                  onExpandRecord={onExpandRecord}
-                />
-              </DialogContent>
-            </Dialog>
-            {Boolean(selectedRowCount) && displayType === LinkDisplayType.Grid && (
-              <Button size={'sm'} onClick={onConfirm}>
-                {t('common.confirm')}
+        <div className="flex justify-between">
+          <Dialog open={isEditing} onOpenChange={onOpenChange}>
+            <DialogTrigger asChild>
+              <Button variant="outline" size={'sm'} className={className}>
+                <Plus className="size-4 shrink-0" />
+                {t('editor.link.selectRecord')}
               </Button>
-            )}
-          </div>
-          <ExpandRecorder
-            tableId={foreignTableId}
-            recordId={expandRecordId}
-            recordIds={recordIds}
-            onUpdateRecordIdCallback={updateExpandRecordId}
-            onClose={() => updateExpandRecordId(undefined)}
-          />
-        </>
+            </DialogTrigger>
+            <DialogContent
+              ref={dialogContentRef}
+              tabIndex={-1}
+              className="flex h-[520px] max-w-4xl flex-col p-4"
+              // Under a finger the picker opens onto its list, not its search field:
+              // focusing the field would raise the keyboard over the records to pick.
+              // The dialog itself takes focus, so its keys and dismissal still work.
+              onOpenAutoFocus={(event) => {
+                if (!isTouchDevice) return;
+                event.preventDefault();
+                dialogContentRef.current?.focus({ preventScroll: true });
+              }}
+            >
+              <LinkEditorMain
+                {...props}
+                ref={linkEditorMainRef}
+                isEditing={isEditing}
+                setEditing={setEditing}
+              />
+            </DialogContent>
+          </Dialog>
+        </div>
+      )}
+      {/* The child table's rows open their linked records, read-only ones included. A share
+          view cannot hydrate another table's records, so its read-only cells keep the list. */}
+      {(!readonly || !shareId) && (
+        <ExpandRecorder
+          tableId={foreignTableId}
+          recordId={expandRecordId}
+          recordIds={recordIds}
+          isLinkedRecord
+          onUpdateRecordIdCallback={updateExpandRecordId}
+          onClose={() => updateExpandRecordId()}
+        />
       )}
     </div>
   );

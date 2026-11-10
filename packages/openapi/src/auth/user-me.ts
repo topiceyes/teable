@@ -14,6 +14,21 @@ export const userMeVoSchema = z.object({
   phone: z.string().nullable().optional(),
   notifyMeta: userNotifyMetaSchema,
   hasPassword: z.boolean(),
+  isAdmin: z.boolean().nullable().optional(),
+  lang: z.string().nullable().optional(),
+  organization: z
+    .object({
+      id: z.string(),
+      name: z.string(),
+      departments: z.array(
+        z.object({
+          id: z.string(),
+          name: z.string(),
+        })
+      ),
+      isAdmin: z.boolean().optional(),
+    })
+    .optional(),
 });
 
 export type IUserMeVo = z.infer<typeof userMeVoSchema>;

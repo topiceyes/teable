@@ -1,37 +1,74 @@
-import type { IFilterOperator, ILiteralValue } from '@teable/core';
+import {
+  isFieldReferenceValue,
+  type IFieldReferenceValue,
+  type IFilterOperator,
+  type ILiteralValue,
+} from '@teable/core';
 import type { Knex } from 'knex';
+import { escapeLikeWildcards } from '../../../../../utils/sql-like-escape';
+import type { IDbProvider } from '../../../../db.provider.interface';
 import { CellValueFilterPostgres } from '../cell-value-filter.postgres';
 
 export class StringCellValueFilterAdapter extends CellValueFilterPostgres {
   isOperatorHandler(
     builderClient: Knex.QueryBuilder,
-    operator: IFilterOperator,
-    value: ILiteralValue
+    _operator: IFilterOperator,
+    value: ILiteralValue | IFieldReferenceValue,
+    _dbProvider: IDbProvider
   ): Knex.QueryBuilder {
-    return super.isOperatorHandler(builderClient, operator, value);
+    if (isFieldReferenceValue(value)) {
+      const ref = this.resolveFieldReference(value);
+      builderClient.whereRaw(`${this.tableColumnRef} = ${ref}`);
+      return builderClient;
+    }
+    // Column is text; coerce numeric/boolean literals to string so the comparison stays
+    // text = text. Otherwise a numeric value renders as a bigint literal and Postgres
+    // rejects it with "operator does not exist: text = bigint".
+    builderClient.whereRaw(`${this.tableColumnRef} = ?`, [String(value)]);
+    return builderClient;
   }
 
   isNotOperatorHandler(
     builderClient: Knex.QueryBuilder,
-    operator: IFilterOperator,
-    value: ILiteralValue
+    _operator: IFilterOperator,
+    value: ILiteralValue | IFieldReferenceValue,
+    _dbProvider: IDbProvider
   ): Knex.QueryBuilder {
-    return super.isNotOperatorHandler(builderClient, operator, value);
+    if (isFieldReferenceValue(value)) {
+      const ref = this.resolveFieldReference(value);
+      builderClient.whereRaw(`${this.tableColumnRef} IS DISTINCT FROM ${ref}`);
+      return builderClient;
+    }
+    builderClient.whereRaw(`${this.tableColumnRef} IS DISTINCT FROM ?`, [String(value)]);
+    return builderClient;
   }
 
   containsOperatorHandler(
     builderClient: Knex.QueryBuilder,
-    operator: IFilterOperator,
-    value: ILiteralValue
+    _operator: IFilterOperator,
+    value: ILiteralValue,
+    _dbProvider: IDbProvider
   ): Knex.QueryBuilder {
-    return super.containsOperatorHandler(builderClient, operator, value);
+    this.ensureLiteralValue(value, _operator);
+    const escapedValue = escapeLikeWildcards(String(value));
+    builderClient.whereRaw(String.raw`${this.tableColumnRef} iLIKE ? ESCAPE '\'`, [
+      `%${escapedValue}%`,
+    ]);
+    return builderClient;
   }
 
   doesNotContainOperatorHandler(
     builderClient: Knex.QueryBuilder,
-    operator: IFilterOperator,
-    value: ILiteralValue
+    _operator: IFilterOperator,
+    value: ILiteralValue,
+    _dbProvider: IDbProvider
   ): Knex.QueryBuilder {
-    return super.doesNotContainOperatorHandler(builderClient, operator, value);
+    this.ensureLiteralValue(value, _operator);
+    const escapedValue = escapeLikeWildcards(String(value));
+    builderClient.whereRaw(
+      String.raw`LOWER(COALESCE(${this.tableColumnRef}, '')) NOT LIKE LOWER(?) ESCAPE '\'`,
+      [`%${escapedValue}%`]
+    );
+    return builderClient;
   }
 }

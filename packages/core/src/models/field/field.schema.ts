@@ -3,182 +3,172 @@ import { assertNever } from '../../asserts';
 import type { IEnsureKeysMatchInterface } from '../../types';
 import { IdPrefix } from '../../utils';
 import { z } from '../../zod';
+import { fieldAIConfigSchema, getAiConfigSchema, type IFieldAIConfig } from './ai-config';
 import { CellValueType, DbFieldType, FieldType } from './constant';
+import { selectFieldOptionsRoSchema } from './derivate/abstract/select.field.abstract';
+import { attachmentFieldOptionsSchema } from './derivate/attachment-option.schema';
+import { autoNumberFieldOptionsRoSchema } from './derivate/auto-number-option.schema';
+import { buttonFieldOptionsSchema } from './derivate/button-option.schema';
+import { checkboxFieldOptionsSchema } from './derivate/checkbox-option.schema';
+import { conditionalRollupFieldOptionsSchema } from './derivate/conditional-rollup-option.schema';
+import { createdByFieldOptionsSchema } from './derivate/created-by-option.schema';
+import { createdTimeFieldOptionsRoSchema } from './derivate/created-time-option.schema';
+import { dateFieldOptionsSchema } from './derivate/date-option.schema';
+import { formulaFieldOptionsSchema } from './derivate/formula-option.schema';
+import { lastModifiedByFieldOptionsSchema } from './derivate/last-modified-by-option.schema';
+import { lastModifiedTimeFieldOptionsRoSchema } from './derivate/last-modified-time-option.schema';
+import { linkFieldOptionsRoSchema } from './derivate/link-option.schema';
+import { longTextFieldOptionsSchema } from './derivate/long-text-option.schema';
+import { numberFieldOptionsRoSchema } from './derivate/number-option.schema';
+import { ratingFieldOptionsSchema } from './derivate/rating-option.schema';
+import { rollupFieldOptionsSchema } from './derivate/rollup-option.schema';
+import { singlelineTextFieldOptionsSchema } from './derivate/single-line-text-option.schema';
+import { userFieldOptionsSchema } from './derivate/user-option.schema';
 import {
-  checkboxFieldOptionsSchema,
-  numberFieldOptionsSchema,
-  selectFieldOptionsSchema,
-  singlelineTextFieldOptionsSchema,
-  formulaFieldOptionsSchema,
-  linkFieldOptionsSchema,
-  dateFieldOptionsSchema,
-  attachmentFieldOptionsSchema,
-  rollupFieldOptionsSchema,
-  linkFieldOptionsRoSchema,
-  numberFieldOptionsRoSchema,
-  selectFieldOptionsRoSchema,
-  ratingFieldOptionsSchema,
-  longTextFieldOptionsSchema,
-  createdTimeFieldOptionsSchema,
-  lastModifiedTimeFieldOptionsSchema,
-  autoNumberFieldOptionsSchema,
-  createdTimeFieldOptionsRoSchema,
-  lastModifiedTimeFieldOptionsRoSchema,
-  autoNumberFieldOptionsRoSchema,
-  userFieldOptionsSchema,
-} from './derivate';
-import { unionFormattingSchema } from './formatting';
-import { unionShowAsSchema } from './show-as';
+  type IFieldOptionsRo,
+  unionFieldMetaVoSchema,
+  unionFieldOptionsRoSchema,
+  unionFieldOptionsVoSchema,
+} from './field-unions.schema';
+import {
+  type ILookupOptionsRo,
+  lookupOptionsPatchSchema,
+  lookupOptionsRoSchema,
+  lookupOptionsVoSchema,
+} from './lookup-options-base.schema';
+import { validateFieldOptions } from './zod-error';
 
-export const lookupOptionsVoSchema = linkFieldOptionsSchema
-  .pick({
-    foreignTableId: true,
-    lookupFieldId: true,
-    relationship: true,
-    fkHostTableName: true,
-    selfKeyName: true,
-    foreignKeyName: true,
-  })
-  .merge(
-    z.object({
-      linkFieldId: z.string().openapi({
-        description: 'The id of Linked record field to use for lookup',
-      }),
-    })
-  );
+// All union schemas and types are now imported from field-unions.schema.ts
 
-export type ILookupOptionsVo = z.infer<typeof lookupOptionsVoSchema>;
-
-export const lookupOptionsRoSchema = lookupOptionsVoSchema.pick({
-  foreignTableId: true,
-  lookupFieldId: true,
-  linkFieldId: true,
-});
-
-export type ILookupOptionsRo = z.infer<typeof lookupOptionsRoSchema>;
-
-export const unionFieldOptions = z.union([
-  rollupFieldOptionsSchema.strict(),
-  formulaFieldOptionsSchema.strict(),
-  linkFieldOptionsSchema.strict(),
-  dateFieldOptionsSchema.strict(),
-  checkboxFieldOptionsSchema.strict(),
-  attachmentFieldOptionsSchema.strict(),
-  singlelineTextFieldOptionsSchema.strict(),
-  ratingFieldOptionsSchema.strict(),
-  userFieldOptionsSchema.strict(),
-]);
-
-export const unionFieldOptionsVoSchema = z.union([
-  unionFieldOptions,
-  linkFieldOptionsSchema.strict(),
-  selectFieldOptionsSchema.strict(),
-  numberFieldOptionsSchema.strict(),
-  autoNumberFieldOptionsSchema.strict(),
-  createdTimeFieldOptionsSchema.strict(),
-  lastModifiedTimeFieldOptionsSchema.strict(),
-]);
-
-export const unionFieldOptionsRoSchema = z.union([
-  unionFieldOptions,
-  linkFieldOptionsRoSchema.strict(),
-  selectFieldOptionsRoSchema.strict(),
-  numberFieldOptionsRoSchema.strict(),
-  autoNumberFieldOptionsRoSchema.strict(),
-  createdTimeFieldOptionsRoSchema.strict(),
-  lastModifiedTimeFieldOptionsRoSchema.strict(),
-]);
-
-export const commonOptionsSchema = z.object({
-  showAs: unionShowAsSchema.optional(),
-  formatting: unionFormattingSchema.optional(),
-});
-
-export type IFieldOptionsRo = z.infer<typeof unionFieldOptionsRoSchema>;
-export type IFieldOptionsVo = z.infer<typeof unionFieldOptionsVoSchema>;
+const optionalFieldVoProperty = <TSchema extends z.ZodTypeAny>(schema: TSchema) =>
+  z.preprocess((value) => (value === null ? undefined : value), schema.optional());
 
 export const fieldVoSchema = z.object({
-  id: z.string().startsWith(IdPrefix.Field).openapi({
+  id: z.string().startsWith(IdPrefix.Field).meta({
     description: 'The id of the field.',
   }),
 
-  name: z.string().openapi({
+  name: z.string().meta({
     description: 'The name of the field. can not be duplicated in the table.',
     example: 'Tags',
   }),
 
-  type: z.nativeEnum(FieldType).openapi({
+  type: z.enum(FieldType).meta({
     description: 'The field types supported by teable.',
     example: FieldType.SingleSelect,
   }),
 
-  description: z.string().optional().openapi({
+  description: optionalFieldVoProperty(z.string()).meta({
     description: 'The description of the field.',
     example: 'this is a summary',
   }),
 
-  options: unionFieldOptionsVoSchema.openapi({
+  options: unionFieldOptionsVoSchema.meta({
     description:
       "The configuration options of the field. The structure of the field's options depend on the field's type.",
   }),
 
-  isLookup: z.boolean().optional().openapi({
+  meta: optionalFieldVoProperty(unionFieldMetaVoSchema).meta({
+    description:
+      "The metadata of the field. The structure of the field's meta depend on the field's type. Currently formula and link fields have meta.",
+  }),
+
+  aiConfig: fieldAIConfigSchema.nullable().optional().meta({
+    description: 'The AI configuration of the field.',
+  }),
+
+  isLookup: optionalFieldVoProperty(z.boolean()).meta({
     description:
       'Whether this field is lookup field. witch means cellValue and [fieldType] is looked up from the linked table.',
   }),
 
-  lookupOptions: lookupOptionsVoSchema.optional().openapi({
+  isConditionalLookup: optionalFieldVoProperty(z.boolean()).meta({
+    description:
+      'Whether this lookup field applies a conditional filter when resolving linked records.',
+  }),
+
+  lookupOptions: optionalFieldVoProperty(lookupOptionsVoSchema).meta({
     description: 'field lookup options.',
   }),
 
-  notNull: z.boolean().optional().openapi({
+  notNull: optionalFieldVoProperty(z.boolean()).meta({
     description: 'Whether this field is not null.',
   }),
 
-  unique: z.boolean().optional().openapi({
+  unique: optionalFieldVoProperty(z.boolean()).meta({
     description: 'Whether this field is not unique.',
   }),
 
-  isPrimary: z.boolean().optional().openapi({
+  isPrimary: optionalFieldVoProperty(z.boolean()).meta({
     description: 'Whether this field is primary field.',
   }),
 
-  isComputed: z.boolean().optional().openapi({
+  isComputed: optionalFieldVoProperty(z.boolean()).meta({
     description:
       'Whether this field is computed field, you can not modify cellValue in computed field.',
   }),
 
-  isPending: z.boolean().optional().openapi({
+  isPending: optionalFieldVoProperty(z.boolean()).meta({
     description: "Whether this field's calculation is pending.",
   }),
 
-  hasError: z.boolean().optional().openapi({
+  computeMeta: optionalFieldVoProperty(
+    z.object({
+      status: z.enum(['idle', 'queued', 'running', 'failed']),
+      estimatedComplexity: z.number().optional(),
+      estimatedDirtyRecords: z.number().optional(),
+      startedAt: z.string().optional(),
+      lastDurationMs: z.number().optional(),
+      lastError: z
+        .object({
+          code: z.string().optional(),
+          message: z.string(),
+          context: z.record(z.string(), z.unknown()).optional(),
+        })
+        .nullable()
+        .optional(),
+    })
+  ).meta({
+    description:
+      'Async computed activity for this field (formula/lookup/rollup recalculation status).',
+  }),
+
+  hasError: optionalFieldVoProperty(z.boolean()).meta({
     description:
       "Whether This field has a configuration error. Check the fields referenced by this field's formula or configuration.",
   }),
 
-  cellValueType: z.nativeEnum(CellValueType).openapi({
+  cellValueType: z.enum(CellValueType).meta({
     description: 'The cell value type of the field.',
   }),
 
-  isMultipleCellValue: z.boolean().optional().openapi({
+  isMultipleCellValue: optionalFieldVoProperty(z.boolean()).meta({
     description: 'Whether this field has multiple cell value.',
   }),
 
-  dbFieldType: z.nativeEnum(DbFieldType).openapi({
+  dbFieldType: z.enum(DbFieldType).meta({
     description: 'The field type of database that cellValue really store.',
   }),
 
   dbFieldName: z
     .string()
     .min(1, { message: 'name cannot be empty' })
-    .regex(/^[a-z]\w{0,62}$/i, {
+    .regex(/^\w{0,63}$/, {
       message: 'Invalid name format',
     })
-    .openapi({
+    .meta({
       description:
-        'Field(column) name in backend database. Limitation: 1-63 characters, start with letter, can only contain letters, numbers and underscore, case sensitive, cannot be duplicated with existing db field name in the table.',
+        'Field(column) name in backend database. Limitation: 1-63 characters, can only contain letters, numbers and underscore, case sensitive, cannot be duplicated with existing db field name in the table.',
     }),
+  recordRead: optionalFieldVoProperty(z.boolean()).meta({
+    description:
+      'Field record read permission. When set to false, reading records is denied. When true or not set, reading records is allowed.',
+  }),
+
+  recordCreate: optionalFieldVoProperty(z.boolean()).meta({
+    description:
+      'Field record create permission. When set to false, creating records is denied. When true or not set, creating records is allowed.',
+  }),
 });
 
 export type IFieldVo = z.infer<typeof fieldVoSchema>;
@@ -190,46 +180,47 @@ export const FIELD_RO_PROPERTIES = [
   'name',
   'dbFieldName',
   'isLookup',
+  'isConditionalLookup',
   'description',
   'lookupOptions',
   'options',
 ] as const;
 
-/**
- * make sure FIELD_RO_PROPERTIES is exactly equals IFieldVo
- * if here throw error, you should update FIELD_RO_PROPERTIES
- */
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-const _validator1: IEnsureKeysMatchInterface<IConvertFieldRo, typeof FIELD_RO_PROPERTIES> = true;
-
 export const FIELD_VO_PROPERTIES = [
   'type',
   'description',
   'options',
+  'meta',
+  'aiConfig',
   'name',
   'isLookup',
+  'isConditionalLookup',
   'lookupOptions',
   'notNull',
   'unique',
   'isPrimary',
   'isComputed',
   'isPending',
+  'computeMeta',
   'hasError',
   'cellValueType',
   'isMultipleCellValue',
   'dbFieldType',
   'dbFieldName',
+  'recordRead',
+  'recordCreate',
 ] as const;
 
 /**
  * make sure FIELD_VO_PROPERTIES is exactly equals IFieldVo
- * if here shows lint error, you should update FIELD_VO_PROPERTIES
+ * if here shows lint error, you should update FIELD_VO_PROPERTI ES
  */
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
+/* eslint-disable @typescript-eslint/no-unused-vars */
 const _validator2: IEnsureKeysMatchInterface<
   Omit<IFieldVo, 'id'>,
   typeof FIELD_VO_PROPERTIES
 > = true;
+/* eslint-enable @typescript-eslint/no-unused-vars */
 
 export const getOptionsSchema = (type: FieldType) => {
   switch (type) {
@@ -257,6 +248,8 @@ export const getOptionsSchema = (type: FieldType) => {
       return formulaFieldOptionsSchema;
     case FieldType.Rollup:
       return rollupFieldOptionsSchema;
+    case FieldType.ConditionalRollup:
+      return conditionalRollupFieldOptionsSchema;
     case FieldType.Link:
       return linkFieldOptionsRoSchema;
     case FieldType.CreatedTime:
@@ -265,66 +258,81 @@ export const getOptionsSchema = (type: FieldType) => {
       return lastModifiedTimeFieldOptionsRoSchema;
     case FieldType.AutoNumber:
       return autoNumberFieldOptionsRoSchema;
-    case FieldType.Duration:
-    case FieldType.Count:
     case FieldType.CreatedBy:
+      return createdByFieldOptionsSchema;
     case FieldType.LastModifiedBy:
+      return lastModifiedByFieldOptionsSchema;
     case FieldType.Button:
-      throw new Error('no implementation');
+      return buttonFieldOptionsSchema;
     default:
       assertNever(type);
   }
+};
+
+/**
+ * Option keys a field type can carry. The PATCH endpoint accepts a subset of the
+ * current field's own options, so this is the per-type allowlist that decides whether
+ * a patched option key is supported at all.
+ */
+export const getFieldOptionKeys = (type: FieldType): ReadonlyArray<string> => {
+  const schema = getOptionsSchema(type);
+  return schema instanceof z.ZodObject ? Object.keys(schema.shape) : [];
 };
 
 const refineOptions = (
   data: {
     type: FieldType;
     isLookup?: boolean;
+    isConditionalLookup?: boolean;
     lookupOptions?: ILookupOptionsRo;
-    options?: IFieldOptionsRo;
+    options?: IFieldOptionsRo | null;
+    aiConfig?: IFieldAIConfig | null;
   },
   ctx: RefinementCtx
 ) => {
-  const { type, isLookup, lookupOptions, options } = data;
-  if (isLookup && !lookupOptions) {
+  if (data.isConditionalLookup && !data.isLookup) {
     ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: 'lookupOptions is required when isLookup is true.',
+      path: ['isConditionalLookup'],
+      code: 'custom',
+      message: 'isConditionalLookup requires isLookup to be true.',
     });
   }
 
-  if (!isLookup && lookupOptions && type !== FieldType.Rollup) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: 'lookupOptions is not allowed when isLookup is not true.',
-    });
-  }
-
-  if (!options) {
-    return;
-  }
-
-  if (isLookup) {
-    const result = commonOptionsSchema.safeParse(options);
-    if (!result.success) {
+  if (data.type === FieldType.Button && data.options && 'maxCount' in data.options) {
+    const maxCount = data.options.maxCount;
+    if (
+      maxCount != null &&
+      (typeof maxCount !== 'number' || !Number.isSafeInteger(maxCount) || maxCount <= 0)
+    ) {
       ctx.addIssue({
-        path: ['options'],
-        code: z.ZodIssueCode.custom,
-        message: `RefineOptionsInLookupError: ${result.error.message}`,
+        path: ['options', 'maxCount'],
+        code: 'custom',
+        message: 'Button maxCount must be a positive integer',
       });
     }
-    return;
   }
 
-  const schema = getOptionsSchema(type);
-  const result = schema && schema.safeParse(options);
-
-  if (result && !result.success) {
+  const validateRes = validateFieldOptions(data);
+  validateRes.forEach((item) => {
     ctx.addIssue({
-      path: ['options'],
-      code: z.ZodIssueCode.custom,
-      message: `RefineOptionsError: ${result.error.message}`,
+      path: item.path,
+      code: 'custom',
+      message: item.message,
     });
+  });
+
+  // Validate aiConfig matches field type
+  if (data.aiConfig != null) {
+    const aiConfigSchema = getAiConfigSchema(data.type);
+    const result = aiConfigSchema.safeParse(data.aiConfig);
+    if (!result.success) {
+      result.error.issues.forEach((issue) => {
+        ctx.addIssue({
+          ...issue,
+          path: ['aiConfig', ...issue.path],
+        });
+      });
+    }
   }
 };
 
@@ -333,46 +341,118 @@ const baseFieldRoSchema = fieldVoSchema
   .pick({
     type: true,
     name: true,
+    unique: true,
+    notNull: true,
     dbFieldName: true,
     isLookup: true,
+    isConditionalLookup: true,
     description: true,
   })
   .required({
     type: true,
   })
-  .merge(
-    z.object({
-      name: fieldVoSchema.shape.name.min(1).optional(),
-      description: fieldVoSchema.shape.description.nullable(),
-      lookupOptions: lookupOptionsRoSchema.optional().openapi({
-        description:
-          'The lookup options for field, you need to configure it when isLookup attribute is true or field type is rollup.',
-      }),
-      options: unionFieldOptionsRoSchema.optional().openapi({
-        description:
-          "The options of the field. The configuration of the field's options depend on the it's specific type.",
-      }),
-    })
-  );
+  .extend({
+    name: fieldVoSchema.shape.name.min(1).optional(),
+    description: fieldVoSchema.shape.description.nullable().optional(),
+    lookupOptions: lookupOptionsRoSchema.optional().meta({
+      description:
+        'The lookup options for field, you need to configure it when isLookup attribute is true or field type is rollup.',
+    }),
+    options: unionFieldOptionsRoSchema.optional().meta({
+      description:
+        "The options of the field. The configuration of the field's options depend on the it's specific type.",
+    }),
+    aiConfig: fieldAIConfigSchema.nullable().optional().meta({
+      description: 'The AI configuration of the field.',
+    }),
+  });
 
-export const convertFieldRoSchema = baseFieldRoSchema.superRefine(refineOptions);
-export const createFieldRoSchema = baseFieldRoSchema
-  .merge(
-    z.object({
-      id: z.string().startsWith(IdPrefix.Field).optional().openapi({
-        description:
-          'The id of the field that start with "fld", followed by exactly 16 alphanumeric characters `/^fld[\\da-zA-Z]{16}$/`. It is sometimes useful to specify an id at creation time',
-        example: 'fldxxxxxxxxxxxxxxxx',
-      }),
-    })
-  )
+export const convertFieldRoSchema = baseFieldRoSchema
+  .extend({
+    options: baseFieldRoSchema.shape.options.nullable().optional(),
+  })
+  .superRefine(refineOptions);
+const createFieldRoInputSchema = baseFieldRoSchema
+  .extend({
+    id: z.string().startsWith(IdPrefix.Field).optional().meta({
+      description:
+        'The id of the field that start with "fld", followed by exactly 16 alphanumeric characters `/^fld[\\da-zA-Z]{16}$/`. It is sometimes useful to specify an id at creation time',
+      example: 'fldxxxxxxxxxxxxxxxx',
+    }),
+    viewId: z.string().startsWith(IdPrefix.View).optional().meta({
+      description:
+        'The id of the current view where the field is being created. Used to prevent auto-hiding the new field in this view.',
+    }),
+    order: z
+      .object({
+        viewId: z.string().meta({
+          description: 'You can only specify order in one view when create field',
+        }),
+        orderIndex: z.number(),
+      })
+      .optional(),
+  })
   .superRefine(refineOptions);
 
-export const updateFieldRoSchema = z.object({
-  name: baseFieldRoSchema.shape.name,
-  description: baseFieldRoSchema.shape.description,
-  dbFieldName: baseFieldRoSchema.shape.dbFieldName,
-});
+export const createFieldRoSchema = z.preprocess((input) => {
+  if (
+    !input ||
+    typeof input !== 'object' ||
+    !('type' in input) ||
+    input.type !== FieldType.ConditionalRollup ||
+    !('options' in input) ||
+    !input.options ||
+    typeof input.options !== 'object' ||
+    Array.isArray(input.options)
+  ) {
+    return input;
+  }
+  if ('expression' in input.options && input.options.expression !== undefined) {
+    return input;
+  }
+  return { ...input, options: { ...input.options, expression: 'countall({values})' } };
+}, createFieldRoInputSchema);
+
+/**
+ * Every option key any field type can carry, all optional: a PATCH may send any subset
+ * of the current field's own options. Which subset is valid is decided against the
+ * current field type in the v2 update service, so an option that field cannot carry is
+ * rejected instead of being silently dropped. Unknown keys are rejected here.
+ */
+const buildPatchableFieldOptionsShape = (): Record<string, z.ZodTypeAny> => {
+  const shape: Record<string, z.ZodTypeAny> = {};
+  for (const type of Object.values(FieldType)) {
+    const schema = getOptionsSchema(type);
+    if (!(schema instanceof z.ZodObject)) {
+      continue;
+    }
+    for (const [key, value] of Object.entries(schema.shape as Record<string, z.ZodTypeAny>)) {
+      const existing = shape[key];
+      const next = value.optional();
+      shape[key] = existing ? z.union([existing, next]) : next;
+    }
+  }
+  return shape;
+};
+
+export const updateFieldOptionsRoSchema = z
+  .object({
+    ...buildPatchableFieldOptionsShape(),
+    trackedFieldIds: lastModifiedTimeFieldOptionsRoSchema.shape.trackedFieldIds,
+  })
+  .strict();
+
+export const updateFieldRoSchema = z
+  .object({
+    name: baseFieldRoSchema.shape.name,
+    description: baseFieldRoSchema.shape.description,
+    dbFieldName: baseFieldRoSchema.shape.dbFieldName,
+    unique: baseFieldRoSchema.shape.unique,
+    notNull: baseFieldRoSchema.shape.notNull,
+    lookupOptions: lookupOptionsPatchSchema.optional(),
+    options: updateFieldOptionsRoSchema.optional(),
+  })
+  .strict();
 
 export type IFieldRo = z.infer<typeof createFieldRoSchema>;
 
@@ -381,10 +461,14 @@ export type IConvertFieldRo = z.infer<typeof convertFieldRoSchema>;
 export type IUpdateFieldRo = z.infer<typeof updateFieldRoSchema>;
 
 export const getFieldsQuerySchema = z.object({
-  viewId: z.string().startsWith(IdPrefix.View).optional().openapi({
+  viewId: z.string().startsWith(IdPrefix.View).optional().meta({
     description: 'The id of the view.',
   }),
   filterHidden: z.coerce.boolean().optional(),
+  projection: z.array(z.string().startsWith(IdPrefix.Field)).optional().meta({
+    description:
+      'If you want to get only some fields, pass in this parameter, otherwise all visible fields will be obtained',
+  }),
 });
 
 export type IGetFieldsQuery = z.infer<typeof getFieldsQuerySchema>;

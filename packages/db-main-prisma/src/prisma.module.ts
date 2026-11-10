@@ -3,19 +3,65 @@
 import type { Provider } from '@nestjs/common';
 import { Global, Module } from '@nestjs/common';
 import { ClsService } from 'nestjs-cls';
-import { PrismaService } from './prisma.service';
+import { getDatabaseUrl } from './database-url';
+import {
+  defaultPgPoolFactory,
+  PG_POOL_FACTORY,
+  PG_POOL_OBSERVER,
+  pgPoolObserverFacade,
+  PgPoolRegistry,
+} from './pg-pool-registry';
+import { DataPrismaService, MetaPrismaService, PrismaService } from './prisma.service';
 
-export const PrismaProvider: Provider = {
-  provide: PrismaService,
-  useFactory: async (cls: ClsService<any>) => {
-    return new PrismaService(cls);
+const getSchema = (databaseUrl: string): string | undefined =>
+  new URL(databaseUrl).searchParams.get('schema') ?? undefined;
+
+export const MetaPrismaProvider: Provider = {
+  provide: MetaPrismaService,
+  useFactory: async (cls: ClsService<any>, registry: PgPoolRegistry) => {
+    const databaseUrl = getDatabaseUrl('meta');
+    return new MetaPrismaService(cls, registry.acquire(databaseUrl), getSchema(databaseUrl));
   },
-  inject: [ClsService],
+  inject: [ClsService, PgPoolRegistry],
 };
 
 @Global()
 @Module({
-  providers: [PrismaProvider],
-  exports: [PrismaProvider],
+  providers: [
+    {
+      provide: PG_POOL_FACTORY,
+      useValue: defaultPgPoolFactory,
+    },
+    // Default no-op observer. The application installs its real observer through
+    // `installPgPoolObserver` (see pg-pool-registry.ts): this module owns
+    // `PgPoolRegistry`, so re-providing the token from the app would not reach it.
+    {
+      provide: PG_POOL_OBSERVER,
+      useValue: pgPoolObserverFacade,
+    },
+    PgPoolRegistry,
+    MetaPrismaProvider,
+    {
+      provide: PrismaService,
+      useExisting: MetaPrismaService,
+    },
+  ],
+  exports: [MetaPrismaProvider, PrismaService, PgPoolRegistry],
 })
 export class PrismaModule {}
+
+export const DataPrismaProvider: Provider = {
+  provide: DataPrismaService,
+  useFactory: async (cls: ClsService<any>, registry: PgPoolRegistry) => {
+    const databaseUrl = getDatabaseUrl('data');
+    return new DataPrismaService(cls, registry.acquire(databaseUrl), getSchema(databaseUrl));
+  },
+  inject: [ClsService, PgPoolRegistry],
+};
+
+@Global()
+@Module({
+  providers: [DataPrismaProvider],
+  exports: [DataPrismaProvider],
+})
+export class DataPrismaModule {}

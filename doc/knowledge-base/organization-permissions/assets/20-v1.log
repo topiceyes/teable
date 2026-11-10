@@ -1,0 +1,92 @@
+PASS administrator connection list never returns appSecret
+PASS ordinary account cannot access DingTalk administration: /admin/organization/dingtalk/connections
+PASS ordinary account cannot access DingTalk administration: /admin/organization/dingtalk/saveConnection
+PASS ordinary account cannot access DingTalk administration: /admin/organization/dingtalk/testConnection
+PASS create isolated acceptance space
+PASS create isolated acceptance base
+PASS create acceptance table
+PASS viewer cannot create without matrix
+PASS save matrix through administrator API
+PASS record write executes requested v1 engine
+PASS matrix writer can create record through HTTP
+PASS matrix writer can update record
+PASS matrix writer can paste and extend rows
+PASS record grants do not grant field structure permissions
+PASS create separate link target table
+PASS create source link field
+PASS source table grant does not grant target table creation
+PASS cross-table title write has no unauthorized target insert (HTTP 200)
+PASS role revocation denies next write
+PASS inactive employee loses derived delete permission
+PASS unbound employee loses derived create permission
+PASS real WebSocket subscribes to an authorized record
+PASS revoked live socket closes before receiving another record operation
+PASS matrix cannot create base membership
+PASS revoking derived role preserves manual editor permission
+PASS manual editor can delete record
+PASS administrator preview explains effective collaborator grant
+PASS ordinary user cannot impersonate another account in permission preview
+PASS create another owner record for scope isolation
+PASS save field and own-record restrictions
+PASS restricted editor can create a row without protected fields
+PASS own-row filter applies even when caller ignores view query
+PASS hidden cells omitted from list response
+PASS row count uses the same authorized row scope
+PASS direct id lookup cannot read another creator record
+PASS direct id update cannot change another creator record
+PASS read-only field cannot be written by id
+PASS hidden field cannot be written by name
+PASS hidden field metadata cannot be read directly
+PASS hidden field omitted from field list
+PASS hidden-field predicate cannot be used as a side channel
+PASS socket snapshot recovery cannot bypass row scope
+PASS unsupported positional write fails closed on restricted tables
+PASS mixed-owner bulk delete rejected atomically
+PASS denied bulk delete leaves the permitted record untouched
+PASS direct id delete cannot remove another creator record
+PASS mixed-owner batch update rejected before any write
+PASS denied batch update leaves own row unchanged
+PASS mixed-owner bulk snapshots reject the complete request
+PASS read-only fields reject writes by name
+PASS query side channel denied: orderBy
+PASS query side channel denied: groupBy
+PASS query side channel denied: search[]
+PASS administrator sets a hidden value on an authorized test row
+PASS create a second permitted row for query verification
+PASS visible ascending sort works within own rows
+PASS visible descending sort reverses the authorized row order
+PASS visible grouping counts only authorized rows
+PASS record index follows visible sorting
+PASS record index rejects a foreign creator id
+PASS all-field record search respects hidden cells and rows: my-row
+PASS searched row count stays in scope: my-row
+PASS search count stays in scope without a projection contract: my-row
+PASS matching cell count stays in scope: my-row
+PASS search indexes contain only visible authorized cells: my-row
+PASS search match scan contains only visible authorized cells: my-row
+PASS grouping with search keeps the same field and row scope: my-row
+PASS all-field record search respects hidden cells and rows: private-own-value
+PASS searched row count stays in scope: private-own-value
+PASS search count stays in scope without a projection contract: private-own-value
+PASS matching cell count stays in scope: private-own-value
+PASS search indexes contain only visible authorized cells: private-own-value
+PASS search match scan contains only visible authorized cells: private-own-value
+PASS grouping with search keeps the same field and row scope: private-own-value
+PASS all-field record search respects hidden cells and rows: private-admin-value
+PASS searched row count stays in scope: private-admin-value
+PASS search count stays in scope without a projection contract: private-admin-value
+PASS matching cell count stays in scope: private-admin-value
+PASS search indexes contain only visible authorized cells: private-admin-value
+PASS search match scan contains only visible authorized cells: private-admin-value
+PASS grouping with search keeps the same field and row scope: private-admin-value
+PASS remove the extra query fixture before the remaining regressions
+PASS restricted source cannot be copied via /base/duplicate
+PASS restricted source cannot be copied via /base/duplicate-stream
+PASS restricted table cannot be exported
+PASS create department peer record under own scope
+PASS save direct-department row restriction
+PASS department scope includes active bound peers but excludes outsiders
+PASS departed peer creator loses department visibility immediately
+PASS unbound caller receives no department rows
+PASS permission preview explains field and row restrictions
+{"passed":91,"database":"teable_dev_20261109","mode":"v1","success":true,"realEmployeesModified":false}

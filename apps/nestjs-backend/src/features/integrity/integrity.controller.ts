@@ -1,0 +1,47 @@
+import { Controller, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
+import type { IIntegrityCheckVo, IIntegrityIssue } from '@teable/openapi';
+import { countBy } from 'lodash';
+import { AuditScope } from '../audit/audit-scope';
+import { Permissions } from '../auth/decorators/permissions.decorator';
+import { PermissionGuard } from '../auth/guard/permission.guard';
+import { LinkIntegrityService } from './link-integrity.service';
+
+@UseGuards(PermissionGuard)
+@Controller('api/integrity')
+export class IntegrityController {
+  constructor(
+    private readonly linkIntegrityService: LinkIntegrityService,
+    private readonly audit: AuditScope
+  ) {}
+
+  @Permissions('base|update')
+  @Get('base/:baseId/link-check')
+  async checkBaseIntegrity(
+    @Param('baseId') baseId: string,
+    @Query('tableId') tableId: string
+  ): Promise<IIntegrityCheckVo> {
+    return await this.linkIntegrityService.linkIntegrityCheck(baseId, tableId);
+  }
+
+  @Permissions('base|update')
+  @Post('base/:baseId/link-fix')
+  async fixBaseIntegrity(
+    @Param('baseId') baseId: string,
+    @Query('tableId') tableId: string
+  ): Promise<IIntegrityIssue[]> {
+    const fixed = await this.linkIntegrityService.linkIntegrityFix(baseId, tableId);
+    // The fix rewrites link fields and their stored relations outside the field/record event path.
+    await this.audit.emitAtomic({
+      action: 'base.integrity.repair',
+      resourceId: baseId,
+      params: {
+        baseId,
+        ...(tableId ? { tableId } : {}),
+        mode: 'link-fix',
+        fixedCount: fixed.length,
+        fixedByType: countBy(fixed, (issue) => issue.type),
+      },
+    });
+    return fixed;
+  }
+}

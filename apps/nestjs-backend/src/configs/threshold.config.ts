@@ -1,9 +1,20 @@
+/* eslint-disable sonarjs/cognitive-complexity */
 /* eslint-disable @typescript-eslint/naming-convention */
 import { Inject } from '@nestjs/common';
 import type { ConfigType } from '@nestjs/config';
 import { registerAs } from '@nestjs/config';
+import { DEFAULT_TABLE_DATA_SAFETY_LIMITS } from '@teable/v2-core';
+
+const positiveIntegerOrDefault = (value: string | undefined, fallback: number): number => {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+};
 
 export const thresholdConfig = registerAs('threshold', () => ({
+  maxSelectChoiceNameLength: positiveIntegerOrDefault(
+    process.env.TABLE_LIMIT_SELECT_CHOICE_NAME_MAX_LENGTH,
+    DEFAULT_TABLE_DATA_SAFETY_LIMITS.fieldOptions.maxSelectChoiceNameLength
+  ),
   maxCopyCells: Number(process.env.MAX_COPY_CELLS ?? 50_000),
   maxResetCells: Number(process.env.MAX_RESET_CELLS ?? 50_000),
   maxPasteCells: Number(process.env.MAX_PASTE_CELLS ?? 50_000),
@@ -14,9 +25,80 @@ export const thresholdConfig = registerAs('threshold', () => ({
   calcChunkSize: Number(process.env.CALC_CHUNK_SIZE ?? 1_000),
   maxFreeRowLimit: Number(process.env.MAX_FREE_ROW_LIMIT ?? 0),
   estimateCalcCelPerMs: Number(process.env.ESTIMATE_CALC_CEL_PER_MS ?? 3),
+  maxUndoStackSize: Number(process.env.MAX_UNDO_STACK_SIZE ?? 200),
+  undoExpirationTime: Number(process.env.UNDO_EXPIRATION_TIME ?? 86400),
   bigTransactionTimeout: Number(
     process.env.BIG_TRANSACTION_TIMEOUT ?? 10 * 60 * 1000 /* 10 mins */
   ),
+  // DB statement_timeout (ms) for the search query, so a slow / full-scan search is canceled
+  // and its connection released instead of being held for minutes. Tune via SEARCH_TIMEOUT.
+  searchTimeout: Number(process.env.SEARCH_TIMEOUT ?? 15_000 /* 15s */),
+  automationGap: Number(process.env.AUTOMATION_GAP ?? 200),
+  maxAttachmentUploadSize: Number(process.env.MAX_ATTACHMENT_UPLOAD_SIZE ?? Infinity),
+  maxOpenapiAttachmentUploadSize: Number(
+    process.env.MAX_OPENAPI_ATTACHMENT_UPLOAD_SIZE ?? Infinity
+  ),
+  webhook: {
+    bodyLimitBytes: Number(process.env.WEBHOOK_BODY_LIMIT_BYTES ?? 4 * 1024 * 1024),
+    baseRateLimit: Number(process.env.WEBHOOK_BASE_RATE_LIMIT ?? 50),
+    workflowRateLimit: Number(process.env.WEBHOOK_WORKFLOW_RATE_LIMIT ?? 2),
+  },
+  dbDeadlock: {
+    maxRetries: Number(process.env.BACKEND_DB_DEADLOCK_MAX_RETRIES ?? 3),
+    initialBackoff: Number(process.env.BACKEND_DB_DEADLOCK_INITIAL_BACKOFF ?? 100),
+    jitter: Number(process.env.BACKEND_DB_DEADLOCK_JITTER ?? 1.0),
+  },
+  baseNodeMaxFolderDepth: Number(process.env.BASE_NODE_MAX_FOLDER_DEPTH ?? 2),
+  maxFreeOwnedSpaceCount: Number(process.env.MAX_FREE_SPACE_OWNER_COUNT ?? 2),
+  rewardClaimMinIntervalSeconds: Number(process.env.REWARD_CLAIM_MIN_INTERVAL_SECONDS ?? 5),
+  changeEmailSendCodeMailRate: Number(process.env.BACKEND_CHANGE_EMAIL_SEND_CODE_MAIL_RATE ?? 30),
+  resetPasswordSendMailRate: Number(process.env.BACKEND_RESET_PASSWORD_SEND_MAIL_RATE ?? 30),
+  signupVerificationSendCodeMailRate: Number(
+    process.env.BACKEND_SIGNUP_VERIFICATION_CODE_RATE_LIMIT_SECONDS ??
+      process.env.BACKEND_SIGNUP_VERIFICATION_SEND_CODE_MAIL_RATE ??
+      30
+  ),
+  billing: {
+    automationRunGracePeriod: process.env.BILLING_AUTOMATION_RUN_GRACE_PERIOD ?? '3d',
+    automationRunNotifyInterval: process.env.BILLING_AUTOMATION_RUN_NOTIFY_INTERVAL ?? '6h',
+    anomaly: {
+      dailyVelocityMultiplier: Number(process.env.BILLING_ANOMALY_DAILY_VELOCITY_MULTIPLIER ?? 3),
+      burstMultiplier: Number(process.env.BILLING_ANOMALY_BURST_MULTIPLIER ?? 5),
+      minAbsoluteCreditAmount: Number(
+        process.env.BILLING_ANOMALY_MIN_ABSOLUTE_CREDIT_AMOUNT ?? 500
+      ),
+      minAbsoluteAutomationRuns: Number(
+        process.env.BILLING_ANOMALY_MIN_ABSOLUTE_AUTOMATION_RUNS ?? 1000
+      ),
+      notifyCooldownHours: Number(process.env.BILLING_ANOMALY_NOTIFY_COOLDOWN_HOURS ?? 24),
+    },
+  },
+  automation: {
+    // floors the `minutes` timing variant only; above its max of 60 no minutes schedule is
+    // configurable at all, which is how minute-level scheduling gets disabled outright
+    minScheduledMinutesInterval: Number(
+      process.env.AUTOMATION_MIN_SCHEDULED_MINUTES_INTERVAL ?? 10
+    ),
+    minEmailPollIntervalMinutes: Number(
+      process.env.AUTOMATION_MIN_EMAIL_POLL_INTERVAL_MINUTES ?? 10
+    ),
+    maxEmailsPerPoll: Number(process.env.AUTOMATION_MAX_EMAILS_PER_POLL ?? 100),
+    maxEmailDedupWindowSize: Number(process.env.AUTOMATION_MAX_EMAIL_DEDUP_WINDOW_SIZE ?? 500),
+    httpRequestTimeout: Number(process.env.AUTOMATION_HTTP_REQUEST_TIMEOUT ?? 300_000), // 5 mins
+    watchdogDisabled: process.env.AUTOMATION_WATCHDOG_DISABLED === 'true',
+  },
+  routine: {
+    watchdogDisabled: process.env.ROUTINE_WATCHDOG_DISABLED === 'true',
+  },
+  // per-space scheduling limits: each value is both the default and the ceiling
+  // for space-configured overrides, clamped to the resource's worker pool
+  spaceScheduling: {
+    aiFieldGenerationDefaultLimit: Number(
+      process.env.SPACE_AI_FIELD_GENERATION_DEFAULT_LIMIT ?? 10
+    ),
+    workflowRunDefaultLimit: Number(process.env.SPACE_WORKFLOW_RUN_DEFAULT_LIMIT ?? 10),
+    routineRunDefaultLimit: Number(process.env.SPACE_ROUTINE_RUN_DEFAULT_LIMIT ?? 10),
+  },
 }));
 
 export const ThresholdConfig = () => Inject(thresholdConfig.KEY);

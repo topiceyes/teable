@@ -2,6 +2,7 @@
 /* eslint-disable @typescript-eslint/naming-convention */
 import type { TestingModule } from '@nestjs/testing';
 import { Test } from '@nestjs/testing';
+import { knex as createKnex } from 'knex';
 import { GlobalModule } from '../../global/global.module';
 import { CalculationModule } from './calculation.module';
 import { LinkService } from './link.service';
@@ -19,6 +20,38 @@ describe('LinkService', () => {
 
   it('should be defined', () => {
     expect(service).toBeDefined();
+  });
+
+  it('reads link junction rows from the data database', async () => {
+    const metaQueryRawUnsafe = vi.fn();
+    const queryDataPrismaForTable = vi.fn().mockResolvedValue([]);
+    const knex = createKnex({ client: 'pg' });
+    const service = new LinkService(
+      {
+        txClient: () => ({ $queryRawUnsafe: metaQueryRawUnsafe }),
+      } as never,
+      {
+        queryDataPrismaForTable,
+      } as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      knex as never
+    );
+
+    await service.getAllForeignKeys({
+      fkHostTableName: 'bseTest.link_junction',
+      selfKeyName: 'self_id',
+      foreignKeyName: 'foreign_id',
+      foreignTableId: 'tblForeign',
+    } as never);
+
+    expect(queryDataPrismaForTable).toHaveBeenCalledTimes(1);
+    expect(queryDataPrismaForTable).toHaveBeenCalledWith('tblForeign', expect.any(String), {
+      useTransaction: true,
+    });
+    expect(metaQueryRawUnsafe).not.toHaveBeenCalled();
+    await knex.destroy();
   });
 
   // describe('getCellMutation', () => {

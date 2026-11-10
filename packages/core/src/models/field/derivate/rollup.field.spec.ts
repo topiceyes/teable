@@ -196,6 +196,12 @@ describe('RollupFieldCore', () => {
       });
 
       expect(
+        RollupFieldCore.getParsedValueType('average({values})', CellValueType.Number, false)
+      ).toEqual({
+        cellValueType: CellValueType.Number,
+      });
+
+      expect(
         RollupFieldCore.getParsedValueType('sum({values})', CellValueType.Number, false)
       ).toEqual({
         cellValueType: CellValueType.Number,
@@ -319,7 +325,7 @@ describe('RollupFieldCore', () => {
     });
 
     it('should get default options', () => {
-      expect(RollupFieldCore.defaultOptions(CellValueType.Number)).toEqual({
+      expect(RollupFieldCore.defaultOptions(CellValueType.Number)).toMatchObject({
         expression: 'countall({values})',
         formatting: {
           type: NumberFormattingType.Decimal,

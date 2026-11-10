@@ -1,6 +1,5 @@
-import { extendZodWithOpenApi } from '@asteasolutions/zod-to-openapi';
 import * as Sentry from '@sentry/nextjs';
-import { HttpError, parseDsn } from '@teable/core';
+import type { IHttpError } from '@teable/core';
 import type { IUser } from '@teable/sdk';
 import dayjs from 'dayjs';
 import timezone from 'dayjs/plugin/timezone';
@@ -10,22 +9,27 @@ import App from 'next/app';
 import Head from 'next/head';
 import { appWithTranslation } from 'next-i18next';
 import { useEffect } from 'react';
-import { z } from 'zod';
-import { getUserMe } from '@/backend/api/rest/get-user';
+import { CookieConsentBanner } from '@/components/CookieConsentBanner';
 import { Guide } from '@/components/Guide';
-import { MicrosoftClarity } from '@/components/Metrics';
+import { GoogleAnalytics, MetaPixel, PostHog, Umami } from '@/components/Metrics';
+import { OverlayScrollbar } from '@/components/OverlayScrollbar';
 import RouterProgressBar from '@/components/RouterProgress';
+import { SideBarScript } from '@/features/app/components/sidebar/SideBarScript';
+import { useMobileServiceWorker } from '@/features/app/hooks/useMobileServiceWorker';
+import { HttpErrorPage } from '@/features/system/pages';
 import type { IServerEnv } from '@/lib/server-env';
 import type { NextPageWithLayout } from '@/lib/type';
 import { colors } from '@/themes/colors';
-import { INITIAL_THEME } from '@/themes/initial';
 import { getColorsCssVariablesText } from '@/themes/utils';
 import nextI18nextConfig from '../../next-i18next.config.js';
 import { AppProviders } from '../AppProviders';
+import '@glideapps/glide-data-grid/dist/index.css';
+import 'react-grid-layout/css/styles.css';
+import 'react-resizable/css/styles.css';
+import 'reactflow/dist/style.css';
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
-extendZodWithOpenApi(z);
 
 /**
  * Import global styles, global css or polyfills here
@@ -33,32 +37,38 @@ extendZodWithOpenApi(z);
  */
 import '../styles/global.css';
 
-import '@fontsource-variable/inter';
+import '@fontsource-variable/inter/index.css';
 
 // Workaround for https://github.com/zeit/next.js/issues/8592
-export type AppProps = NextAppProps & {
+export type AppProps<T> = NextAppProps<T> & {
   /** Will be defined only is there was an error */
   err?: Error;
 };
 
-type AppPropsWithLayout = AppProps & {
-  Component: NextPageWithLayout;
+type AppPropsWithLayout = AppProps<{
   user?: IUser;
-  driver: string;
-  env: IServerEnv;
+  env?: IServerEnv;
+  err?: Error;
+  httpError?: IHttpError;
+}> & {
+  Component: NextPageWithLayout;
 };
 
 /**
  * @link https://nextjs.org/docs/advanced-features/custom-app
  */
 const MyApp = (appProps: AppPropsWithLayout) => {
-  const { Component, pageProps, err, user, driver, env } = appProps;
+  const { Component, err: nextJsError, pageProps } = appProps;
+  const { user, env = {}, err: pageError, httpError } = pageProps;
+  const appBuildVersion = env.buildVersion ?? process.env.APP_VERSION ?? 'develop';
   // Use the layout defined at the page level, if available
   const getLayout = Component.getLayout ?? ((page) => page);
-
   useEffect(() => {
     Sentry.setUser(user ? { id: user.id, email: user.email } : null);
   }, [user]);
+
+  // Mobile app-shell service worker: only inside the native app's WebView.
+  useMobileServiceWorker();
 
   return (
     <>
@@ -70,22 +80,38 @@ const MyApp = (appProps: AppPropsWithLayout) => {
           />
           <style>{getColorsCssVariablesText(colors)}</style>
         </Head>
-        <MicrosoftClarity clarityId={env?.microsoftClarityId} />
-        <script dangerouslySetInnerHTML={{ __html: INITIAL_THEME }} />
+        <CookieConsentBanner enabled={Boolean(env.posthogKey || env.gaId || env.metaPixelId)} />
+        <Umami umamiWebSiteId={env.umamiWebSiteId} umamiUrl={env.umamiUrl} user={user} />
+        <GoogleAnalytics gaId={env.gaId} user={user} />
+        <PostHog
+          posthogKey={env.posthogKey}
+          posthogHost={env.posthogHost}
+          posthogWebHost={env.posthogWebHost}
+          posthogUiHost={env.posthogUiHost}
+          user={user}
+        />
+        <MetaPixel metaPixelId={env.metaPixelId} />
+        <SideBarScript />
         <script
           dangerouslySetInnerHTML={{
             __html: `
-              window.clarity && window.clarity("identify", "${user?.email || user?.id}");
-              window.version="${process.env.NEXT_PUBLIC_BUILD_VERSION ?? 'develop'}";
+              window.version=${JSON.stringify(appBuildVersion)};
               window.__TE__=${JSON.stringify(env)};
             `,
           }}
         />
         {/* Workaround for https://github.com/vercel/next.js/issues/8592 */}
-        {getLayout(<Component {...pageProps} err={err} />, { ...pageProps, user, driver })}
+        {httpError && [402, 403].includes(httpError.status) ? (
+          <HttpErrorPage httpError={httpError} />
+        ) : (
+          getLayout(<Component {...pageProps} err={nextJsError || pageError} />, {
+            ...pageProps,
+          })
+        )}
       </AppProviders>
-      <Guide user={user} />
+      {user && <Guide user={user} />}
       <RouterProgressBar />
+      <OverlayScrollbar />
     </>
   );
 };
@@ -98,57 +124,7 @@ const MyApp = (appProps: AppPropsWithLayout) => {
 MyApp.getInitialProps = async (appContext: AppContext) => {
   // calls page's `getInitialProps` and fills `appProps.pageProps`
   const appProps = await App.getInitialProps(appContext);
-  const res = appContext.ctx.res;
-  if (!res || !res?.writeHead) {
-    return appProps;
-  }
-
-  const isLoginPage = appContext.ctx.pathname === '/auth/login';
-  const needLoginPage = isAuthLoginPage(appContext.ctx.pathname);
-
-  const { driver } = parseDsn(process.env.PRISMA_DATABASE_URL as string);
-  const initialProps = {
-    ...appProps,
-    driver,
-    env: {
-      templateSiteLink: process.env.TEMPLATE_SITE_LINK,
-      microsoftClarityId: process.env.MICROSOFT_CLARITY_ID,
-      sentryDsn: process.env.SENTRY_DSN,
-      socialAuthProviders: process.env.SOCIAL_AUTH_PROVIDERS?.split(','),
-    },
-  };
-  if (!isLoginPage && !needLoginPage) {
-    return initialProps;
-  }
-
-  try {
-    const user = await getUserMe(appContext.ctx.req?.headers.cookie);
-    // Already logged in
-    if (user && isLoginPage) {
-      res.writeHead(302, {
-        Location: `/space`,
-      });
-      res.end();
-      return {};
-    }
-    return { ...initialProps, user };
-  } catch (error) {
-    if (error instanceof HttpError && !isLoginPage) {
-      const redirect = encodeURIComponent(appContext.ctx.req?.url || '');
-      const query = redirect ? `redirect=${redirect}` : '';
-      res.writeHead(302, {
-        Location: `/auth/login?${query}`,
-      });
-      res.end();
-      return {};
-    }
-    return { ...initialProps, err: error };
-  }
-};
-
-const isAuthLoginPage = (pathname: string) => {
-  const needLoginPage = ['/space', '/base', '/invite', '/setting'];
-  return needLoginPage.some((path) => pathname.startsWith(path));
+  return { ...appProps };
 };
 
 export default appWithTranslation(MyApp, {

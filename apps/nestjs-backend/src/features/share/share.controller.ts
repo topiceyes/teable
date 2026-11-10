@@ -1,57 +1,109 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import {
+  Body,
   Controller,
+  Get,
   HttpCode,
+  Inject,
+  Param,
   Post,
+  Query,
+  Request,
   Res,
   UseGuards,
-  Request,
-  Get,
-  Param,
-  Body,
-  Query,
+  UseInterceptors,
 } from '@nestjs/common';
-import type { IRecord, IAggregationVo, IRowCountVo, IGroupPointsVo } from '@teable/core';
+import { IGetFieldsQuery, getFieldsQuerySchema } from '@teable/core';
 import {
   ShareViewFormSubmitRo,
   shareViewFormSubmitRoSchema,
   shareViewRowCountRoSchema,
   shareViewAggregationsRoSchema,
-  shareViewLinkRecordsRoSchema,
   shareViewGroupPointsRoSchema,
-  IShareViewLinkRecordsRo,
+  shareViewRecordsRoSchema,
   IShareViewRowCountRo,
   IShareViewGroupPointsRo,
   IShareViewAggregationsRo,
-  rangesQuerySchema,
-  IRangesRo,
+  IShareViewRecordsRo,
+  shareViewCopyQuerySchema,
+  IShareViewCopyQuery,
+  shareViewLinkRecordsRoSchema,
+  IShareViewLinkRecordsRo,
+  shareViewCollaboratorsRoSchema,
+  IShareViewCollaboratorsRo,
+  shareViewCalendarDailyCollectionRoSchema,
+  IShareViewCalendarDailyCollectionRo,
+  shareViewSearchCountRoSchema,
+  IShareViewSearchCountRo,
+  IShareViewSearchIndexRo,
+  shareViewSearchIndexRoSchema,
+  IShareViewSearchCellCountRo,
+  shareViewSearchCellCountRoSchema,
+  IShareViewSearchMatchesRo,
+  shareViewSearchMatchesRoSchema,
 } from '@teable/openapi';
-import type { ICopyVo, IShareViewLinkRecordsVo, ShareViewGetVo } from '@teable/openapi';
+import type {
+  IRecord,
+  IAggregationVo,
+  IRowCountVo,
+  IGroupPointsVo,
+  ICopyVo,
+  ShareViewGetVo,
+  IShareViewLinkRecordsVo,
+  IShareViewCollaboratorsVo,
+  ICalendarDailyCollectionVo,
+  ISearchCountVo,
+  ISearchIndexVo,
+  ISearchCellCountVo,
+  ISearchMatchesVo,
+  IButtonClickVo,
+  IRecordsVo,
+} from '@teable/openapi';
 import { Response } from 'express';
+import { ClsService } from 'nestjs-cls';
+import type { IClsStore } from '../../types/cls';
 import { ZodValidationPipe } from '../../zod.validation.pipe';
+import { AuditScope } from '../audit/audit-scope';
+import { AllowAnonymous } from '../auth/decorators/allow-anonymous.decorator';
 import { Public } from '../auth/decorators/public.decorator';
+import { UseV2Feature } from '../canary/decorators/use-v2-feature.decorator';
+import { V2FeatureGuard } from '../canary/guards/v2-feature.guard';
+import { V2IndicatorInterceptor } from '../canary/interceptors/v2-indicator.interceptor';
 import { TqlPipe } from '../record/open-api/tql.pipe';
-import { AuthGuard } from './guard/auth.guard';
+import { SpaceDataDbMigrationGuardService } from '../space/space-data-db-migration-guard.service';
+import { InteractiveQueryCancellation } from '../v2/interactive-query-cancellation.interceptor';
+import { ShareAuthGuard } from './guard/auth.guard';
+import { ShareLinkView } from './guard/link-view.decorator';
 import { ShareAuthLocalGuard } from './guard/share-auth-local.guard';
+import { ShareSubmit } from './guard/submit.decorator';
+import type { IShareViewInfo } from './share-auth.service';
 import { ShareAuthService } from './share-auth.service';
-import type { IShareViewInfo } from './share.service';
+import { ShareSocketService } from './share-socket.service';
 import { ShareService } from './share.service';
 
 @Controller('api/share')
 @Public()
 export class ShareController {
+  // Property-injected: the controller is hand-built in specs.
+  @Inject(AuditScope) protected readonly audit!: AuditScope;
+  @Inject(ClsService) protected readonly cls!: ClsService<IClsStore>;
+
   constructor(
     private readonly shareService: ShareService,
-    private readonly shareAuthService: ShareAuthService
+    private readonly shareAuthService: ShareAuthService,
+    private readonly shareSocketService: ShareSocketService,
+    protected readonly spaceDataDbMigrationGuardService: SpaceDataDbMigrationGuardService
   ) {}
 
   @HttpCode(200)
-  @UseGuards(ShareAuthLocalGuard)
+  @UseV2Feature('getSharedView')
+  @UseGuards(V2FeatureGuard, ShareAuthLocalGuard)
+  @UseInterceptors(V2IndicatorInterceptor)
   @Post('/:shareId/view/auth')
   async auth(@Request() req: any, @Res({ passthrough: true }) res: Response) {
     const shareId = req.shareId;
     const password = req.password;
-    const token = await this.shareAuthService.authToken({ shareId, password });
+    const token = await this.shareAuthService.authToken(shareId, password);
     res.cookie(shareId, token, {
       httpOnly: true,
       maxAge: 1000 * 60 * 60 * 24 * 7,
@@ -59,13 +111,26 @@ export class ShareController {
     return { token };
   }
 
-  @UseGuards(AuthGuard)
+  @ShareLinkView()
+  @UseV2Feature('getSharedView')
+  @UseGuards(V2FeatureGuard, ShareAuthGuard)
+  @UseInterceptors(V2IndicatorInterceptor)
+  @AllowAnonymous()
   @Get('/:shareId/view')
-  async getShareView(@Param('shareId') shareId: string): Promise<ShareViewGetVo> {
-    return await this.shareService.getShareView(shareId);
+  async getShareView(@Request() req?: any): Promise<ShareViewGetVo> {
+    const shareInfo = req.shareInfo as IShareViewInfo;
+    if (req.useV2) {
+      return this.shareService.getShareViewV2(shareInfo);
+    }
+    return this.shareService.getShareView(shareInfo);
   }
 
-  @UseGuards(AuthGuard)
+  @InteractiveQueryCancellation()
+  @ShareLinkView()
+  @UseV2Feature('getSharedViewAggregations')
+  @UseGuards(V2FeatureGuard, ShareAuthGuard)
+  @UseInterceptors(V2IndicatorInterceptor)
+  @AllowAnonymous()
   @Get('/:shareId/view/aggregations')
   async getViewAggregations(
     @Request() req: any,
@@ -73,10 +138,18 @@ export class ShareController {
     query?: IShareViewAggregationsRo
   ): Promise<IAggregationVo> {
     const shareInfo = req.shareInfo as IShareViewInfo;
-    return await this.shareService.getViewAggregations(shareInfo, query);
+    if (req.useV2) {
+      return this.shareService.getViewAggregationsV2(shareInfo, query);
+    }
+    return this.shareService.getViewAggregations(shareInfo, query);
   }
 
-  @UseGuards(AuthGuard)
+  @InteractiveQueryCancellation()
+  @ShareLinkView()
+  @UseV2Feature('getSharedViewRowCount')
+  @UseGuards(V2FeatureGuard, ShareAuthGuard)
+  @UseInterceptors(V2IndicatorInterceptor)
+  @AllowAnonymous()
   @Get('/:shareId/view/row-count')
   async getViewRowCount(
     @Request() req: any,
@@ -84,10 +157,35 @@ export class ShareController {
     query?: IShareViewRowCountRo
   ): Promise<IRowCountVo> {
     const shareInfo = req.shareInfo as IShareViewInfo;
-    return await this.shareService.getViewRowCount(shareInfo, query);
+    if (req.useV2) {
+      return this.shareService.getViewRowCountV2(shareInfo, query);
+    }
+    return this.shareService.getViewRowCount(shareInfo, query);
   }
 
-  @UseGuards(AuthGuard)
+  @InteractiveQueryCancellation()
+  @ShareLinkView()
+  @UseV2Feature('getSharedViewRecords')
+  @UseGuards(V2FeatureGuard, ShareAuthGuard)
+  @UseInterceptors(V2IndicatorInterceptor)
+  @AllowAnonymous()
+  @Get('/:shareId/view/records')
+  async getViewRecords(
+    @Request() req: any,
+    @Query(new ZodValidationPipe(shareViewRecordsRoSchema), TqlPipe)
+    query?: IShareViewRecordsRo
+  ): Promise<IRecordsVo> {
+    const shareInfo = req.shareInfo as IShareViewInfo;
+    if (req.useV2) {
+      return this.shareService.getViewRecordsV2(shareInfo, query);
+    }
+    return this.shareService.getViewRecords(shareInfo, query);
+  }
+
+  @ShareSubmit()
+  @UseV2Feature('formSubmit')
+  @UseGuards(V2FeatureGuard, ShareAuthGuard)
+  @UseInterceptors(V2IndicatorInterceptor)
   @Post('/:shareId/view/form-submit')
   async submitRecord(
     @Request() req: any,
@@ -95,31 +193,43 @@ export class ShareController {
     shareViewFormSubmitRo: ShareViewFormSubmitRo
   ): Promise<IRecord> {
     const shareInfo = req.shareInfo as IShareViewInfo;
-    return await this.shareService.formSubmit(shareInfo, shareViewFormSubmitRo);
+    return this.shareService.formSubmit(shareInfo, shareViewFormSubmitRo);
   }
 
-  @UseGuards(AuthGuard)
+  @UseV2Feature('getSharedViewCopy')
+  @UseGuards(V2FeatureGuard, ShareAuthGuard)
+  @UseInterceptors(V2IndicatorInterceptor)
+  @AllowAnonymous()
   @Get('/:shareId/view/copy')
   async copy(
     @Request() req: any,
-    @Query(new ZodValidationPipe(rangesQuerySchema), TqlPipe) shareViewCopyRo: IRangesRo
+    @Query(new ZodValidationPipe(shareViewCopyQuerySchema), TqlPipe)
+    shareViewCopyRo: IShareViewCopyQuery
   ): Promise<ICopyVo> {
     const shareInfo = req.shareInfo as IShareViewInfo;
-    return this.shareService.copy(shareInfo, shareViewCopyRo);
+    const result = req.useV2
+      ? await this.shareService.copyV2(shareInfo, shareViewCopyRo)
+      : await this.shareService.copy(shareInfo, shareViewCopyRo);
+    // Bulk data leaves through a public link, often anonymously: one row per copy.
+    await this.audit.emitAtomic({
+      action: 'shared.view.copy',
+      resourceId: shareInfo.shareId,
+      userId: this.cls.get('user.id') ?? 'anonymous',
+      params: {
+        shareId: shareInfo.shareId,
+        tableId: shareInfo.tableId,
+        viewId: shareInfo.view?.id,
+      },
+    });
+    return result;
   }
 
-  @UseGuards(AuthGuard)
-  @Get('/:shareId/view/link-records')
-  async linkRecords(
-    @Request() req: any,
-    @Query(new ZodValidationPipe(shareViewLinkRecordsRoSchema), TqlPipe)
-    shareViewLinkRecordsRo: IShareViewLinkRecordsRo
-  ): Promise<IShareViewLinkRecordsVo> {
-    const shareInfo = req.shareInfo as IShareViewInfo;
-    return this.shareService.getLinkRecords(shareInfo, shareViewLinkRecordsRo);
-  }
-
-  @UseGuards(AuthGuard)
+  @InteractiveQueryCancellation()
+  @ShareLinkView()
+  @UseV2Feature('getSharedViewGroupPoints')
+  @UseGuards(V2FeatureGuard, ShareAuthGuard)
+  @UseInterceptors(V2IndicatorInterceptor)
+  @AllowAnonymous()
   @Get('/:shareId/view/group-points')
   async getViewGroupPoints(
     @Request() req: any,
@@ -127,6 +237,237 @@ export class ShareController {
     query?: IShareViewGroupPointsRo
   ): Promise<IGroupPointsVo> {
     const shareInfo = req.shareInfo as IShareViewInfo;
-    return await this.shareService.getViewGroupPoints(shareInfo, query);
+    if (req.useV2) {
+      return this.shareService.getViewGroupPointsV2(shareInfo, query);
+    }
+    return this.shareService.getViewGroupPoints(shareInfo, query);
+  }
+
+  @InteractiveQueryCancellation()
+  @ShareLinkView()
+  @UseV2Feature('getSharedViewCalendarDailyCollection')
+  @UseGuards(V2FeatureGuard, ShareAuthGuard)
+  @UseInterceptors(V2IndicatorInterceptor)
+  @AllowAnonymous()
+  @Get('/:shareId/view/calendar-daily-collection')
+  async getViewCalendarDailyCollection(
+    @Request() req: any,
+    @Query(new ZodValidationPipe(shareViewCalendarDailyCollectionRoSchema))
+    query: IShareViewCalendarDailyCollectionRo
+  ): Promise<ICalendarDailyCollectionVo> {
+    const shareInfo = req.shareInfo as IShareViewInfo;
+    if (req.useV2) {
+      return this.shareService.getViewCalendarDailyCollectionV2(shareInfo, query);
+    }
+    return this.shareService.getViewCalendarDailyCollection(shareInfo, query);
+  }
+
+  @UseV2Feature('getSharedViewLinkRecords')
+  @UseGuards(V2FeatureGuard, ShareAuthGuard)
+  @UseInterceptors(V2IndicatorInterceptor)
+  @AllowAnonymous()
+  @Get('/:shareId/view/link-records')
+  async viewLinkRecords(
+    @Request() req: any,
+    @Query(new ZodValidationPipe(shareViewLinkRecordsRoSchema))
+    shareViewLinkRecordsRo: IShareViewLinkRecordsRo
+  ): Promise<IShareViewLinkRecordsVo> {
+    const shareInfo = req.shareInfo as IShareViewInfo;
+    if (req.useV2) {
+      return this.shareService.getViewLinkRecordsV2(shareInfo, shareViewLinkRecordsRo);
+    }
+    return this.shareService.getViewLinkRecords(shareInfo, shareViewLinkRecordsRo);
+  }
+
+  @UseV2Feature('getSharedViewCollaborators')
+  @UseGuards(V2FeatureGuard, ShareAuthGuard)
+  @UseInterceptors(V2IndicatorInterceptor)
+  @Get('/:shareId/view/collaborators')
+  async getViewCollaborators(
+    @Request() req: any,
+    @Query(new ZodValidationPipe(shareViewCollaboratorsRoSchema)) query: IShareViewCollaboratorsRo
+  ): Promise<IShareViewCollaboratorsVo> {
+    const shareInfo = req.shareInfo as IShareViewInfo;
+    if (req.useV2) {
+      return this.shareService.getViewCollaboratorsV2(shareInfo, query);
+    }
+    return this.shareService.getViewCollaborators(shareInfo, query);
+  }
+
+  @InteractiveQueryCancellation()
+  @UseV2Feature('getSharedViewSearchCount')
+  @UseGuards(V2FeatureGuard, ShareAuthGuard)
+  @UseInterceptors(V2IndicatorInterceptor)
+  @Get('/:shareId/view/search-count')
+  async getSearchCount(
+    @Request() req: any,
+    @Query(new ZodValidationPipe(shareViewSearchCountRoSchema))
+    queryRo: IShareViewSearchCountRo
+  ): Promise<ISearchCountVo> {
+    const shareInfo = req.shareInfo as IShareViewInfo;
+    await this.spaceDataDbMigrationGuardService.assertTableRecordSearchReadable(
+      shareInfo.tableId,
+      queryRo
+    );
+    if (req.useV2) {
+      return this.shareService.getShareSearchCountV2(shareInfo, queryRo);
+    }
+    return this.shareService.getShareSearchCount(shareInfo, queryRo);
+  }
+
+  @InteractiveQueryCancellation()
+  @UseV2Feature('getSharedViewSearchCount', { always: true })
+  @UseGuards(V2FeatureGuard, ShareAuthGuard)
+  @UseInterceptors(V2IndicatorInterceptor)
+  @Get('/:shareId/view/search-cell-count')
+  async getSearchCellCount(
+    @Request() req: any,
+    @Query(new ZodValidationPipe(shareViewSearchCellCountRoSchema))
+    queryRo: IShareViewSearchCellCountRo
+  ): Promise<ISearchCellCountVo> {
+    const shareInfo = req.shareInfo as IShareViewInfo;
+    await this.spaceDataDbMigrationGuardService.assertTableRecordSearchReadable(
+      shareInfo.tableId,
+      queryRo
+    );
+    return this.shareService.getShareSearchCellCount(shareInfo, queryRo);
+  }
+
+  @InteractiveQueryCancellation()
+  @UseV2Feature('getSharedViewSearchIndex', { always: true })
+  @UseGuards(V2FeatureGuard, ShareAuthGuard)
+  @UseInterceptors(V2IndicatorInterceptor)
+  @Get('/:shareId/view/search-matches')
+  async getSearchMatches(
+    @Request() req: any,
+    @Query(new ZodValidationPipe(shareViewSearchMatchesRoSchema))
+    queryRo: IShareViewSearchMatchesRo
+  ): Promise<ISearchMatchesVo> {
+    const shareInfo = req.shareInfo as IShareViewInfo;
+    await this.spaceDataDbMigrationGuardService.assertTableRecordSearchReadable(
+      shareInfo.tableId,
+      queryRo
+    );
+    return this.shareService.getShareSearchMatches(shareInfo, queryRo);
+  }
+
+  @InteractiveQueryCancellation()
+  @UseV2Feature('getSharedViewSearchIndex')
+  @UseGuards(V2FeatureGuard, ShareAuthGuard)
+  @UseInterceptors(V2IndicatorInterceptor)
+  @Get('/:shareId/view/search-index')
+  async getSearchIndex(
+    @Request() req: any,
+    @Query(new ZodValidationPipe(shareViewSearchIndexRoSchema))
+    queryRo: IShareViewSearchIndexRo
+  ): Promise<ISearchIndexVo> {
+    const shareInfo = req.shareInfo as IShareViewInfo;
+    await this.spaceDataDbMigrationGuardService.assertTableRecordSearchReadable(
+      shareInfo.tableId,
+      queryRo
+    );
+    if (req.useV2) {
+      return this.shareService.getShareSearchIndexV2(shareInfo, queryRo);
+    }
+    return this.shareService.getShareSearchIndex(shareInfo, queryRo);
+  }
+
+  @UseV2Feature('buttonClick')
+  @UseGuards(V2FeatureGuard, ShareAuthGuard)
+  @UseInterceptors(V2IndicatorInterceptor)
+  @Post('/:shareId/view/record/:recordId/:fieldId/button-click')
+  async buttonClick(
+    @Request() req: any,
+    @Param('recordId') recordId: string,
+    @Param('fieldId') fieldId: string
+  ): Promise<IButtonClickVo> {
+    const shareInfo = req.shareInfo as IShareViewInfo;
+    const result = await this.shareService.buttonClick(shareInfo, recordId, fieldId);
+    return { ...result, runId: '' };
+  }
+
+  @ShareLinkView()
+  @UseV2Feature('getSharedViewSocketSnapshotBulk')
+  @UseGuards(V2FeatureGuard, ShareAuthGuard)
+  @UseInterceptors(V2IndicatorInterceptor)
+  @AllowAnonymous()
+  @Get('/:shareId/socket/view/snapshot-bulk')
+  async getViewSnapshotBulk(@Request() req: any, @Query('ids') ids: string[]) {
+    const shareInfo = req.shareInfo as IShareViewInfo;
+    return this.shareSocketService.getViewSnapshotBulk(shareInfo, ids);
+  }
+
+  @ShareLinkView()
+  @UseV2Feature('getSharedViewSocketDocIds')
+  @UseGuards(V2FeatureGuard, ShareAuthGuard)
+  @UseInterceptors(V2IndicatorInterceptor)
+  @AllowAnonymous()
+  @Get('/:shareId/socket/view/doc-ids')
+  async getViewDocIds(@Request() req: any) {
+    const shareInfo = req.shareInfo as IShareViewInfo;
+    return this.shareSocketService.getViewDocIdsByQuery(shareInfo);
+  }
+
+  @ShareLinkView()
+  @UseV2Feature('getFields')
+  @UseGuards(V2FeatureGuard, ShareAuthGuard)
+  @UseInterceptors(V2IndicatorInterceptor)
+  @AllowAnonymous()
+  @Get('/:shareId/socket/field/snapshot-bulk')
+  async getFieldSnapshotBulk(@Request() req: any, @Query('ids') ids: string[]) {
+    const shareInfo = req.shareInfo as IShareViewInfo;
+    return this.shareSocketService.getFieldSnapshotBulk(shareInfo, ids);
+  }
+
+  @ShareLinkView()
+  @UseV2Feature('getFields')
+  @UseGuards(V2FeatureGuard, ShareAuthGuard)
+  @UseInterceptors(V2IndicatorInterceptor)
+  @AllowAnonymous()
+  @Get('/:shareId/socket/field/doc-ids')
+  async getFieldDocIds(
+    @Request() req: any,
+    @Query(new ZodValidationPipe(getFieldsQuerySchema)) query: IGetFieldsQuery
+  ) {
+    const shareInfo = req.shareInfo as IShareViewInfo;
+
+    return this.shareSocketService.getFieldDocIdsByQuery(shareInfo, query);
+  }
+
+  @InteractiveQueryCancellation()
+  @ShareLinkView()
+  @UseV2Feature('getSharedViewRecords')
+  @UseGuards(V2FeatureGuard, ShareAuthGuard)
+  @UseInterceptors(V2IndicatorInterceptor)
+  @AllowAnonymous()
+  @Post('/:shareId/socket/record/snapshot-bulk')
+  async getRecordSnapshotBulk(
+    @Request() req: any,
+    @Body('ids') ids: string[],
+    @Body('projection') projection?: { [fieldNameOrId: string]: boolean }
+  ) {
+    const shareInfo = req.shareInfo as IShareViewInfo;
+    return this.shareSocketService.getRecordSnapshotBulk(shareInfo, ids, true, projection);
+  }
+
+  @InteractiveQueryCancellation()
+  @ShareLinkView()
+  @UseV2Feature('getSharedViewRecords')
+  @UseGuards(V2FeatureGuard, ShareAuthGuard)
+  @UseInterceptors(V2IndicatorInterceptor)
+  @AllowAnonymous()
+  @Post('/:shareId/socket/record/doc-ids')
+  async getRecordDocIds(
+    @Request() req: any,
+    // The share schema drops viewId/ignoreViewQuery: the socket doc-id query must
+    // stay inside the shared view exactly like the REST records query.
+    @Body(new ZodValidationPipe(shareViewRecordsRoSchema), TqlPipe) query: IShareViewRecordsRo
+  ) {
+    const shareInfo = req.shareInfo as IShareViewInfo;
+    await this.spaceDataDbMigrationGuardService.assertTableRecordSearchReadable(
+      shareInfo.tableId,
+      query
+    );
+    return this.shareSocketService.getRecordDocIdsByQuery(shareInfo, query, true);
   }
 }

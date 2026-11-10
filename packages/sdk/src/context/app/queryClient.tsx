@@ -1,36 +1,229 @@
 import { MutationCache, QueryCache, QueryClient } from '@tanstack/react-query';
-import type { IHttpError } from '@teable/core';
-import { toast } from '@teable/ui-lib';
+import type { ICustomHttpExceptionData, IHttpError, ILocalization } from '@teable/core';
+import {
+  getUnauthenticatedAuthPath,
+  HttpErrorCode,
+  RETURNING_USER_COOKIE_NAME,
+} from '@teable/core';
+import { sonner } from '@teable/ui-lib';
+import { openUsageLimitModalFromError } from '../../components/billing/store/usage-limit-modal';
+import type { ILocaleFunction, TKey } from './i18n';
 
-export const errorRequestHandler = (error: unknown) => {
-  const { code, message, status } = error as IHttpError;
-  // no authentication
-  if (status === 401) {
-    window.location.href = `/auth/login?redirect=${encodeURIComponent(window.location.href)}`;
+import { isTableProvisionPending } from './tableProvisionError';
+
+const { toast } = sonner;
+
+// 4xx statuses still surfaced on GET (query) requests — actionable for the user, not raw
+// technical noise. 408: request/statement timeout ("narrow the scope and retry"); 429: rate limit.
+const QUERY_VISIBLE_4XX_STATUSES = [408, 429];
+
+// Network error toast deduplication - only show once per cooldown period
+const NETWORK_ERROR_TOAST_ID = 'network-error-toast';
+const NETWORK_ERROR_COOLDOWN_MS = 10 * 1000; // 10 seconds cooldown
+let lastNetworkErrorTime = 0;
+
+// The translator of the app's query client, for errors reported outside a query or mutation
+// (requestWrap, model methods) that have no `t` of their own. The page reloads on a language
+// switch, so the last one registered is the current language.
+let fallbackTranslator: ILocaleFunction | undefined;
+
+// Validation error deduplication - same message won't show within cooldown period
+const VALIDATION_ERROR_COOLDOWN_MS = 5 * 1000; // 5 seconds cooldown
+const lastValidationErrorTimes = new Map<string, number>();
+
+// A content-derived id lets Sonner collapse identical error toasts into one
+// instead of stacking a duplicate per concurrently-failing request.
+const getErrorToastId = (title: unknown, description?: unknown): string =>
+  `error-toast:${String(title ?? '')}:${String(description ?? '')}`;
+
+export function toCamelCaseErrorCode(errorCode: string): string {
+  return errorCode
+    .split('_')
+    .map((part, index) => (index === 0 ? part : part.charAt(0).toUpperCase() + part.slice(1)))
+    .join('');
+}
+
+export const getLocalizationMessage = (
+  localization: ILocalization,
+  t: ILocaleFunction,
+  prefix?: string
+) => {
+  const { i18nKey, context } = localization;
+  const key = prefix ? `${prefix}:${i18nKey}` : i18nKey;
+  return i18nKey ? t(key as TKey, context ?? {}) : '';
+};
+
+export const getHttpErrorMessage = (error: unknown, t: ILocaleFunction, prefix?: string) => {
+  const { message, data } = error as IHttpError;
+  const { localization } = (data as ICustomHttpExceptionData) || {};
+  return localization ? getLocalizationMessage(localization, t, prefix) : message;
+};
+
+// validation_error is the default code of every 400, so most of these are business-rule
+// rejections rather than bad input; without a localized message the generic title fits better.
+const getHttpErrorTitle = (error: unknown, t: ILocaleFunction) => {
+  const { code, data } = error as IHttpError;
+  if (!code) {
+    return t('httpErrors.unknownErrorCode');
+  }
+  if (
+    code === HttpErrorCode.VALIDATION_ERROR &&
+    !(data as ICustomHttpExceptionData | undefined)?.localization
+  ) {
+    return t('httpErrors.requestFailed' as TKey);
+  }
+  return t(`httpErrors.${toCamelCaseErrorCode(code)}` as TKey);
+};
+
+const handleNetworkError = (t?: ILocaleFunction): void => {
+  const now = Date.now();
+  if (now - lastNetworkErrorTime < NETWORK_ERROR_COOLDOWN_MS) {
     return;
   }
-  toast({
-    variant: 'destructive',
-    title: code || 'Unknown Error',
-    description: message,
+  lastNetworkErrorTime = now;
+  toast.warning(t ? t('httpErrors.networkError') : 'Network connection issue', {
+    id: NETWORK_ERROR_TOAST_ID,
+    duration: 3000,
   });
 };
 
-export const createQueryClient = () => {
+const dedupeValidationError = (message: string): boolean => {
+  const now = Date.now();
+  const lastTime = lastValidationErrorTimes.get(message);
+  if (lastTime && now - lastTime < VALIDATION_ERROR_COOLDOWN_MS) {
+    return true;
+  }
+  lastValidationErrorTimes.set(message, now);
+
+  // Clean up old entries to prevent memory leak
+  if (lastValidationErrorTimes.size > 20) {
+    const threshold = now - VALIDATION_ERROR_COOLDOWN_MS;
+    for (const [key, time] of lastValidationErrorTimes) {
+      if (time < threshold) {
+        lastValidationErrorTimes.delete(key);
+      }
+    }
+  }
+  return false;
+};
+
+/**
+ * Leaves for the sign-in page (or sign-up, for a browser that has never signed in), coming
+ * back here afterwards. What a 401 does; also what a revoked session does the moment the
+ * server says so, without waiting for a request to be refused.
+ */
+export const redirectToUnauthenticatedAuth = () => {
+  const isReturning = document.cookie
+    .split(';')
+    .some((part) => part.trim().startsWith(`${RETURNING_USER_COOKIE_NAME}=`));
+  window.location.href = getUnauthenticatedAuthPath(isReturning, window.location.href);
+};
+
+const handleStatusRedirect = (error: unknown): boolean => {
+  const { status } = error as IHttpError;
+  if (status === 401) {
+    redirectToUnauthenticatedAuth();
+    return true;
+  }
+  return openUsageLimitModalFromError(error);
+};
+
+export const errorRequestHandler = (
+  error: unknown,
+  t?: ILocaleFunction,
+  options?: { isQuery?: boolean }
+) => {
+  t ??= fallbackTranslator;
+  if (isTableProvisionPending(error)) {
+    toast.info(
+      t
+        ? t('httpErrors.tableProvisionPending' as TKey)
+        : 'Table structure is updating. Please try again shortly.',
+      {
+        id: 'table-provision-pending',
+      }
+    );
+    return;
+  }
+  const { code, message, status, data } = error as IHttpError;
+
+  if (code === HttpErrorCode.NETWORK_ERROR) {
+    handleNetworkError(t);
+    return;
+  }
+
+  if (code === HttpErrorCode.VALIDATION_ERROR && message && dedupeValidationError(message)) {
+    return;
+  }
+
+  if (handleStatusRedirect(error)) {
+    return;
+  }
+
+  // Silence 4xx errors on GET (query) requests — raw technical messages not useful to users.
+  // Mutation 4xx errors are always shown so users get feedback on their actions.
+  // QUERY_VISIBLE_4XX_STATUSES are the exceptions that are still surfaced (see definition above).
+  if (
+    options?.isQuery &&
+    status >= 400 &&
+    status < 500 &&
+    !QUERY_VISIBLE_4XX_STATUSES.includes(status)
+  ) {
+    if (process.env.NODE_ENV === 'development') {
+      console.warn(`[Silenced 4xx] ${status} ${code}: ${message}`);
+    }
+    return;
+  }
+
+  if (t) {
+    // An unlocalized 5xx carries the server's English (often just "Internal Server Error");
+    // the translated title already says what the user can know, so it stands alone.
+    const description =
+      status >= 500 && !(data as ICustomHttpExceptionData | undefined)?.localization
+        ? undefined
+        : getHttpErrorMessage(error, t);
+    const title = getHttpErrorTitle(error, t);
+    return toast.error(title, { description, id: getErrorToastId(title, description) });
+  }
+
+  const fallbackTitle = code || 'Unknown Error';
+  toast.error(fallbackTitle, {
+    description: message,
+    id: getErrorToastId(fallbackTitle, message),
+  });
+};
+
+export const createQueryClient = (t?: ILocaleFunction) => {
+  if (t) fallbackTranslator = t;
   return new QueryClient({
     defaultOptions: {
       queries: {
         // With SSR, we usually want to set some default staleTime
         // above 0 to avoid refetching immediately on the client
         staleTime: 10 * 1000,
-        retry: false,
+        retry: (failureCount, error) => isTableProvisionPending(error) && failureCount < 3,
+        retryDelay: (attempt) => Math.min(1000 * 2 ** attempt, 4000),
+        networkMode: 'always',
+      },
+      mutations: {
+        networkMode: 'always',
       },
     },
     queryCache: new QueryCache({
-      onError: errorRequestHandler,
+      onError: (error, query) => {
+        if (query.meta?.['preventGlobalError']) {
+          return;
+        }
+        errorRequestHandler(error, t, { isQuery: true });
+      },
     }),
     mutationCache: new MutationCache({
-      onError: errorRequestHandler,
+      onError: (error, _variables, _context, mutation) => {
+        if (mutation.options.meta?.['preventGlobalError']) {
+          return;
+        }
+        errorRequestHandler(error, t);
+      },
     }),
   });
 };

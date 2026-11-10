@@ -23,13 +23,13 @@ const getColors = (variant: ISpriteVariant, theme: IGridTheme): [string, string]
 };
 
 export class SpriteManager {
-  private spriteMap: Map<string, HTMLCanvasElement> = new Map();
-  private icons: ISpriteMap;
+  private readonly spriteMap: Map<string, HTMLCanvasElement> = new Map();
+  private readonly icons: ISpriteMap;
   private inFlight = 0;
 
   constructor(
     icons?: ISpriteMap,
-    private onSettled?: () => void
+    private readonly onSettled?: () => void
   ) {
     this.icons = {
       ...sprites,
@@ -41,7 +41,10 @@ export class SpriteManager {
   public drawSprite(ctx: CanvasRenderingContext2D, props: ISpriteDrawerProps) {
     const { sprite, variant = 'normal', x, y, size, alpha = 1, theme, colors } = props;
     const [fgColor, bgColor] = colors ?? getColors(variant, theme);
-    const rSize = size * Math.ceil(window.devicePixelRatio);
+    // Use at least 2x resolution for better anti-aliasing on low DPI screens
+    const minPixelRatio = 2;
+    const pixelRatio = Math.max(minPixelRatio, Math.ceil(window.devicePixelRatio));
+    const rSize = size * pixelRatio;
     const key = `${bgColor}_${fgColor}_${rSize}_${sprite}`;
 
     let spriteCanvas = this.spriteMap.get(key);
@@ -51,6 +54,8 @@ export class SpriteManager {
       if (spriteCb === undefined) return;
 
       spriteCanvas = document.createElement('canvas');
+      spriteCanvas.width = rSize;
+      spriteCanvas.height = rSize;
       const spriteCtx = spriteCanvas.getContext('2d');
 
       if (spriteCtx === null) return;

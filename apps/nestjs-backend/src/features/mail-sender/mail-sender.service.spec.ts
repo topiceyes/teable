@@ -1,21 +1,395 @@
-import type { TestingModule } from '@nestjs/testing';
-import { Test } from '@nestjs/testing';
-import { ConfigModule } from '../../configs/config.module';
-import { MailSenderModule } from './mail-sender.module';
+import type { MailerService } from '@nestjs-modules/mailer';
+import { HttpErrorCode } from '@teable/core';
+import type { IMailTransportConfig } from '@teable/openapi';
+import { CollaboratorType, MailTransporterType } from '@teable/openapi';
+import { createTransport } from 'nodemailer';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { IMailConfig } from '../../configs/mail.config';
 import { MailSenderService } from './mail-sender.service';
 
-describe('MailSenderService', () => {
+vi.mock('nodemailer', () => ({
+  createTransport: vi.fn(),
+}));
+
+const mockedCreateTransport = vi.mocked(createTransport);
+
+const smtpConfig: IMailTransportConfig = {
+  host: 'smtp.example.com',
+  port: 465,
+  secure: true,
+  sender: 'noreply@example.com',
+  auth: { user: 'user', pass: 'pass' },
+};
+
+describe('MailSenderService transporter pooling', () => {
   let service: MailSenderService;
 
-  beforeEach(async () => {
-    const module: TestingModule = await Test.createTestingModule({
-      imports: [ConfigModule.register(), MailSenderModule.register()],
-    }).compile();
+  const createService = () => {
+    const mailService = {
+      templateAdapter: {},
+      initTemplateAdapter: vi.fn(),
+    } as unknown as MailerService;
+    const mailConfig = {
+      host: '',
+      port: 465,
+      secure: true,
+      auth: { user: '', pass: '' },
+      sender: '',
+      senderName: '',
+      isConfigured: false,
+      connectionTimeout: 10000,
+      greetingTimeout: 10000,
+      dnsTimeout: 5000,
+    } as unknown as IMailConfig;
+    // Only the constructor-read fields and pooling collaborators matter for these tests
+    const stub = <T>() => ({}) as T;
+    return new MailSenderService(mailService, mailConfig, stub(), stub(), stub(), stub(), stub());
+  };
 
-    service = module.get<MailSenderService>(MailSenderService);
+  const createMockTransporter = () => ({
+    sendMail: vi.fn().mockResolvedValue({ messageId: 'msg-id' }),
+    close: vi.fn(),
   });
 
-  it('should be defined', async () => {
-    expect(service).toBeDefined();
+  beforeEach(() => {
+    mockedCreateTransport.mockReset();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    mockedCreateTransport.mockImplementation(() => createMockTransporter() as any);
+    service = createService();
+  });
+
+  it('reuses the same transporter for the same config', async () => {
+    await service.sendMailByConfig({ to: 'a@example.com' }, smtpConfig);
+    await service.sendMailByConfig({ to: 'b@example.com' }, smtpConfig);
+
+    expect(mockedCreateTransport).toHaveBeenCalledTimes(1);
+    expect(mockedCreateTransport).toHaveBeenCalledWith(
+      expect.objectContaining({ pool: true, host: smtpConfig.host })
+    );
+  });
+
+  it('creates a new transporter when connection config changes', async () => {
+    await service.sendMailByConfig({ to: 'a@example.com' }, smtpConfig);
+    await service.sendMailByConfig(
+      { to: 'a@example.com' },
+      { ...smtpConfig, auth: { user: 'user', pass: 'new-pass' } }
+    );
+
+    expect(mockedCreateTransport).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not share a transporter between omitted secure and explicit secure: false', async () => {
+    // On port 465 nodemailer treats omitted secure as implicit TLS but explicit false as STARTTLS
+    await service.sendMailByConfig({ to: 'a@example.com' }, { ...smtpConfig, secure: undefined });
+    await service.sendMailByConfig({ to: 'a@example.com' }, { ...smtpConfig, secure: false });
+
+    expect(mockedCreateTransport).toHaveBeenCalledTimes(2);
+  });
+
+  it('shares the transporter across configs differing only by sender fields', async () => {
+    await service.sendMailByConfig({ to: 'a@example.com' }, smtpConfig);
+    await service.sendMailByConfig(
+      { to: 'a@example.com' },
+      { ...smtpConfig, sender: 'other@example.com', senderName: 'Other' }
+    );
+
+    expect(mockedCreateTransport).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the pooled transporter when a send fails', async () => {
+    const transporter = createMockTransporter();
+    transporter.sendMail
+      .mockRejectedValueOnce(new Error('550 recipient rejected'))
+      .mockResolvedValueOnce({ messageId: 'msg-id' });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    mockedCreateTransport.mockImplementationOnce(() => transporter as any);
+
+    await expect(service.sendMailByConfig({ to: 'a@example.com' }, smtpConfig)).rejects.toThrow(
+      '550 recipient rejected'
+    );
+    expect(transporter.close).not.toHaveBeenCalled();
+
+    await service.sendMailByConfig({ to: 'b@example.com' }, smtpConfig);
+    expect(mockedCreateTransport).toHaveBeenCalledTimes(1);
+    expect(transporter.sendMail).toHaveBeenCalledTimes(2);
+  });
+
+  it('defers closing an evicted transporter until in-flight sends settle', async () => {
+    const transporter = createMockTransporter();
+    let resolveSend!: (value: { messageId: string }) => void;
+    transporter.sendMail.mockImplementation(
+      () => new Promise((resolve) => (resolveSend = resolve))
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    mockedCreateTransport.mockImplementation(() => transporter as any);
+
+    const pending = service.sendMailByConfig({ to: 'a@example.com' }, smtpConfig);
+    await vi.waitFor(() => expect(transporter.sendMail).toHaveBeenCalled());
+
+    service.onModuleDestroy();
+    expect(transporter.close).not.toHaveBeenCalled();
+
+    resolveSend({ messageId: 'msg-id' });
+    await pending;
+    expect(transporter.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not close a transporter LRU-evicted between acquisition and its first send', async () => {
+    // Real nodemailer hangs on a closed pool; reject instead so the failure is observable
+    const transporters: { sendMail: ReturnType<typeof vi.fn>; close: ReturnType<typeof vi.fn> }[] =
+      [];
+    mockedCreateTransport.mockImplementation(() => {
+      let closed = false;
+      const t = {
+        sendMail: vi.fn(() =>
+          closed
+            ? Promise.reject(new Error('Connection pool was closed'))
+            : Promise.resolve({ messageId: 'msg-id' })
+        ),
+        close: vi.fn(() => {
+          closed = true;
+        }),
+      };
+      transporters.push(t);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return t as any;
+    });
+
+    // max + 1 distinct configs: the last set() LRU-evicts the first entry before its send runs
+    const cacheMax = (service as unknown as { transporterCache: { max: number } }).transporterCache
+      .max;
+    const results = await Promise.all(
+      Array.from({ length: cacheMax + 1 }, (_, i) =>
+        service.sendMailByConfig(
+          { to: `user${i}@example.com` },
+          { ...smtpConfig, auth: { user: `user-${i}`, pass: 'pass' } }
+        )
+      )
+    );
+
+    expect(results).toHaveLength(cacheMax + 1);
+    expect(transporters[0].sendMail).toHaveBeenCalledTimes(1);
+    expect(transporters[0].close).toHaveBeenCalledTimes(1);
+  });
+
+  it('closes all pooled transporters on module destroy', async () => {
+    const transporter = createMockTransporter();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    mockedCreateTransport.mockImplementation(() => transporter as any);
+    await service.sendMailByConfig({ to: 'a@example.com' }, smtpConfig);
+
+    service.onModuleDestroy();
+    expect(transporter.close).toHaveBeenCalled();
+  });
+
+  it('does not cache and still closes a transporter created while destroy raced the miss', async () => {
+    const transporter = createMockTransporter();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    mockedCreateTransport.mockImplementation(() => transporter as any);
+
+    const pending = service.sendMailByConfig({ to: 'a@example.com' }, smtpConfig);
+    service.onModuleDestroy();
+
+    await expect(pending).resolves.toEqual({ messageId: 'msg-id' });
+    expect(transporter.close).toHaveBeenCalledTimes(1);
+
+    await service.sendMailByConfig({ to: 'b@example.com' }, smtpConfig);
+    expect(mockedCreateTransport).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('MailSenderService delivery error classification', () => {
+  const smtpRejection = Object.assign(new Error('Message failed: 554 5.7.1 outgoing limits'), {
+    code: 'EMESSAGE',
+    responseCode: 554,
+    response: '554 5.7.1 outgoing limits',
+    command: 'DATA',
+  });
+
+  const createService = (settings: Record<string, unknown> = {}) => {
+    const mailService = {
+      templateAdapter: {},
+      initTemplateAdapter: vi.fn(),
+    } as unknown as MailerService;
+    const mailConfig = {
+      ...smtpConfig,
+      senderName: 'Teable',
+      isConfigured: true,
+      connectionTimeout: 10000,
+      greetingTimeout: 10000,
+      dnsTimeout: 5000,
+    } as unknown as IMailConfig;
+    const settingOpenApiService = { getSetting: vi.fn().mockResolvedValue(settings) };
+    const stub = <T>() => ({}) as T;
+    return new MailSenderService(
+      mailService,
+      mailConfig,
+      stub(),
+      settingOpenApiService as never,
+      stub(),
+      stub(),
+      stub()
+    );
+  };
+
+  beforeEach(() => {
+    mockedCreateTransport.mockReset();
+    mockedCreateTransport.mockImplementation(
+      () =>
+        ({
+          sendMail: vi.fn().mockRejectedValue(smtpRejection),
+          close: vi.fn(),
+        }) as never
+    );
+  });
+
+  it('converts a caller-supplied transport failure into a 424', async () => {
+    const service = createService();
+
+    await expect(
+      service.sendMail({ to: 'a@example.com' }, { shouldThrow: true, transportConfig: smtpConfig })
+    ).rejects.toMatchObject({
+      status: 424,
+      code: HttpErrorCode.FAILED_DEPENDENCY,
+      data: { smtp: { responseCode: 554, host: smtpConfig.host } },
+    });
+  });
+
+  it('leaves a system transport failure unclassified so it still reaches Sentry', async () => {
+    const service = createService();
+
+    await expect(
+      service.sendMail(
+        { to: 'a@example.com' },
+        { shouldThrow: true, transporterName: MailTransporterType.Automation }
+      )
+    ).rejects.toBe(smtpRejection);
+  });
+});
+
+describe('MailSenderService html escaping of user-supplied names (GHSA-3rmq-5wwc-x8w2)', () => {
+  // The display name an attacker sets through PATCH /api/user/name
+  const xssName = '<img src=x onerror="window.__xss=1">';
+  // The English templates whose result lands in an unescaped template slot
+  const templates = new Map<string, string>([
+    [
+      'common.email.templates.invite.subject',
+      '{{name}} ({{email}}) invited you to their {{resourceAlias}} {{resourceName}} - {{brandName}}',
+    ],
+    [
+      'common.email.templates.invite.message',
+      '<strong>{{name}}</strong> ({{email}}) invited you to their {{resourceAlias}} <strong>{{resourceName}}</strong>.',
+    ],
+    [
+      'common.email.templates.collaboratorCellTag.subject',
+      '{{fromUserName}} added you to the {{fieldName}} field of a record in {{tableName}}',
+    ],
+    [
+      'common.email.templates.collaboratorCellTag.title',
+      '<strong>{{fromUserName}}</strong> added you to the <strong>{{fieldName}}</strong> field of a record in <strong>{{tableName}}</strong>',
+    ],
+    [
+      'common.email.templates.collaboratorMultiRowTag.subject',
+      '{{fromUserName}} added you to {{refLength}} records in {{tableName}}',
+    ],
+    [
+      'common.email.templates.collaboratorMultiRowTag.title',
+      '<strong>{{fromUserName}}</strong> added you to <strong>{{refLength}}</strong> records in <strong>{{tableName}}</strong>',
+    ],
+  ]);
+
+  const createService = () => {
+    const mailService = {
+      templateAdapter: {},
+      initTemplateAdapter: vi.fn(),
+    } as unknown as MailerService;
+    const mailConfig = {
+      ...smtpConfig,
+      senderName: 'Teable',
+      isConfigured: true,
+      origin: 'https://app.example.com',
+      invite: { userNameMaxLength: 50, spaceNameMaxLength: 50 },
+    } as unknown as IMailConfig;
+    const settingOpenApiService = {
+      getServerBrand: vi.fn().mockResolvedValue({ brandName: 'Teable', brandLogo: '' }),
+    };
+    const i18n = {
+      t: (key: string, options?: { args?: Record<string, unknown> }) =>
+        (templates.get(key) ?? key).replace(/\{\{(\w+)\}\}/g, (_, name: string) =>
+          String(options?.args?.[name] ?? '')
+        ),
+    };
+    const stub = <T>() => ({}) as T;
+    return new MailSenderService(
+      mailService,
+      mailConfig,
+      stub(),
+      settingOpenApiService as never,
+      stub(),
+      stub(),
+      i18n as never
+    );
+  };
+
+  it('escapes the inviter and resource names in the html message but not the plain-text subject', async () => {
+    const { subject, context } = await createService().inviteEmailOptions({
+      name: xssName,
+      email: 'attacker@example.com',
+      resourceName: '<b>Space</b>',
+      resourceType: CollaboratorType.Space,
+      inviteUrl: 'https://app.example.com/invite/abc',
+    });
+
+    expect(context.message).toContain('&lt;img');
+    expect(context.message).not.toContain('<img');
+    expect(context.message).toContain('&lt;b&gt;Space&lt;/b&gt;');
+    // the template's own markup survives
+    expect(context.message).toContain('<strong>');
+    expect(subject).toContain(xssName);
+  });
+
+  it('escapes the user, field and table names in the collaborator cell tag title', async () => {
+    const { subject, context } = await createService().collaboratorCellTagEmailOptions({
+      notifyId: 'notxxxxxxxxxxxxxxxxx',
+      fromUserName: xssName,
+      refRecord: {
+        baseId: 'bsexxxxxxxxxxxxxxxxx',
+        tableId: 'tblxxxxxxxxxxxxxxxxx',
+        tableName: '<i>T1</i>',
+        fieldName: 'Assignee<script>',
+        recordIds: ['recxxxxxxxxxxxxxxxxx'],
+        recordTitles: [{ id: 'recxxxxxxxxxxxxxxxxx', title: 'r1' }],
+      },
+    });
+
+    expect(context.title).toContain('&lt;img');
+    expect(context.title).not.toContain('<img');
+    expect(context.title).not.toContain('<script>');
+    expect(context.title).toContain('&lt;i&gt;T1&lt;/i&gt;');
+    expect(context.title).toContain('<strong>');
+    expect(subject).toContain(xssName);
+  });
+
+  it('escapes the names in the multi-row tag title', async () => {
+    const { context } = await createService().collaboratorCellTagEmailOptions({
+      notifyId: 'notxxxxxxxxxxxxxxxxx',
+      fromUserName: xssName,
+      refRecord: {
+        baseId: 'bsexxxxxxxxxxxxxxxxx',
+        tableId: 'tblxxxxxxxxxxxxxxxxx',
+        tableName: '<i>T1</i>',
+        fieldName: 'Assignee',
+        recordIds: ['recxxxxxxxxxxxxxxxxx', 'recyyyyyyyyyyyyyyyyy'],
+        recordTitles: [
+          { id: 'recxxxxxxxxxxxxxxxxx', title: 'r1' },
+          { id: 'recyyyyyyyyyyyyyyyyy', title: 'r2' },
+        ],
+      },
+    });
+
+    expect(context.title).toContain('&lt;img');
+    expect(context.title).not.toContain('<img');
+    expect(context.title).toContain('&lt;i&gt;T1&lt;/i&gt;');
+    expect(context.title).toContain('<strong>2</strong>');
   });
 });

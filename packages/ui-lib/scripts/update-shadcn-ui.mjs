@@ -1,0 +1,24 @@
+import { execSync } from 'node:child_process';
+import { readdirSync } from 'node:fs';
+import { join } from 'node:path';
+
+const componentsDir = join(process.cwd(), 'src/shadcn/ui');
+const updateComName = process.argv[2];
+const components = readdirSync(componentsDir, { withFileTypes: true })
+  .filter(
+    (dirent) =>
+      !dirent.isDirectory() &&
+      dirent.name.endsWith('.tsx') &&
+      (!updateComName || dirent.name === `${updateComName}.tsx`)
+  )
+  .map((dirent) => dirent.name.split('.')[0]);
+
+const updateCommand = 'pnpm shadcn:ui add';
+components.forEach((component) => {
+  const command = `${updateCommand} ${component} -o -y`;
+  execSync(command, { stdio: 'inherit', cwd: process.cwd() });
+});
+
+execSync(`pnpm oxlint --fix --allow teable/naming-convention ${componentsDir}`, {
+  stdio: 'inherit',
+});

@@ -1,57 +1,113 @@
-import fs from 'fs';
-import path from 'path';
-import { DriverClient, getRandomString, parseDsn } from '@teable/core';
+import { Buffer as NodeBuffer } from 'node:buffer';
+import http from 'node:http';
+import { createRequire } from 'node:module';
+import path from 'node:path';
+import type { INestApplication } from '@nestjs/common';
+import { DriverClient, parseDsn } from '@teable/core';
 import dotenv from 'dotenv-flow';
+import { buildSync } from 'esbuild';
+
+// Node >=19 enables keep-alive on the global http agent; the app servers close
+// idle sockets after ~5s and a reuse racing that close surfaces as ECONNRESET.
+// Tests favor determinism over connection reuse.
+http.globalAgent = new http.Agent({ keepAlive: false });
+
+const require = createRequire(import.meta.url);
+const bufferModule = require('node:buffer') as Record<string, unknown>;
+bufferModule['SlowBuffer'] ??= bufferModule['Buffer'] ?? NodeBuffer;
+
+// Handle ConditionalModule timeout errors that occur sporadically in CI
+// These errors are thrown from setTimeout callbacks and cannot be caught normally
+// See: @nestjs/config ConditionalModule.registerWhen
+const originalUncaughtExceptionListeners = process.listeners('uncaughtException');
+process.removeAllListeners('uncaughtException');
+process.on('uncaughtException', (error: Error) => {
+  // Ignore ConditionalModule timeout errors - they are sporadic in CI and don't affect test results
+  if (
+    error.message?.includes('Nest was not able to resolve the config variables') &&
+    error.message?.includes('ConditionalModule')
+  ) {
+    console.warn('[vitest-e2e.setup] Ignoring ConditionalModule timeout error:', error.message);
+    return;
+  }
+  // Re-throw other uncaught exceptions
+  for (const listener of originalUncaughtExceptionListeners) {
+    listener.call(process, error, 'uncaughtException');
+  }
+  // If no original listeners, throw the error
+  if (originalUncaughtExceptionListeners.length === 0) {
+    throw error;
+  }
+});
 
 interface ITestConfig {
   driver: string;
   email: string;
+  userName: string;
   userId: string;
   password: string;
   spaceId: string;
   baseId: string;
 }
 
+interface IInitAppReturnType {
+  app: INestApplication<unknown>;
+  appUrl: string;
+  cookie: string;
+  sessionID: string;
+}
+
 declare global {
   // eslint-disable-next-line no-var
   var testConfig: ITestConfig;
+  // eslint-disable-next-line no-var
+  var initApp: undefined | (() => Promise<IInitAppReturnType>);
 }
 
 // Set global variables (if needed)
 globalThis.testConfig = {
+  userName: 'test',
   email: 'test@e2e.com',
   password: '12345678',
   userId: 'usrTestUserId',
   spaceId: 'spcTestSpaceId',
   baseId: 'bseTestBaseId',
-  driver: DriverClient.Sqlite,
+  driver: DriverClient.Pg,
 };
 
-function prepareSqliteEnv() {
-  if (!process.env.PRISMA_DATABASE_URL?.startsWith('file:')) {
-    return;
-  }
-  const prevFilePath = process.env.PRISMA_DATABASE_URL.substring(5);
-  const prevDir = path.dirname(prevFilePath);
-  const baseName = path.basename(prevFilePath);
+function compileWorkerFile() {
+  const entryFile = path.join(__dirname, 'src/worker/**.ts');
+  const outFile = path.join(__dirname, 'dist/worker');
 
-  const newFileName = 'test-' + getRandomString(12) + '-' + baseName;
-  const newFilePath = path.join(prevDir, 'test', newFileName);
-
-  process.env.PRISMA_DATABASE_URL = 'file:' + newFilePath;
-  console.log('TEST PRISMA_DATABASE_URL:', process.env.PRISMA_DATABASE_URL);
-
-  const dbPath = '../../packages/db-main-prisma/db/';
-  const testDbPath = path.join(dbPath, 'test');
-  if (!fs.existsSync(testDbPath)) {
-    fs.mkdirSync(testDbPath, { recursive: true });
-  }
-  fs.copyFileSync(path.join(dbPath, baseName), path.join(testDbPath, newFileName));
+  buildSync({
+    entryPoints: [entryFile],
+    outdir: outFile,
+    bundle: true,
+    conditions: ['@teable/source'],
+    platform: 'node',
+    target: 'node20',
+  });
 }
 
 async function setup() {
-  console.log('node-env', process.env.NODE_ENV);
   dotenv.config({ path: '../nextjs-app' });
+
+  // Keep the broad e2e suite deterministic; the dedicated suite verifies BullMQ delivery.
+  if (process.env.V2_COMPUTED_OUTBOX_BULLMQ_E2E === 'true') {
+    delete process.env.V2_COMPUTED_UPDATE_MODE;
+  } else {
+    process.env.V2_COMPUTED_UPDATE_MODE = 'sync';
+  }
+
+  if (!process.env.CONDITIONAL_QUERY_MAX_LIMIT) {
+    process.env.CONDITIONAL_QUERY_MAX_LIMIT = '7';
+  }
+  if (!process.env.CONDITIONAL_QUERY_DEFAULT_LIMIT) {
+    process.env.CONDITIONAL_QUERY_DEFAULT_LIMIT = process.env.CONDITIONAL_QUERY_MAX_LIMIT;
+  }
+
+  const { applyWorkerDatabaseEnv, captureBaselineEnv } = await import('./test/utils/e2e-shared');
+  applyWorkerDatabaseEnv();
 
   // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
   const databaseUrl = process.env.PRISMA_DATABASE_URL!;
@@ -61,7 +117,16 @@ async function setup() {
   console.log('driver: ', driver);
   globalThis.testConfig.driver = driver;
 
-  prepareSqliteEnv();
+  // globalSetup pre-builds the worker bundle for the e2e configs; other configs
+  // (bench) still compile here, where files run serially.
+  if (process.env.E2E_WORKER_PREBUILT !== '1') {
+    compileWorkerFile();
+  }
+
+  // Fingerprint the clean pre-boot env. The first spec file's initApp boots the
+  // worker's shared app (no eager boot here: vitest does not await this setup
+  // promise, and an in-flight boot would race the first file's env fingerprint).
+  captureBaselineEnv();
 }
 
 export default setup();

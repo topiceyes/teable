@@ -1,63 +1,87 @@
-import { AnchorProvider } from '@teable/sdk/context';
-import { Button, Tabs } from '@teable/ui-lib/shadcn';
+import { useQuery } from '@tanstack/react-query';
+import { AlertCircle, X } from '@teable/icons';
+import { getDashboardList, LastVisitResourceType, updateUserLastVisit } from '@teable/openapi';
+import { ReactQueryKeys } from '@teable/sdk/config';
+import { useBaseId, useIsReadOnlyPreview } from '@teable/sdk/hooks';
+import { Spin } from '@teable/ui-lib/base';
+import { Button } from '@teable/ui-lib/shadcn';
 import { useTranslation } from 'next-i18next';
-import { useState } from 'react';
-import { useLocalStorage } from 'react-use';
+import { useEffect, useState } from 'react';
 import { dashboardConfig } from '@/features/i18n/dashboard.config';
-import { Pickers } from './components/Pickers';
-import { GridContent } from './GridContent';
+import { useBaseResource } from '../hooks/useBaseResource';
+import type { IBaseResourceDashboard } from '../hooks/useBaseResource';
+import { useInitializationZodI18n } from '../hooks/useInitializationZodI18n';
+import { useSetting } from '../hooks/useSetting';
+import { DashboardHeader } from './DashboardHeader';
+import { DashboardMain } from './DashboardMain';
+import { EmptyDashboard } from './EmptyDashboard';
 
 export function DashboardPage() {
+  const baseId = useBaseId() as string;
+  const isReadOnlyPreview = useIsReadOnlyPreview();
   const { t } = useTranslation(dashboardConfig.i18nNamespaces);
-  const [anchor, setAnchor] = useState<{ tableId?: string; viewId?: string }>({});
-  const { viewId, tableId } = anchor;
-  const [showDashboard, setShowDashboard] = useLocalStorage('showDashboard', false);
-  return (
-    <AnchorProvider viewId={viewId} tableId={tableId}>
-      <div className="h-full flex-col md:flex">
-        <div className="flex h-full flex-1 flex-col gap-2 lg:gap-4">
-          <div className="items-center justify-between space-y-2 px-8 pb-2 pt-6 lg:flex">
-            <h2 className="text-3xl font-bold tracking-tight">{t('common:noun.dashboard')}</h2>
-          </div>
-          {!showDashboard ? (
-            <div className="flex h-full flex-col items-center justify-center p-4">
-              <ul className="mb-4 space-y-2 text-left">
-                <li>Click the + sign on the left sidebar to create a table.</li>
-                <li>
-                  Visit the{' '}
-                  <a
-                    href={t('help.mainLink')}
-                    className="text-blue-500 hover:text-blue-700"
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    Help Center
-                  </a>{' '}
-                  for assistance.
-                </li>
-                <li>
-                  Dashboard is under development,
-                  <Button
-                    className="text-md"
-                    variant="link"
-                    size="xs"
-                    onClick={() => setShowDashboard(true)}
-                  >
-                    click to view demo
-                  </Button>
-                </li>
-              </ul>
-            </div>
-          ) : (
-            <Tabs defaultValue="overview" className="overflow-y-auto">
-              <div className="p-8">
-                <Pickers setAnchor={setAnchor} />
-              </div>
-              <GridContent />
-            </Tabs>
-          )}
-        </div>
+  const [showDeprecationBanner, setShowDeprecationBanner] = useState(true);
+  useInitializationZodI18n();
+  const { dashboardId: dashboardQueryId } = useBaseResource() as IBaseResourceDashboard;
+  const { data: dashboardList, isLoading } = useQuery({
+    queryKey: ReactQueryKeys.getDashboardList(baseId),
+    queryFn: ({ queryKey }) => getDashboardList(queryKey[1]).then((res) => res.data),
+    enabled: !!baseId,
+  });
+  const { disallowDashboard } = useSetting();
+  useEffect(() => {
+    // Skip last visit tracking in template or share mode
+    if (isReadOnlyPreview) return;
+    if (dashboardQueryId) {
+      updateUserLastVisit({
+        resourceId: dashboardQueryId,
+        parentResourceId: baseId,
+        resourceType: LastVisitResourceType.Dashboard,
+      });
+    }
+  }, [dashboardQueryId, baseId, isReadOnlyPreview]);
+
+  if (isLoading) {
+    return (
+      <div className="ms-4 mt-4">
+        <Spin />
       </div>
-    </AnchorProvider>
+    );
+  }
+  if (!isLoading && !dashboardList?.length) {
+    return <EmptyDashboard />;
+  }
+  const dashboardId = dashboardQueryId ?? dashboardList?.[0]?.id;
+
+  return (
+    <div className="flex h-full flex-col">
+      <DashboardHeader dashboardId={dashboardId} />
+      {disallowDashboard && showDeprecationBanner && (
+        <div className="shrink-0 px-4 pt-4">
+          <div className="flex flex-col items-start gap-1 rounded-lg border border-black/[0.08] bg-zinc-100 p-4 dark:border-white/[0.08] dark:bg-zinc-800">
+            <div className="flex h-5 w-full items-center gap-3">
+              <AlertCircle className="size-4 shrink-0 text-zinc-900 dark:text-zinc-100" />
+              <p className="flex-1 text-sm font-medium text-zinc-900 dark:text-zinc-100">
+                {t('dashboard:deprecation.title')}
+              </p>
+              <Button
+                onClick={() => setShowDeprecationBanner(false)}
+                variant="ghost"
+                size="sm"
+                className=" p-0"
+              >
+                <X className="size-4" />
+              </Button>
+            </div>
+            <div className="ps-7">
+              <p className="text-xs text-zinc-900 dark:text-zinc-100">
+                {t('dashboard:deprecation.description')}
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+      <DashboardMain dashboardId={dashboardId} />
+    </div>
   );
 }

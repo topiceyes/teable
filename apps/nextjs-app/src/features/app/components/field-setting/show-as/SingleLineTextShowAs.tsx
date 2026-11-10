@@ -1,8 +1,7 @@
-import { SingleLineTextDisplayType } from '@teable/core';
+import { SingleLineTextDisplayType, getTextActionType } from '@teable/core';
 import type { ISingleLineTextShowAs } from '@teable/core';
-import { Button } from '@teable/ui-lib/shadcn';
 import { Label } from '@teable/ui-lib/shadcn/ui/label';
-import classNames from 'classnames';
+import { Tabs, TabsList, TabsTrigger } from '@teable/ui-lib/shadcn/ui/tabs';
 import { useTranslation } from 'next-i18next';
 import { tableConfig } from '@/features/i18n/table.config';
 
@@ -15,8 +14,8 @@ interface ISingleNumberShowAsProps {
 
 export const SingleTextLineShowAs: React.FC<ISingleNumberShowAsProps> = (props) => {
   const { showAs, onChange } = props;
-  const { type } = (showAs || {}) as ISingleLineTextShowAs;
-  const selectedType = showAs == null ? textFlag : type;
+  // Legacy "url" show-as is no longer selectable: URLs are auto-detected in text
+  const selectedType = getTextActionType(showAs) ?? textFlag;
   const { t } = useTranslation(tableConfig.i18nNamespaces);
 
   const updateDisplayType = (type: string) => {
@@ -36,10 +35,6 @@ export const SingleTextLineShowAs: React.FC<ISingleNumberShowAsProps> = (props) 
       text: t('table:field.editor.text'),
     },
     {
-      type: SingleLineTextDisplayType.Url,
-      text: t('table:field.editor.url'),
-    },
-    {
       type: SingleLineTextDisplayType.Email,
       text: t('table:field.editor.email'),
     },
@@ -51,26 +46,16 @@ export const SingleTextLineShowAs: React.FC<ISingleNumberShowAsProps> = (props) 
 
   return (
     <div className="flex w-full flex-col gap-2" data-testid="text-show-as">
-      <Label className="font-normal">{t('table:field.editor.showAs')}</Label>
-      <div className="grid grid-cols-4 gap-2">
-        {SINGLE_LINE_TEXT_DISPLAY_INFOS.map(({ type, text }) => {
-          return (
-            <Button
-              key={type}
-              variant="outline"
-              size="sm"
-              className={classNames(
-                'font-normal',
-                type === selectedType &&
-                  'bg-foreground text-accent hover:bg-foreground hover:text-accent'
-              )}
-              onClick={() => updateDisplayType(type)}
-            >
+      <Label className="text-sm font-medium">{t('table:field.editor.showAs')}</Label>
+      <Tabs value={selectedType} onValueChange={updateDisplayType} className="w-full">
+        <TabsList className="flex w-full gap-2">
+          {SINGLE_LINE_TEXT_DISPLAY_INFOS.map(({ type, text }) => (
+            <TabsTrigger key={type} value={type} className="flex-1 font-normal">
               {text}
-            </Button>
-          );
-        })}
-      </div>
+            </TabsTrigger>
+          ))}
+        </TabsList>
+      </Tabs>
     </div>
   );
 };

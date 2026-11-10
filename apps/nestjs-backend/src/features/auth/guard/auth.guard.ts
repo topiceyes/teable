@@ -1,17 +1,43 @@
 import type { ExecutionContext } from '@nestjs/common';
-import { Injectable } from '@nestjs/common';
+import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { AuthGuard as PassportAuthGuard } from '@nestjs/passport';
+import { isAnonymous } from '@teable/core';
+import { ClsService } from 'nestjs-cls';
+import type { IClsStore } from '../../../types/cls';
+import { IS_ALLOW_ANONYMOUS } from '../decorators/allow-anonymous.decorator';
+import { ENSURE_LOGIN } from '../decorators/ensure-login.decorator';
 import { IS_PUBLIC_KEY } from '../decorators/public.decorator';
-import { ACCESS_TOKEN_STRATEGY_NAME } from '../strategies/constant';
+import {
+  ACCESS_TOKEN_STRATEGY_NAME,
+  ANONYMOUS_STRATEGY_NAME,
+  JWT_TOKEN_STRATEGY_NAME,
+} from '../strategies/constant';
+
 @Injectable()
-export class AuthGuard extends PassportAuthGuard(['session', ACCESS_TOKEN_STRATEGY_NAME]) {
-  constructor(private readonly reflector: Reflector) {
+export class AuthGuard extends PassportAuthGuard([
+  'session',
+  ACCESS_TOKEN_STRATEGY_NAME,
+  JWT_TOKEN_STRATEGY_NAME,
+  ANONYMOUS_STRATEGY_NAME,
+]) {
+  constructor(
+    private readonly reflector: Reflector,
+    private readonly cls: ClsService<IClsStore>
+  ) {
     super();
   }
 
   async validate(context: ExecutionContext) {
-    return super.canActivate(context) as Promise<boolean>;
+    const result = (await super.canActivate(context)) as boolean;
+    const isAllowAnonymous = this.reflector.getAllAndOverride<boolean>(IS_ALLOW_ANONYMOUS, [
+      context.getHandler(),
+      context.getClass(),
+    ]);
+    if (!isAllowAnonymous && isAnonymous(this.cls.get('user.id'))) {
+      throw new UnauthorizedException();
+    }
+    return result;
   }
 
   async canActivate(context: ExecutionContext) {
@@ -23,6 +49,24 @@ export class AuthGuard extends PassportAuthGuard(['session', ACCESS_TOKEN_STRATE
     if (isPublic) {
       return true;
     }
-    return this.validate(context);
+
+    try {
+      return await this.validate(context);
+    } catch (error) {
+      const ensureLogin = this.reflector.getAllAndOverride<boolean>(ENSURE_LOGIN, [
+        context.getHandler(),
+        context.getClass(),
+      ]);
+      const res = context.switchToHttp().getResponse();
+      const req = context.switchToHttp().getRequest();
+      if (ensureLogin) {
+        // The redirect completes the response; returning false stops the
+        // pipeline. Nest still raises ForbiddenException for a false guard,
+        // which the global exception filter drops once headers are sent.
+        res.redirect(`/auth/signup?redirect=${encodeURIComponent(req.url)}`);
+        return false;
+      }
+      throw error;
+    }
   }
 }

@@ -1,6 +1,12 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
-import type { ICreateOpBuilder, IOpBuilder, IOpContextBase, IOtOperation } from '@teable/core';
+import type {
+  ICreateOpBuilder,
+  IOpBuilder,
+  IOpContextBase,
+  IOtOperation,
+  IRecord,
+} from '@teable/core';
 import {
   FieldOpBuilder,
   IdPrefix,
@@ -55,7 +61,7 @@ export class EventEmitterService {
     },
   };
 
-  private getPropertyCategoryForType = {
+  private readonly getPropertyCategoryForType = {
     [IdPrefix.Table]: 'table',
     [IdPrefix.View]: 'view',
     [IdPrefix.Field]: 'field',
@@ -63,15 +69,15 @@ export class EventEmitterService {
   };
 
   constructor(
-    private readonly eventEmitter: EventEmitter2,
+    public readonly eventEmitter: EventEmitter2,
     private readonly cls: ClsService<IClsStore>
   ) {}
 
-  emit(event: string, data: unknown | unknown[]): boolean {
+  emit<T>(event: string, data: T): boolean {
     return this.eventEmitter.emit(event, data);
   }
 
-  emitAsync(event: string, data: unknown | unknown[]): Promise<boolean[]> {
+  emitAsync<T>(event: string, data: T): Promise<boolean[]> {
     return this.eventEmitter.emitAsync(event, data);
   }
 
@@ -81,18 +87,20 @@ export class EventEmitterService {
     if (!generatedEvents) {
       return;
     }
-
     const observable = from(Array.from(generatedEvents.values()));
 
     observable
       .pipe(
-        groupBy((event) => event.name),
+        groupBy((event) => {
+          const tableId = get(event, 'payload.tableId');
+          return tableId ? `${tableId}_${event.name}` : event.name;
+        }),
         mergeMap((project) => this.aggregateEventsByGroup(project))
       )
       .subscribe((next) => this.handleEventResult(next));
   }
 
-  private aggregateEventsByGroup(project: GroupedObservable<Events, OpEvent>): Observable<OpEvent> {
+  private aggregateEventsByGroup(project: GroupedObservable<string, OpEvent>): Observable<OpEvent> {
     return project.pipe(
       toArray(),
       map((groupedEvents) => this.combineEvents(groupedEvents)),
@@ -105,7 +113,6 @@ export class EventEmitterService {
 
   private combineEvents(groupedEvents: OpEvent[]): OpEvent {
     if (groupedEvents.length <= 1) return groupedEvents[0];
-
     return groupedEvents.reduce((combinedEvent, event, index) => {
       const mergePropertyName = this.getMergePropertyName(event);
 
@@ -121,7 +128,11 @@ export class EventEmitterService {
 
   private getMergePropertyName(event: OpEvent): string {
     return match(event)
-      .with({ name: Events.TABLE_VIEW_CREATE }, () => 'view')
+      .with(
+        P.union({ name: Events.TABLE_VIEW_CREATE }, { name: Events.TABLE_VIEW_UPDATE }),
+        () => 'view'
+      )
+      .with({ name: Events.TABLE_VIEW_DELETE }, () => 'viewId')
       .with(
         P.union({ name: Events.TABLE_FIELD_CREATE }, { name: Events.TABLE_FIELD_UPDATE }),
         () => 'field'
@@ -149,7 +160,7 @@ export class EventEmitterService {
   }
 
   private handleEventResult(result: OpEvent): void {
-    this.logger.debug({ eventName: result.name, eventList: result });
+    // this.logger.debug({ eventName: result.name, eventList: result });
     this.emitAsync(result.name, result);
   }
 
@@ -181,7 +192,6 @@ export class EventEmitterService {
           opCreateData: rawOp.create?.data,
           ops: rawOp?.op,
         }) as OpEvent;
-
         const event = this.createEvent(docType, opType, {
           ...extendPlainContext,
           ...plainContext,
@@ -191,21 +201,27 @@ export class EventEmitterService {
           },
         });
 
-        event && this.mergeEventsForUpdate(eventManager, id, event);
+        if (event) {
+          this.mergeEventsForUpdate(eventManager, id, event);
+        }
       }
     }
   }
 
   private createExtendPlainContext(docId: string, id: string) {
     const user = this.cls.get('user');
+    const entry = this.cls.get('entry');
+    const recordRemovalReason = this.cls.get('recordRemovalReason');
     return {
       baseId: docId,
-      tableId: docId,
+      tableId: id.startsWith(IdPrefix.Table) ? id : docId,
       viewId: id,
       fieldId: id,
       recordId: id,
       context: {
-        user: user,
+        user,
+        entry,
+        recordRemovalReason,
       },
     };
   }
@@ -229,16 +245,31 @@ export class EventEmitterService {
       return;
     }
 
-    if (existingEvent.rawOpType === RawOpType.Create && event.name === Events.TABLE_RECORD_UPDATE) {
-      const fields = this.getUpdateFieldsFromEvent(event as RecordUpdateEvent);
+    const { rawOpType } = existingEvent;
+
+    if (
+      [RawOpType.Create, RawOpType.Edit].includes(rawOpType) &&
+      event.name === Events.TABLE_RECORD_UPDATE
+    ) {
+      const fields = this.getUpdateFieldsFromEvent(event as RecordUpdateEvent, rawOpType);
       event = this.combineUpdateEvents(existingEvent as RecordCreateEvent, fields);
     }
 
     eventManager.set(id, event);
   }
 
-  private getUpdateFieldsFromEvent(event: RecordUpdateEvent): { [key: string]: unknown } {
-    return Object.entries((event.payload.record as IChangeRecord).fields).reduce(
+  private getUpdateFieldsFromEvent(
+    event: RecordUpdateEvent,
+    existedRawOpType: RawOpType
+  ): { [key: string]: unknown } {
+    const { payload } = event;
+    const fields = (payload.record as IChangeRecord).fields;
+
+    if (existedRawOpType === RawOpType.Edit) {
+      return fields;
+    }
+
+    return Object.entries(fields).reduce(
       (acc, [key, value]) => {
         acc[key] = value.newValue;
         return acc;
@@ -257,7 +288,10 @@ export class EventEmitterService {
         ...existingEvent.payload,
         record: {
           ...existingEvent.payload.record,
-          fields,
+          fields: {
+            ...(existingEvent.payload.record as IRecord).fields,
+            ...fields,
+          },
         },
       },
     };
@@ -268,6 +302,12 @@ export class EventEmitterService {
     const { context, ...payload } = plain;
     const eventName = this.eventNameMapping[action]?.[docType];
     if (!eventName) return undefined;
+
+    const oldField = this.cls.get('oldField');
+
+    if (eventName === Events.TABLE_RECORD_UPDATE) {
+      payload.oldField = oldField;
+    }
 
     return match(docType)
       .with(IdPrefix.Table, () => TableEventFactory.create(eventName, payload, context))

@@ -1,0 +1,376 @@
+import { inject, injectable } from '@teable/v2-di';
+import { err, ok, safeTry } from 'neverthrow';
+import type { Result } from 'neverthrow';
+
+import { FieldKeyResolverService } from '../application/services/FieldKeyResolverService';
+import {
+  type IForeignTableLoaderService,
+  NullForeignTableLoaderService,
+} from '../application/services/ForeignTableLoaderService';
+import { type IRecordChangedValueDecoratorService } from '../application/services/RecordChangedValueDecoratorService';
+import { aggregateRecordCreatedEvents } from '../application/services/recordEventFieldValues';
+import { requireStoredRecordSnapshots } from '../application/services/RecordMutationSnapshotContract';
+import { RecordMutationSpecResolverService } from '../application/services/RecordMutationSpecResolverService';
+import {
+  preLeasePlan,
+  sharedRecordWritePlan,
+} from '../application/services/RecordWriteCoordinationPlan';
+import { RecordWritePluginRunner } from '../application/services/RecordWritePluginRunner';
+import { RecordWriteSideEffectService } from '../application/services/RecordWriteSideEffectService';
+import { RecordWriteUndoRedoPlanService } from '../application/services/RecordWriteUndoRedoPlanService';
+import { TableQueryService } from '../application/services/TableQueryService';
+import { TableUpdateFlow } from '../application/services/TableUpdateFlow';
+import {
+  toUndoRedoStackAppendContext,
+  UndoRedoStackService,
+} from '../application/services/UndoRedoStackService';
+import { withRecordWriteCoordination } from '../application/services/withRecordWriteCoordination';
+import type { DomainError } from '../domain/shared/DomainError';
+import type { IDomainEvent } from '../domain/shared/DomainEvent';
+import { FieldKeyType } from '../domain/table/fields/FieldKeyType';
+import type { FieldKeyMapping } from '../domain/table/records/RecordCreateResult';
+import { materializeRecordSpec } from '../domain/table/records/RecordSpecMaterializer';
+import type { TableRecord } from '../domain/table/records/TableRecord';
+import type { Table } from '../domain/table/Table';
+import { NoopRecordOrderColumnPreparer } from '../ports/defaults/NoopRecordOrderColumnPreparer';
+import { domainWrite, type IDomainWriteTransaction } from '../ports/DomainWriteTransaction';
+import * as ExecutionContextPort from '../ports/ExecutionContext';
+import type { IRecordOrderCalculator } from '../ports/RecordOrderCalculator';
+import type { IRecordOrderColumnPreparer } from '../ports/RecordOrderColumnPreparer';
+import { RecordWriteOperationKind } from '../ports/RecordWritePlugin';
+import * as TableRecordRepositoryPort from '../ports/TableRecordRepository';
+import {
+  NoopTableSchemaCoordination,
+  type ITableSchemaCoordination,
+} from '../ports/TableSchemaCoordination';
+import { v2CoreTokens } from '../ports/tokens';
+import { TraceSpan } from '../ports/TraceSpan';
+import { CommandHandler, type ICommandHandler } from './CommandHandler';
+import type { RecordFieldValues } from './CreateRecordCommand';
+import { CreateRecordsCommand } from './CreateRecordsCommand';
+import { buildOperationBatchMutation } from './shared/batchMutationOrchestration';
+
+export class CreateRecordsResult {
+  private constructor(
+    readonly records: ReadonlyArray<TableRecord>,
+    readonly events: ReadonlyArray<IDomainEvent>,
+    readonly fieldKeyMapping: FieldKeyMapping,
+    readonly computedChangesByRecord?: ReadonlyMap<string, ReadonlyMap<string, unknown>>
+  ) {}
+
+  static create(
+    records: ReadonlyArray<TableRecord>,
+    events: ReadonlyArray<IDomainEvent>,
+    fieldKeyMapping: FieldKeyMapping = new Map(),
+    computedChangesByRecord?: ReadonlyMap<string, ReadonlyMap<string, unknown>>
+  ): CreateRecordsResult {
+    return new CreateRecordsResult(
+      [...records],
+      [...events],
+      fieldKeyMapping,
+      computedChangesByRecord
+    );
+  }
+}
+
+@CommandHandler(CreateRecordsCommand)
+@injectable()
+export class CreateRecordsHandler implements ICommandHandler<
+  CreateRecordsCommand,
+  CreateRecordsResult
+> {
+  constructor(
+    @inject(v2CoreTokens.tableQueryService)
+    private readonly tableQueryService: TableQueryService,
+    @inject(v2CoreTokens.tableRecordRepository)
+    private readonly tableRecordRepository: TableRecordRepositoryPort.ITableRecordRepository,
+    @inject(v2CoreTokens.recordMutationSpecResolverService)
+    private readonly recordMutationSpecResolver: RecordMutationSpecResolverService,
+    @inject(v2CoreTokens.recordChangedValueDecoratorService)
+    private readonly recordChangedValueDecoratorService: IRecordChangedValueDecoratorService,
+    @inject(v2CoreTokens.recordWritePluginRunner)
+    private readonly recordWritePluginRunner: RecordWritePluginRunner,
+    @inject(v2CoreTokens.recordWriteSideEffectService)
+    private readonly recordWriteSideEffectService: RecordWriteSideEffectService,
+    @inject(v2CoreTokens.recordWriteUndoRedoPlanService)
+    private readonly recordWriteUndoRedoPlanService: RecordWriteUndoRedoPlanService,
+    @inject(v2CoreTokens.tableUpdateFlow)
+    private readonly tableUpdateFlow: TableUpdateFlow,
+    @inject(v2CoreTokens.domainWriteTransaction)
+    private readonly domainWriteTransaction: IDomainWriteTransaction,
+    @inject(v2CoreTokens.undoRedoService)
+    private readonly undoRedoStackService: UndoRedoStackService,
+    @inject(v2CoreTokens.foreignTableLoaderService)
+    private readonly foreignTableLoaderService: IForeignTableLoaderService = new NullForeignTableLoaderService(),
+    @inject(v2CoreTokens.recordOrderCalculator)
+    private readonly recordOrderCalculator?: IRecordOrderCalculator,
+    @inject(v2CoreTokens.tableSchemaCoordination)
+    private readonly tableSchemaCoordination: ITableSchemaCoordination = new NoopTableSchemaCoordination(),
+    @inject(v2CoreTokens.recordOrderColumnPreparer)
+    private readonly orderColumnPreparer: IRecordOrderColumnPreparer = new NoopRecordOrderColumnPreparer()
+  ) {}
+
+  @TraceSpan()
+  async handle(
+    context: ExecutionContextPort.IExecutionContext,
+    command: CreateRecordsCommand
+  ): Promise<Result<CreateRecordsResult, DomainError>> {
+    const preparation = await this.prepareOrder(context, command);
+    if (preparation.isErr()) return err(preparation.error);
+    const orderColumnPrepared = preparation.value;
+    return withRecordWriteCoordination({
+      context,
+      tableId: command.tableId,
+      coordination: this.tableSchemaCoordination,
+      initialPlan:
+        command.order && !orderColumnPrepared
+          ? preLeasePlan({ hasOrder: true })
+          : sharedRecordWritePlan,
+      loadTable: () => this.tableQueryService.getById(context, command.tableId),
+      planForTable: (table) =>
+        this.recordWriteSideEffectService.planCreateCoordination(context, table, {
+          recordsFieldValues: command.recordsFieldValues,
+          fieldKeyType: command.fieldKeyType,
+          typecast: command.typecast,
+          // Row-limit plugins truncate this batch after planning, so an
+          // inconclusive probe must reload metadata instead of staying shared.
+          conservativeOnProbeError: true,
+        }),
+      execute: (table) => this.executeCreateRecords(context, command, table, orderColumnPrepared),
+    });
+  }
+
+  /**
+   * T8080: prepare the view row-order column on the request's
+   * non-transactional context before the coordination lease. The wrapper
+   * reloads metadata under the shared lease on purpose, so the probe decides on
+   * state the lease protects; ordered creates therefore read metadata once
+   * here and once for the write.
+   */
+  private async prepareOrder(
+    context: ExecutionContextPort.IExecutionContext,
+    command: CreateRecordsCommand
+  ): Promise<Result<boolean, DomainError>> {
+    if (!command.order) return ok(false);
+
+    const table = await this.tableQueryService.getById(context, command.tableId);
+    if (table.isErr()) return err(table.error);
+    return this.orderColumnPreparer.prepareOrderColumn(context, table.value, command.order.viewId);
+  }
+
+  private async executeCreateRecords(
+    context: ExecutionContextPort.IExecutionContext,
+    command: CreateRecordsCommand,
+    table: Table,
+    orderColumnPrepared: boolean
+  ): Promise<Result<CreateRecordsResult, DomainError>> {
+    const handler = this; // NOSONAR typescript:S7740 -- generator functions cannot be arrow functions, so `this` must be captured
+    return safeTry<CreateRecordsResult, DomainError>(async function* () {
+      // Resolve field keys to field IDs if using name or dbFieldName
+      const fieldKeyResolutionContext = FieldKeyResolverService.createResolutionContext(
+        table,
+        command.fieldKeyType
+      );
+      const resolvedRecordsFieldValues: RecordFieldValues[] = [];
+      for (const recordFieldValues of command.recordsFieldValues) {
+        const resolvedFields = yield* FieldKeyResolverService.resolveFieldKeysWithContext(
+          fieldKeyResolutionContext,
+          Object.fromEntries(recordFieldValues)
+        );
+        resolvedRecordsFieldValues.push(new Map(Object.entries(resolvedFields)));
+      }
+      const pluginExecution = yield* await handler.recordWritePluginRunner.prepare({
+        kind: RecordWriteOperationKind.createMany,
+        executionContext: context,
+        table,
+        payload: {
+          recordsFieldValues: resolvedRecordsFieldValues,
+          fieldKeyType: command.fieldKeyType,
+          typecast: command.typecast,
+          order: command.order,
+          recordCount: resolvedRecordsFieldValues.length,
+          isolateRowOverflow: true,
+        },
+        isTransactionBound: false,
+      });
+      yield* await pluginExecution.guard();
+
+      const sideEffectResult = yield* handler.recordWriteSideEffectService.execute(
+        context,
+        table,
+        resolvedRecordsFieldValues,
+        command.typecast
+      );
+      const tableForCreate = sideEffectResult.table;
+      const tableUpdateResult = sideEffectResult.updateResult;
+      const sideEffectUndoRedoPlan =
+        yield* await handler.recordWriteUndoRedoPlanService.captureSelectOptionSideEffects(
+          context,
+          table,
+          tableForCreate,
+          sideEffectResult.effects
+        );
+
+      // 2. Create all records (validates and applies field values internally)
+      const {
+        records: createdRecords,
+        fieldKeyMapping,
+        mutateSpecs,
+      } = yield* tableForCreate.createRecords(resolvedRecordsFieldValues, {
+        typecast: command.typecast,
+        source: command.source,
+      });
+
+      // 3. Resolve values that require external lookups (user/link)
+      const records: TableRecord[] = [];
+      for (let i = 0; i < createdRecords.length; i++) {
+        let record = createdRecords[i]!;
+        const mutateSpec = mutateSpecs[i];
+        if (mutateSpec) {
+          const needsResolution =
+            yield* handler.recordMutationSpecResolver.needsResolution(mutateSpec);
+          if (needsResolution) {
+            const resolvedSpec = yield* await handler.recordMutationSpecResolver.resolveAndReplace(
+              context,
+              tableForCreate.id(),
+              mutateSpec
+            );
+            // Re-apply the resolved spec to get the correct record values
+            record = yield* materializeRecordSpec({
+              id: record.id(),
+              tableId: record.tableId(),
+              spec: resolvedSpec,
+              baseFields: record.fields().entries(),
+            });
+          }
+        }
+        records.push(record);
+      }
+
+      // Build extended field key mapping that includes all fields (including computed fields)
+      // This ensures computed field values can be keyed by field name when fieldKeyType is 'name'
+      let extendedFieldKeyMapping: FieldKeyMapping = new Map(fieldKeyMapping);
+      if (command.fieldKeyType !== FieldKeyType.Id) {
+        extendedFieldKeyMapping = new Map();
+        for (const field of tableForCreate.getFields()) {
+          const fieldIdStr = field.id().toString();
+          const key = FieldKeyResolverService.getFieldKey(field, command.fieldKeyType);
+          extendedFieldKeyMapping.set(fieldIdStr, key);
+        }
+      }
+
+      // Legacy hosts without a real order-column preparer keep the original
+      // pre-transaction preparation, including its row-order compaction.
+      if (command.order && !orderColumnPrepared && handler.recordOrderCalculator) {
+        yield* await handler.recordOrderCalculator.calculateOrders(
+          context,
+          tableForCreate,
+          command.order.viewId,
+          command.order.anchorId,
+          command.order.position,
+          records.length
+        );
+      }
+      // 4. Persist all records within a transaction
+      const committed = yield* await handler.domainWriteTransaction.execute(
+        context,
+        async (transactionContext) => {
+          return safeTry(async function* () {
+            const batchMutation = buildOperationBatchMutation(context.requestId, records.length);
+            let tableEvents: ReadonlyArray<IDomainEvent> = [];
+            if (tableUpdateResult) {
+              const tableFlowResult = yield* await handler.tableUpdateFlow.execute(
+                transactionContext,
+                { table },
+                () => ok(tableUpdateResult),
+                { publishEvents: false }
+              );
+              tableEvents = tableFlowResult.events;
+            }
+            yield* await pluginExecution.beforePersist(transactionContext);
+            const fillLinkTitleForeignTables = command.typecast
+              ? yield* await handler.foreignTableLoaderService.loadForLinkTitleFill(
+                  transactionContext,
+                  mutateSpecs
+                )
+              : new Map();
+            const mutation = yield* await handler.tableRecordRepository.insertMany(
+              transactionContext,
+              tableForCreate,
+              records,
+              {
+                orchestration: batchMutation,
+                ...(command.order ? { order: command.order } : {}),
+                ...(command.typecast ? { fillLinkTitles: true } : {}),
+                ...(fillLinkTitleForeignTables.size > 0 ? { fillLinkTitleForeignTables } : {}),
+              }
+            );
+            const decoratedChangedFieldsByRecord =
+              yield* await handler.recordChangedValueDecoratorService.decorateChangedFieldsByRecord(
+                tableForCreate,
+                mutation.changedFieldsByRecord
+              );
+            const events = aggregateRecordCreatedEvents({
+              events: tableForCreate.pullDomainEvents(),
+              mutationResult: mutation,
+              decoratedChangedFieldsByRecord,
+              orchestration: batchMutation,
+            });
+            const mergedEvents = [...tableEvents, ...events];
+            if (mergedEvents.length === 0) {
+              return ok(
+                domainWrite.unchanged({
+                  mutation,
+                  tableEvents,
+                  events,
+                })
+              );
+            }
+            return ok(
+              domainWrite.changed(
+                {
+                  mutation,
+                  tableEvents,
+                  events,
+                },
+                mergedEvents as [IDomainEvent, ...IDomainEvent[]],
+                { tables: [tableForCreate] }
+              )
+            );
+          });
+        }
+      );
+
+      const mutationResult = committed.value;
+      const mergedEvents = committed.events;
+      const storedSnapshots = yield* requireStoredRecordSnapshots(
+        {
+          operation: 'create',
+          tableId: table.id().toString(),
+          expectedCount: records.length,
+        },
+        mutationResult.mutation.recordSnapshots
+      );
+
+      yield* await handler.undoRedoStackService.appendRecordCreate(
+        toUndoRedoStackAppendContext(context),
+        {
+          tableId: table.id(),
+          createdRecords: storedSnapshots,
+          undoCommandsAfter: sideEffectUndoRedoPlan.undoCommands,
+          redoCommandsBefore: sideEffectUndoRedoPlan.redoCommands,
+        }
+      );
+      await pluginExecution.afterCommit();
+
+      return ok(
+        CreateRecordsResult.create(
+          records,
+          mergedEvents,
+          extendedFieldKeyMapping,
+          mutationResult.mutation.computedChangesByRecord
+        )
+      );
+    });
+  }
+}

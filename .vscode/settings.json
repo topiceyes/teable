@@ -5,6 +5,7 @@
     "COUNTALL",
     "DATETIME",
     "gantt",
+    "ILIKE",
     "Localstorage",
     "minio",
     "nextjs",
@@ -21,14 +22,20 @@
     "teableio",
     "testid",
     "topo",
+    "trgm",
+    "umami",
+    "univer",
     "zustand"
   ],
-  "eslint.workingDirectories": [
-    {
-      "pattern": "./apps/*/"
-    },
-    {
-      "pattern": "./packages/*/"
-    }
-  ]
+  "editor.defaultFormatter": "oxc.oxc-vscode",
+  "editor.formatOnSave": true,
+  "editor.codeActionsOnSave": {
+    "source.fixAll.oxc": "explicit"
+  },
+  "vitest.maximumConfigs": 50,
+  "vitest.nodeEnv": {
+    "DOCKER_HOST": "unix:///Users/nichenqin/.colima/default/docker.sock",
+    "TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE": "/var/run/docker.sock",
+    "TESTCONTAINERS_HOST_OVERRIDE": "127.0.0.1"
+  }
 }

@@ -1,32 +1,12 @@
 import { pullAll } from 'lodash';
-import type { FieldCore } from '../field';
 import { CellValueType, FieldType } from '../field';
-import { NoneFunc, StatisticsFunc } from './statistics-func.enum';
+import { StatisticsFunc } from './statistics-func.enum';
 
-export const statisticFunc2NameMap = {
-  [NoneFunc.None]: 'None',
-  [StatisticsFunc.Empty]: 'Empty',
-  [StatisticsFunc.Filled]: 'Filled',
-  [StatisticsFunc.Unique]: 'Unique',
-  [StatisticsFunc.Max]: 'Max',
-  [StatisticsFunc.Min]: 'Min',
-  [StatisticsFunc.Sum]: 'Sum',
-  [StatisticsFunc.Average]: 'Average',
-  [StatisticsFunc.Checked]: 'Checked',
-  [StatisticsFunc.UnChecked]: 'Unchecked',
-  [StatisticsFunc.PercentEmpty]: 'Percent Empty',
-  [StatisticsFunc.PercentFilled]: 'Percent Filled',
-  [StatisticsFunc.PercentUnique]: 'Percent Unique',
-  [StatisticsFunc.PercentChecked]: 'Percent Checked',
-  [StatisticsFunc.PercentUnChecked]: 'Percent Unchecked',
-  [StatisticsFunc.EarliestDate]: 'Earliest Date',
-  [StatisticsFunc.LatestDate]: 'Latest Date',
-  [StatisticsFunc.DateRangeOfDays]: 'Date Range (days)',
-  [StatisticsFunc.DateRangeOfMonths]: 'Date Range (months)',
-  [StatisticsFunc.TotalAttachmentSize]: 'Total Attachment Size',
-};
-
-export const getValidStatisticFunc = (field?: FieldCore): StatisticsFunc[] => {
+export const getValidStatisticFunc = (field?: {
+  type: FieldType;
+  cellValueType: CellValueType;
+  isMultipleCellValue?: boolean;
+}): StatisticsFunc[] => {
   let statisticSet: StatisticsFunc[] = [];
   if (!field) {
     return statisticSet;
@@ -36,6 +16,7 @@ export const getValidStatisticFunc = (field?: FieldCore): StatisticsFunc[] => {
 
   if (type === FieldType.Link) {
     statisticSet = [
+      StatisticsFunc.Count,
       StatisticsFunc.Empty,
       StatisticsFunc.Filled,
       StatisticsFunc.PercentEmpty,
@@ -46,13 +27,14 @@ export const getValidStatisticFunc = (field?: FieldCore): StatisticsFunc[] => {
 
   if ([FieldType.User, FieldType.CreatedBy, FieldType.LastModifiedBy].includes(type)) {
     statisticSet = [
+      StatisticsFunc.Count,
       StatisticsFunc.Empty,
       StatisticsFunc.Filled,
       StatisticsFunc.PercentEmpty,
       StatisticsFunc.PercentFilled,
     ];
     if (!isMultipleCellValue) {
-      statisticSet.splice(2, 0, StatisticsFunc.Unique);
+      statisticSet.splice(3, 0, StatisticsFunc.Unique);
       statisticSet.push(StatisticsFunc.PercentUnique);
     }
     return statisticSet;
@@ -61,6 +43,7 @@ export const getValidStatisticFunc = (field?: FieldCore): StatisticsFunc[] => {
   switch (cellValueType) {
     case CellValueType.String: {
       statisticSet = [
+        StatisticsFunc.Count,
         StatisticsFunc.Empty,
         StatisticsFunc.Filled,
         StatisticsFunc.Unique,
@@ -76,6 +59,7 @@ export const getValidStatisticFunc = (field?: FieldCore): StatisticsFunc[] => {
         StatisticsFunc.Average,
         StatisticsFunc.Min,
         StatisticsFunc.Max,
+        StatisticsFunc.Count,
         StatisticsFunc.Empty,
         StatisticsFunc.Filled,
         StatisticsFunc.Unique,
@@ -87,6 +71,7 @@ export const getValidStatisticFunc = (field?: FieldCore): StatisticsFunc[] => {
     }
     case CellValueType.DateTime: {
       statisticSet = [
+        StatisticsFunc.Count,
         StatisticsFunc.Empty,
         StatisticsFunc.Filled,
         StatisticsFunc.Unique,
@@ -102,6 +87,7 @@ export const getValidStatisticFunc = (field?: FieldCore): StatisticsFunc[] => {
     }
     case CellValueType.Boolean: {
       statisticSet = [
+        StatisticsFunc.Count,
         StatisticsFunc.Checked,
         StatisticsFunc.UnChecked,
         StatisticsFunc.PercentChecked,

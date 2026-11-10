@@ -1,25 +1,51 @@
 import type { RouteConfig } from '@asteasolutions/zod-to-openapi';
-import { spaceRolesSchema } from '@teable/core';
 import { axios } from '../axios';
 import { registerRoute, urlBuilder } from '../utils';
 import { z } from '../zod';
+import type { CollaboratorItem, DepartmentCollaboratorItem, UserCollaboratorItem } from './types';
+import { collaboratorItem, PrincipalType } from './types';
 
 export const SPACE_COLLABORATE_LIST = '/space/{spaceId}/collaborators';
 
-export const itemSpaceCollaboratorSchema = z.object({
-  userId: z.string(),
-  userName: z.string(),
-  email: z.string(),
-  role: spaceRolesSchema,
-  avatar: z.string().nullable(),
-  createdTime: z.string(),
+export const listSpaceCollaboratorRoSchema = z.object({
+  includeSystem: z.coerce.boolean().optional(),
+  includeBase: z.coerce.boolean().optional(),
+  skip: z.coerce.number().optional(),
+  take: z.coerce.number().optional(),
+  search: z.string().optional(),
+  type: z.enum(PrincipalType).optional(),
+  orderBy: z.enum(['desc', 'asc']).optional(),
+  // Restrict rows to one principal, e.g. to expand a grouped collaborator's permissions
+  principalId: z.string().optional(),
 });
 
-export type ItemSpaceCollaboratorVo = z.infer<typeof itemSpaceCollaboratorSchema>;
+export type ListSpaceCollaboratorRo = z.infer<typeof listSpaceCollaboratorRoSchema>;
 
-export const listSpaceCollaboratorVoSchema = z.array(itemSpaceCollaboratorSchema);
+export type ItemSpaceCollaboratorVo = z.infer<typeof collaboratorItem>;
+
+export const listSpaceCollaboratorVoSchema = z.object({
+  collaborators: z.array(collaboratorItem),
+  uniqTotal: z.number(),
+  total: z.number(),
+});
 
 export type ListSpaceCollaboratorVo = z.infer<typeof listSpaceCollaboratorVoSchema>;
+
+type GetFilteredCollaborator<T extends { type?: PrincipalType }> = T extends {
+  type: PrincipalType.User;
+}
+  ? Extract<UserCollaboratorItem, { type: PrincipalType.User }>
+  : T extends { type: PrincipalType.Department }
+    ? Extract<DepartmentCollaboratorItem, { type: PrincipalType.Department }>
+    : CollaboratorItem;
+
+export type IGetCollaboratorsResponse<T extends { type?: PrincipalType } = object> = Omit<
+  ListSpaceCollaboratorVo,
+  'collaborators'
+> & {
+  collaborators: GetFilteredCollaborator<T>[];
+  total: number;
+};
 
 export const ListSpaceCollaboratorRoute: RouteConfig = registerRoute({
   method: 'get',
@@ -29,6 +55,7 @@ export const ListSpaceCollaboratorRoute: RouteConfig = registerRoute({
     params: z.object({
       spaceId: z.string(),
     }),
+    query: listSpaceCollaboratorRoSchema,
   },
   responses: {
     200: {
@@ -43,10 +70,16 @@ export const ListSpaceCollaboratorRoute: RouteConfig = registerRoute({
   tags: ['space'],
 });
 
-export const getSpaceCollaboratorList = async (spaceId: string) => {
-  return axios.get<ListSpaceCollaboratorVo>(
+export const getSpaceCollaboratorList = async <T extends ListSpaceCollaboratorRo>(
+  spaceId: string,
+  query?: ListSpaceCollaboratorRo
+) => {
+  return axios.get<IGetCollaboratorsResponse<T>>(
     urlBuilder(SPACE_COLLABORATE_LIST, {
       spaceId,
-    })
+    }),
+    {
+      params: query,
+    }
   );
 };

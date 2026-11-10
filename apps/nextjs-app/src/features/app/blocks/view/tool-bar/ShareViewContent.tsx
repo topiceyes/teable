@@ -1,0 +1,535 @@
+import { useMutation } from '@tanstack/react-query';
+import { generateSharePassword, type IShareViewMeta, ViewType } from '@teable/core';
+import { Copy, RefreshCcw, Qrcode } from '@teable/icons';
+import { ShortLinkType } from '@teable/openapi';
+import { useTablePermission, useView } from '@teable/sdk/hooks';
+import type { View } from '@teable/sdk/model';
+import {
+  Button,
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+  Input,
+  Label,
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+  RadioGroup,
+  RadioGroupItem,
+  Separator,
+  Switch,
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@teable/ui-lib';
+import { omit } from 'lodash';
+import { Check, ChevronDown, ChevronRight, Eye } from 'lucide-react';
+import { useTranslation } from 'next-i18next';
+import { QRCodeSVG } from 'qrcode.react';
+import { useEffect, useMemo, useState } from 'react';
+import { CopyButton } from '@/features/app/components/CopyButton';
+import { SharePasswordReveal } from '@/features/app/components/SharePasswordReveal';
+import { useOrigin } from '@/features/app/hooks/useOrigin';
+import { useShortLink } from '@/features/app/hooks/useShortLink';
+import { tableConfig } from '@/features/i18n/table.config';
+import { ShareLinkScopeSettings } from './ShareLinkScopeSettings';
+
+const getShareUrl = ({
+  origin,
+  shareId,
+  theme,
+  hideToolBar,
+}: {
+  origin: string;
+  shareId: string;
+  theme?: string;
+  hideToolBar?: boolean;
+}) => {
+  const url = new URL(`/share/${shareId}/view`, origin);
+  if (theme && theme !== 'system') {
+    url.searchParams.append('theme', theme);
+  }
+  if (hideToolBar) {
+    url.searchParams.append('hideToolBar', 'true');
+  }
+  return url.toString();
+};
+
+const getEmbedUrl = (shareUrl: string) => {
+  const url = new URL(shareUrl);
+  url.searchParams.append('embed', 'true');
+  return url.toString();
+};
+
+const getEmbedHtml = (shareUrl: string) => {
+  const embedUrl = getEmbedUrl(shareUrl);
+  return `<iframe src="${embedUrl}" width="100%" height="533" style="border: 0"></iframe>`;
+};
+
+const EmbedConfigPopover = ({
+  shareUrl,
+  hideToolBar,
+  setHideToolBar,
+  shareTheme,
+  setShareTheme,
+  needEmbedHiddenToolbar,
+}: {
+  shareUrl: string;
+  hideToolBar?: boolean;
+  setHideToolBar: (v: boolean) => void;
+  shareTheme: string;
+  setShareTheme: (v: string) => void;
+  needEmbedHiddenToolbar: boolean;
+}) => {
+  const { t } = useTranslation(tableConfig.i18nNamespaces);
+  const [previewOpen, setPreviewOpen] = useState(false);
+
+  const embedHtml = getEmbedHtml(shareUrl);
+
+  const handleCopyCode = () => {
+    navigator.clipboard.writeText(embedHtml);
+  };
+
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <Button
+          variant="ghost"
+          className="-mx-2 flex w-[calc(100%+16px)] items-center justify-between px-2 py-1 data-[state=open]:bg-accent data-[state=open]:text-accent-foreground"
+        >
+          <Label className="cursor-pointer text-sm font-normal">
+            {t('table:baseShare.embedConfig')}
+          </Label>
+          <ChevronRight className="size-4 text-muted-foreground" />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent
+        side="right"
+        align="start"
+        collisionPadding={24}
+        className="max-h-[var(--radix-popover-content-available-height)] w-80 overflow-y-auto"
+      >
+        <div className="mb-3 rounded-md border bg-muted p-3">
+          <code className="break-all text-xs">{embedHtml}</code>
+        </div>
+
+        <div className="flex gap-2">
+          <Dialog open={previewOpen} onOpenChange={setPreviewOpen}>
+            <Button
+              variant="outline"
+              size="sm"
+              className="flex-1"
+              onClick={() => setPreviewOpen(true)}
+            >
+              <Eye className="me-1 size-4" />
+              {t('table:toolbar.others.share.embedPreview')}
+            </Button>
+            <DialogContent className="sm:max-w-[425px] md:max-w-[600px] lg:max-w-[800px]">
+              <DialogHeader>
+                <DialogTitle>{t('table:toolbar.others.share.embedPreview')}</DialogTitle>
+              </DialogHeader>
+              <div className="h-[500px] overflow-hidden rounded-lg border">
+                <iframe
+                  src={getEmbedUrl(shareUrl)}
+                  title="embed view"
+                  width="100%"
+                  height="100%"
+                  style={{ border: 0 }}
+                />
+              </div>
+            </DialogContent>
+          </Dialog>
+          <Button variant="outline" size="sm" className="flex-1" onClick={handleCopyCode}>
+            <Copy className="me-1 size-4" />
+            {t('table:toolbar.others.share.copyCode')}
+          </Button>
+        </div>
+
+        <Separator className="my-3" />
+
+        <div className="space-y-3">
+          <p className="text-xs text-muted-foreground">
+            {t('table:toolbar.others.share.URLSettingDescription')}
+          </p>
+
+          {needEmbedHiddenToolbar && (
+            <div className="flex items-center gap-2">
+              <Label className="text-xs" htmlFor="embed-hideToolBar">
+                {t('table:toolbar.others.share.hideToolbar')}
+              </Label>
+              <Switch
+                size="sm"
+                id="embed-hideToolBar"
+                checked={hideToolBar}
+                onCheckedChange={(checked) => setHideToolBar(checked)}
+              />
+            </div>
+          )}
+
+          <div className="flex flex-col gap-2">
+            <Label className="text-xs">{t('common:settings.setting.theme')}</Label>
+            <RadioGroup
+              className="flex flex-wrap gap-3"
+              defaultValue={shareTheme}
+              onValueChange={(e) => setShareTheme(e)}
+            >
+              <div className="flex items-center space-x-2 rtl:space-x-reverse">
+                <RadioGroupItem value="system" id="embed-r1" />
+                <Label className="text-xs font-normal" htmlFor="embed-r1">
+                  {t('common:settings.setting.system')}
+                </Label>
+              </div>
+              <div className="flex items-center space-x-2 rtl:space-x-reverse">
+                <RadioGroupItem value="light" id="embed-r2" />
+                <Label className="text-xs font-normal" htmlFor="embed-r2">
+                  {t('common:settings.setting.light')}
+                </Label>
+              </div>
+              <div className="flex items-center space-x-2 rtl:space-x-reverse">
+                <RadioGroupItem value="dark" id="embed-r3" />
+                <Label className="text-xs font-normal" htmlFor="embed-r3">
+                  {t('common:settings.setting.dark')}
+                </Label>
+              </div>
+            </RadioGroup>
+          </div>
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
+};
+
+export const ShareViewContent: React.FC = () => {
+  const view = useView();
+  const { t } = useTranslation(tableConfig.i18nNamespaces);
+  const permission = useTablePermission();
+
+  const [revealedPassword, setRevealedPassword] = useState<string>();
+  const [shareTheme, setShareTheme] = useState<string>('system');
+  const [hideToolBar, setHideToolBar] = useState<boolean>();
+
+  // Optimistic toggle state: overrides view.enableShare until ShareDB syncs
+  const [optimisticEnabled, setOptimisticEnabled] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    // Reset optimistic override once ShareDB syncs the real state
+    setOptimisticEnabled(null);
+  }, [view?.enableShare]);
+
+  const { mutate: enableShareFn, isPending: enableShareLoading } = useMutation({
+    mutationFn: async (view: View) => view.apiEnableShare(),
+    onSuccess: () => setOptimisticEnabled(true),
+  });
+
+  const { mutate: disableShareFn, isPending: disableShareLoading } = useMutation({
+    mutationFn: async (view: View) => view.disableShare(),
+    onSuccess: () => setOptimisticEnabled(false),
+  });
+
+  const { mutate: saveSharePassword, isPending: isSavingPassword } = useMutation({
+    mutationFn: ({ view, password }: { view: View; password: string }) =>
+      view.setShareMeta({ ...view.shareMeta, password }),
+    // setShareMeta already reports failures through requestWrap
+    meta: { preventGlobalError: true },
+  });
+
+  const origin = useOrigin();
+  const shareUrl = useMemo(() => {
+    return view?.shareId && origin
+      ? getShareUrl({ origin, shareId: view?.shareId, theme: shareTheme, hideToolBar })
+      : undefined;
+  }, [origin, view?.shareId, shareTheme, hideToolBar]);
+
+  const shareEnabled = optimisticEnabled ?? view?.enableShare;
+  const { shortUrl, isFallback } = useShortLink(
+    shareEnabled && view?.shareId
+      ? { type: ShortLinkType.ViewShare, resourceId: view.shareId }
+      : undefined
+  );
+  // Prefer the short URL for display/copy/QR code; extra params (theme, hideToolBar)
+  // are forwarded to the target path when the short link redirects.
+  // Only fall back to the long URL when short link creation failed
+  // (empty while loading to avoid a flash of the long URL).
+  const displayShareUrl = useMemo(() => {
+    if (!shortUrl) {
+      return isFallback ? shareUrl : undefined;
+    }
+    const url = new URL(shortUrl);
+    if (shareTheme && shareTheme !== 'system') {
+      url.searchParams.append('theme', shareTheme);
+    }
+    if (hideToolBar) {
+      url.searchParams.append('hideToolBar', 'true');
+    }
+    return url.toString();
+  }, [shortUrl, isFallback, shareUrl, shareTheme, hideToolBar]);
+
+  if (!view) {
+    return null;
+  }
+
+  const { shareMeta } = view;
+  const enableShare = optimisticEnabled ?? view.enableShare;
+
+  const setShareMeta = (shareMeta: IShareViewMeta) => {
+    view.setShareMeta({ ...view.shareMeta, ...shareMeta });
+  };
+
+  const setEnableShare = (enableShare: boolean) => {
+    if (!view) {
+      return;
+    }
+    if (enableShare) {
+      return enableShareFn(view);
+    }
+    disableShareFn(view);
+  };
+
+  const savePassword = (password: string) => {
+    saveSharePassword({ view, password }, { onSuccess: () => setRevealedPassword(password) });
+  };
+
+  const onPasswordSwitchChange = (check: boolean) => {
+    if (check) {
+      savePassword(generateSharePassword());
+      return;
+    }
+    setRevealedPassword(undefined);
+    view.setShareMeta(omit(view.shareMeta, 'password'));
+  };
+
+  const onSubmitRequireLoginChange = (check: boolean) => {
+    setShareMeta({ submit: { ...shareMeta?.submit, requireLogin: check } });
+  };
+
+  const needConfigCopy = [ViewType.Grid].includes(view.type);
+  const needConfigIncludeHiddenField = [ViewType.Grid].includes(view.type);
+  const needConfigAllowEdit = [
+    ViewType.Grid,
+    ViewType.Kanban,
+    ViewType.Gallery,
+    ViewType.Calendar,
+  ].includes(view.type);
+  const needConfigRequireLogin = [ViewType.Form].includes(view.type);
+  const needEmbedHiddenToolbar = ![ViewType.Form].includes(view.type);
+
+  const canManageShare = Boolean(permission['view|share']);
+
+  const permissionOptions = needConfigAllowEdit
+    ? [
+        {
+          active: !shareMeta?.allowEdit,
+          label: t('table:baseShare.linkHolderCanView'),
+          desc: t('table:baseShare.viewLinkHolderCanViewDesc'),
+          onClick: () => setShareMeta({ allowEdit: false }),
+        },
+        {
+          active: Boolean(shareMeta?.allowEdit),
+          label: t('table:baseShare.linkHolderCanEdit'),
+          desc: t('table:baseShare.viewLinkHolderCanEditDesc'),
+          onClick: () => setShareMeta({ allowEdit: true }),
+        },
+      ]
+    : [];
+  const activePermission = permissionOptions.find((o) => o.active);
+
+  return (
+    <div className="flex w-full flex-col gap-4 py-4">
+      <div className="flex items-center gap-2">
+        {canManageShare ? (
+          <Switch
+            id="share-view-switch"
+            checked={enableShare}
+            disabled={enableShareLoading || disableShareLoading}
+            onCheckedChange={setEnableShare}
+          />
+        ) : (
+          <TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                {/* Focusable so keyboard users can reach the tooltip; the disabled switch itself can't take focus */}
+                {/* eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex */}
+                <span className="inline-flex items-center" tabIndex={0}>
+                  <Switch id="share-view-switch" checked={enableShare} disabled />
+                </span>
+              </TooltipTrigger>
+              <TooltipContent side="bottom">
+                <p>{t('common:baseShare.noPermissionTip')}</p>
+              </TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+        )}
+        <Label htmlFor="share-view-switch" className="text-sm">
+          {t('table:toolbar.others.share.statusLabel')}
+        </Label>
+      </div>
+      {enableShare ? (
+        <>
+          <div className="flex flex-col gap-2">
+            {needConfigAllowEdit && activePermission && (
+              <div className="flex items-center gap-1.5 text-sm">
+                <span className="text-muted-foreground">
+                  {t('table:baseShare.linkHolderLabel')}
+                </span>
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild disabled={!canManageShare}>
+                    <button
+                      disabled={!canManageShare}
+                      className="inline-flex items-center gap-0.5 font-medium text-blue-500 hover:text-blue-600 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {activePermission.label}
+                      <ChevronDown className="size-3.5" />
+                    </button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="start" className="w-64">
+                    {permissionOptions.map((item) => (
+                      <DropdownMenuItem
+                        key={item.label}
+                        className={item.active ? 'font-medium' : ''}
+                        onClick={item.onClick}
+                      >
+                        <div className="flex items-start gap-1.5">
+                          {item.active ? (
+                            <Check className="mt-0.5 size-4 shrink-0" />
+                          ) : (
+                            <span className="mt-0.5 size-4 shrink-0" />
+                          )}
+                          <div className="flex flex-col gap-1">
+                            <span>{item.label}</span>
+                            <span className="text-xs font-normal text-muted-foreground">
+                              {item.desc}
+                            </span>
+                          </div>
+                        </div>
+                      </DropdownMenuItem>
+                    ))}
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </div>
+            )}
+            <ShareLinkScopeSettings />
+            <div className="flex items-center gap-2">
+              <Input className="min-w-0 flex-1" id="share-link" value={displayShareUrl} readOnly />
+              <CopyButton
+                text={displayShareUrl as string}
+                variant="outline"
+                size="icon-sm"
+                className="shrink-0"
+              />
+              <Popover>
+                <PopoverTrigger asChild>
+                  <Button variant="outline" size="icon-sm" className="shrink-0">
+                    <Qrcode className="size-4 shrink-0" />
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent className="size-48 bg-white p-2">
+                  {displayShareUrl && <QRCodeSVG value={displayShareUrl} className="size-full" />}
+                </PopoverContent>
+              </Popover>
+              <TooltipProvider>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="outline"
+                      size="icon-sm"
+                      className="shrink-0"
+                      disabled={!canManageShare}
+                      onClick={() => view.setRefreshLink()}
+                    >
+                      <RefreshCcw className="size-4 shrink-0" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom">
+                    <p>{t('table:toolbar.others.share.genLink')}</p>
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+            </div>
+          </div>
+          <Separator />
+
+          <div className="flex flex-col gap-3">
+            <Label className="text-sm font-medium">{t('table:baseShare.advanced')}</Label>
+
+            {needConfigCopy && (
+              <div className="flex items-center gap-2">
+                <Switch
+                  id="share-view-allowCopy"
+                  checked={shareMeta?.allowCopy}
+                  disabled={!canManageShare}
+                  onCheckedChange={(checked) => setShareMeta({ allowCopy: checked })}
+                />
+                <Label className="text-sm font-normal" htmlFor="share-view-allowCopy">
+                  {t('table:toolbar.others.share.allowCopy')}
+                </Label>
+              </div>
+            )}
+            {needConfigIncludeHiddenField && (
+              <div className="flex items-center gap-2">
+                <Switch
+                  id="share-view-includeHiddenField"
+                  checked={shareMeta?.includeHiddenField}
+                  disabled={!canManageShare}
+                  onCheckedChange={(checked) => setShareMeta({ includeHiddenField: checked })}
+                />
+                <Label className="text-sm font-normal" htmlFor="share-view-includeHiddenField">
+                  {t('table:toolbar.others.share.showAllFields')}
+                </Label>
+              </div>
+            )}
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center gap-2">
+                <Switch
+                  id="share-view-password"
+                  checked={Boolean(shareMeta?.password)}
+                  disabled={!canManageShare || isSavingPassword}
+                  onCheckedChange={onPasswordSwitchChange}
+                />
+                <Label className="text-sm font-normal" htmlFor="share-view-password">
+                  {t('table:toolbar.others.share.restrict')}
+                </Label>
+              </div>
+              {Boolean(shareMeta?.password) && canManageShare && (
+                <SharePasswordReveal
+                  shareUrl={displayShareUrl}
+                  password={revealedPassword}
+                  onSave={savePassword}
+                />
+              )}
+            </div>
+            {needConfigRequireLogin && (
+              <div className="flex items-center gap-2">
+                <Switch
+                  id="share-view-required-login"
+                  checked={Boolean(shareMeta?.submit?.requireLogin)}
+                  disabled={!canManageShare}
+                  onCheckedChange={onSubmitRequireLoginChange}
+                />
+                <Label className="text-sm font-normal" htmlFor="share-view-required-login">
+                  {t('table:toolbar.others.share.requireLogin')}
+                </Label>
+              </div>
+            )}
+
+            {shareUrl && (
+              <EmbedConfigPopover
+                shareUrl={shareUrl}
+                hideToolBar={hideToolBar}
+                setHideToolBar={setHideToolBar}
+                shareTheme={shareTheme}
+                setShareTheme={setShareTheme}
+                needEmbedHiddenToolbar={needEmbedHiddenToolbar}
+              />
+            )}
+          </div>
+        </>
+      ) : null}
+    </div>
+  );
+};
