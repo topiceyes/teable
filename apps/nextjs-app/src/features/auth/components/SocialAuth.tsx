@@ -6,6 +6,7 @@ import { useMemo } from 'react';
 import { useEnv } from '@/features/app/hooks/useEnv';
 import { authConfig } from '@/features/i18n/auth.config';
 import { isValidRedirectPath } from '@/lib/isValidRedirectPath';
+import { DingtalkLogin } from './DingtalkLogin';
 
 // Rendered in this order on the sign-in page.
 export const providersAll = [
@@ -53,7 +54,7 @@ export const SocialAuth = () => {
   };
 
   if (!providers.length) {
-    return;
+    return <DingtalkLogin />;
   }
 
   return (
@@ -70,6 +71,7 @@ export const SocialAuth = () => {
           </div>
         </div>
       )}
+      <DingtalkLogin />
       <div className="space-y-2">
         {providers.map(({ id, text, Icon, authUrl }) => (
           <Button key={id} className="w-full" variant="outline" onClick={() => onClick(authUrl)}>

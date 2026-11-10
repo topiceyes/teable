@@ -1348,7 +1348,11 @@
       "connectionEncryptionFailed": "凭证加密配置不可用，请检查服务端加密密钥设置后重试。",
       "connectionSaveFailed": "保存失败，请检查填写内容和服务状态后重试。",
       "connectionTestFailed": "连接测试失败，请检查应用凭证、部门读取权限、通讯录范围和网络后重试。",
-      "environmentManaged": "此连接由服务器环境变量管理。修改凭证需由部署管理员调整服务端配置。"
+      "environmentManaged": "此连接由服务器环境变量管理。修改凭证需由部署管理员调整服务端配置。",
+      "loginEnabled": "启用钉钉扫码登录",
+      "autoProvision": "允许首次扫码自动创建普通账号并绑定员工",
+      "loginSetupHelp": "在钉钉应用的登录与分享配置中登记下方完整回调地址，并开通通讯录个人信息读权限（Contact.User.Read）。仅允许已同步的在职员工。已有同邮箱账号须登录后扫码绑定，不会自动合并。关闭注册不影响已绑定账号登录；此处单独授权企业员工开户，不授予数据库成员或管理员权限。",
+      "loginCallback": "登录回调地址"
     },
     "matrix": {
       "title": "权限矩阵",
@@ -2235,5 +2239,19 @@
         "description": "帮助我们衡量广告和推广的效果。"
       }
     }
+  },
+  "dingtalkLogin": {
+    "loginButton": "钉钉扫码登录 · {{name}}",
+    "loginHelp": "使用企业钉钉扫码，自动关联组织身份。",
+    "bindTitle": "钉钉账号绑定",
+    "bindHelp": "确认当前账号后扫码绑定，之后可直接使用钉钉登录。已绑定其他账号的员工不能覆盖绑定。",
+    "bindButton": "扫码绑定当前账号 · {{name}}",
+    "bindRequired": "请先使用原账号登录，再到个人设置 → 账户中扫码绑定钉钉；也可请管理员绑定员工账号。",
+    "bindingConflict": "该员工或账号已有其他绑定，请联系管理员核对。",
+    "employeeUnavailable": "此钉钉员工不在已同步的有效企业目录中，请联系管理员。",
+    "accountUnavailable": "绑定账号已停用或删除，请联系管理员。",
+    "expired": "登录请求已过期或浏览器会话改变，请重新扫码。",
+    "unavailable": "企业钉钉登录尚未启用，请联系管理员。",
+    "failed": "钉钉登录未完成，请重试；如仍失败，请管理员检查回调地址及接口权限。"
   }
 }

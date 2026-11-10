@@ -32,6 +32,8 @@ export const directorySaveConnectionRoSchema = z
       .refine((value) => !value.startsWith('teable_enc_v1:'), 'Enter a new application secret')
       .optional(),
     expectedVersion: z.number().int().nonnegative(),
+    loginEnabled: z.boolean().optional(),
+    autoProvision: z.boolean().optional(),
   })
   .strict();
 export type IDirectorySaveConnectionRo = z.infer<typeof directorySaveConnectionRoSchema>;
@@ -41,6 +43,8 @@ export const directoryConnectionVoSchema = z.object({
   name: z.string(),
   provider: z.literal('dingtalk'),
   source: z.enum(['environment', 'database']),
+  loginEnabled: z.boolean().optional(),
+  autoProvision: z.boolean().optional(),
   appKey: z.string(),
   hasSecret: z.boolean(),
   version: z.number().int().nonnegative(),

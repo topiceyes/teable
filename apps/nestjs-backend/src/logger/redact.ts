@@ -8,6 +8,8 @@ const SENSITIVE_QUERY_KEYS = new Set([
   'refresh_token',
   'id_token',
   'code',
+  'authcode',
+  'state',
   'signature',
   'sig',
   'key',

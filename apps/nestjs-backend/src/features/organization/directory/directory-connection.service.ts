@@ -36,6 +36,8 @@ export class DirectoryConnectionService {
       appKey: row.appKey!,
       hasSecret: Boolean(row.appSecret),
       version: row.configurationVersion,
+      loginEnabled: row.loginEnabled,
+      autoProvision: row.autoProvision,
     };
   }
 
@@ -127,6 +129,8 @@ export class DirectoryConnectionService {
           appKey: ro.appKey,
           ...(ro.appSecret ? { appSecret: codec.encryptValue(ro.appSecret) } : {}),
           configurationVersion: ro.expectedVersion + 1,
+          ...(ro.loginEnabled !== undefined ? { loginEnabled: ro.loginEnabled } : {}),
+          ...(ro.autoProvision !== undefined ? { autoProvision: ro.autoProvision } : {}),
         };
         if (!existing)
           return tx.directoryConnection.create({

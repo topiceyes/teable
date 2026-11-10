@@ -1364,6 +1364,8 @@ model DirectoryConnection {
   appKey       String?  @map("app_key")
   appSecret    String?  @map("app_secret")
   configurationVersion Int @default(0) @map("configuration_version")
+  loginEnabled Boolean @default(false) @map("login_enabled")
+  autoProvision Boolean @default(false) @map("auto_provision")
   createdTime  DateTime @default(now()) @map("created_time")
   modifiedTime DateTime @updatedAt @map("modified_time")
 

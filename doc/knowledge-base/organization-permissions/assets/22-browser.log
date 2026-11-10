@@ -1,0 +1,10 @@
+PASS browser shows enterprise DingTalk QR sign-in
+PASS synthetic administrator signs in
+PASS enterprise QR sign-in is off by default
+PASS provisioning cannot be enabled before login
+PASS administrator can opt in to enterprise provisioning
+PASS editor displays configured callback address
+PASS authenticated cookie session may start employee binding
+PASS binding returns only the official authorization URL
+PASS login and admin pages have no JavaScript errors
+{"passed":9,"success":true,"syntheticDataCleaned":true,"realEmployeesModified":false}

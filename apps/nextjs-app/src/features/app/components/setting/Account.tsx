@@ -1,3 +1,4 @@
+import { DingtalkLogin } from '@/features/auth/components/DingtalkLogin';
 import { useMutation } from '@tanstack/react-query';
 import { updateUserAvatar, updateUserName, USER_NAME_MAX_LENGTH } from '@teable/openapi';
 import { useIsTouchDevice, useSession } from '@teable/sdk';
@@ -152,6 +153,7 @@ export const Account = ({ securityItems }: IAccountProps) => {
                 )
               }
             />
+            <DingtalkLogin binding />
             {securityItems}
           </SettingGroup>
           <SettingGroup title={t('settings.account.dataTitle')}>

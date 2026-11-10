@@ -7,6 +7,17 @@ import type { ISessionData } from '../types/session';
 
 /* eslint-disable @typescript-eslint/naming-convention */
 export interface ICacheStore {
+  [key: `auth:dingtalk:state:${string}`]: {
+    corpId: string;
+    version: number;
+    sessionHash: string;
+    nonce: string;
+    redirect: string;
+    actorId?: string;
+    expiresAt: number;
+  };
+  [key: `auth:dingtalk:used:${string}`]: boolean;
+  [key: `auth:dingtalk:rate:${string}`]: number;
   [key: `attachment:signature:${string}`]: IAttachmentSignatureCache;
   [key: `attachment:upload:${string}`]: IAttachmentUploadCache;
   [key: `attachment:local-signature:${string}`]: IAttachmentLocalTokenCache;
