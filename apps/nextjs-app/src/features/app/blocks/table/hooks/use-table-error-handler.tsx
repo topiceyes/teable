@@ -16,17 +16,21 @@ import {
   wasTableDeletedLocally,
 } from './stale-table-fallback';
 
-/** List omission alone is insufficient: provisioning and transport failures remain retryable. */
-const confirmTableInaccessible = async (baseId: string, tableId: string): Promise<boolean> => {
+/**
+ * List omission alone is insufficient: provisioning and transport failures remain retryable.
+ * Resolves to the refusal's status (404 deleted, 403 no longer readable), or undefined while the
+ * table may still be reachable.
+ */
+const confirmTableInaccessible = async (
+  baseId: string,
+  tableId: string
+): Promise<403 | 404 | undefined> => {
   try {
     await getTableById(baseId, tableId);
-    return false;
+    return undefined;
   } catch (error) {
-    return (
-      !isTableProvisionPending(error) &&
-      error instanceof HttpError &&
-      [403, 404].includes(error.status)
-    );
+    if (isTableProvisionPending(error) || !(error instanceof HttpError)) return undefined;
+    return error.status === 403 || error.status === 404 ? error.status : undefined;
   }
 };
 
@@ -150,11 +154,14 @@ const useConfirmedTableRedirect = () => {
         if (tableList.some((table) => table.id === suspectTableId)) return;
         // Ready-only list/snapshot projections may omit a provisioning table.
         // Confirm the resource itself before treating list absence as deletion.
-        if (!(await confirmTableInaccessible(baseId, suspectTableId))) return;
+        const refusal = await confirmTableInaccessible(baseId, suspectTableId);
+        if (!refusal) return;
         // the user navigated away while we confirmed — don't compete
         if (!router.asPath.includes(`/table/${suspectTableId}`)) return;
         const targetTable = tableList[0];
-        notifyStaleTable({ key, landedTableName: targetTable?.name });
+        // A table the reader's role now hides still exists: calling it deleted would be false,
+        // and the refused request has already said access is restricted.
+        if (refusal === 404) notifyStaleTable({ key, landedTableName: targetTable?.name });
         // replace, not push: Back must not step into the deleted table again.
         // Non-shallow on purpose — the target URL carries no view segment, so
         // getServerSideProps must resolve the default view (and, when no

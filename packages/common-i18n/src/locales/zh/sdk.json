@@ -1063,6 +1063,7 @@
       "passwordAlreadyExists": "该账户已设置密码",
       "verificationCodeInvalid": "验证码无效或已过期",
       "newEmailSameAsCurrentEmail": "新邮箱地址与当前邮箱相同",
+      "newPasswordSameAsCurrent": "新密码不能与当前密码相同",
       "emailAlreadyRegistered": "该邮箱地址已被注册",
       "waitlistNotEnabled": "等待列表功能未启用",
       "emailOrPasswordIncorrect": "邮箱或密码错误",

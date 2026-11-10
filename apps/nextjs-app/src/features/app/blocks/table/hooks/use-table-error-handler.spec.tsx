@@ -61,5 +61,16 @@ describe('table list absence confirmation', () => {
     mocks.getTableById.mockRejectedValue(new HttpError('Missing', 404));
     await confirm('deleted');
     expect(mocks.replace).toHaveBeenCalledWith('/base/base/table/other');
+    expect(mocks.toast).toHaveBeenCalledWith('table:table.deletedRecovered.title', {
+      id: 'stale-table-recovery',
+      description: 'table:table.deletedRecovered.description',
+    });
+  });
+
+  it('leaves a table the role now hides without calling it deleted', async () => {
+    mocks.getTableById.mockRejectedValue(new HttpError('Restricted', 403));
+    await confirm('hidden');
+    expect(mocks.replace).toHaveBeenCalledWith('/base/base/table/other');
+    expect(mocks.toast).not.toHaveBeenCalled();
   });
 });

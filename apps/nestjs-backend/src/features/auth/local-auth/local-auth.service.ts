@@ -597,6 +597,17 @@ export class LocalAuthService {
         },
       });
     }
+    if (newPassword === password) {
+      throw new CustomHttpException(
+        'New password must differ from the current one',
+        HttpErrorCode.VALIDATION_ERROR,
+        {
+          localization: {
+            i18nKey: 'httpErrors.auth.newPasswordSameAsCurrent',
+          },
+        }
+      );
+    }
     const { salt: newSalt, hashPassword: newHashPassword } = await this.encodePassword(newPassword);
     await this.prismaService.txClient().user.update({
       where: { id: userId, deletedTime: null },

@@ -92,6 +92,7 @@ const postSseStream = async (
       [X_TEABLE_V2_HEADER]: response.headers.get(X_TEABLE_V2_HEADER),
       [X_TEABLE_V2_REASON_HEADER]: response.headers.get(X_TEABLE_V2_REASON_HEADER),
       [X_TEABLE_V2_FEATURE_HEADER]: response.headers.get(X_TEABLE_V2_FEATURE_HEADER),
+      [X_TEABLE_UNDO_REDO_ENGINE_HEADER]: response.headers.get(X_TEABLE_UNDO_REDO_ENGINE_HEADER),
     },
     events,
   };
@@ -151,7 +152,7 @@ describe('V2 identification headers for task-status-collection and undo/redo (T7
     const undoStream = await postSseStream(OPERATION_UNDO_STREAM, table.id, cookie, windowId);
     expect(undoStream.status).toBe(200);
     expect(undoStream.headers[X_TEABLE_V2_HEADER]).toBe('true');
-    expect(undoStream.headers[X_TEABLE_V2_REASON_HEADER]).toBe('env_force_v2_all');
+    expect(undoStream.headers[X_TEABLE_V2_REASON_HEADER]).toBe('undo_redo_engine');
     expect(undoStream.headers[X_TEABLE_V2_FEATURE_HEADER]).toBe('undoRedo');
     const undoDone = undoStream.events.find((event) => event.id === 'done') as
       | IUndoRedoStreamDoneEvent
@@ -162,7 +163,7 @@ describe('V2 identification headers for task-status-collection and undo/redo (T7
     const redoStream = await postSseStream(OPERATION_REDO_STREAM, table.id, cookie, windowId);
     expect(redoStream.status).toBe(200);
     expect(redoStream.headers[X_TEABLE_V2_HEADER]).toBe('true');
-    expect(redoStream.headers[X_TEABLE_V2_REASON_HEADER]).toBe('env_force_v2_all');
+    expect(redoStream.headers[X_TEABLE_V2_REASON_HEADER]).toBe('undo_redo_engine');
     expect(redoStream.headers[X_TEABLE_V2_FEATURE_HEADER]).toBe('undoRedo');
     const redoDone = redoStream.events.find((event) => event.id === 'done') as
       | IUndoRedoStreamDoneEvent
@@ -191,17 +192,15 @@ describe('V2 identification headers for task-status-collection and undo/redo (T7
     expect(writeResponse.headers[X_TEABLE_V2_REASON_HEADER]).toBe('unsupported_feature');
     await v1StackPush;
 
-    // The v2 stack has nothing for this window, so the service replays through the
-    // v1 engine: the response must not claim v2 even though the canary routed the
-    // route itself to v2.
+    // The v2 stack has nothing for this window, so the service replays the
+    // legacy stack: the response reports that stack, not the canary decision.
     const undoResponse = await undo(table.id);
     expect(undoResponse.data.status).toBe('fulfilled');
     expect(undoResponse.headers[X_TEABLE_UNDO_REDO_ENGINE_HEADER]).toBe('v1');
     expect(undoResponse.headers[X_TEABLE_V2_HEADER]).toBe('false');
-    expect(undoResponse.headers[X_TEABLE_V2_REASON_HEADER]).toBe('unsupported_feature');
+    expect(undoResponse.headers[X_TEABLE_V2_REASON_HEADER]).toBe('undo_redo_engine');
 
-    // Nothing left to replay: no engine ran, so the canary stamp stays (the same
-    // request cannot be corrected on the stream routes either).
+    // Nothing left to replay: no stack replayed, so the canary stamp stays.
     const emptyUndoResponse = await undo(table.id);
     expect(emptyUndoResponse.data.status).toBe('empty');
     expect(emptyUndoResponse.headers[X_TEABLE_UNDO_REDO_ENGINE_HEADER]).toBe('v1');
@@ -211,6 +210,19 @@ describe('V2 identification headers for task-status-collection and undo/redo (T7
     expect(redoResponse.data.status).toBe('fulfilled');
     expect(redoResponse.headers[X_TEABLE_UNDO_REDO_ENGINE_HEADER]).toBe('v1');
     expect(redoResponse.headers[X_TEABLE_V2_HEADER]).toBe('false');
-    expect(redoResponse.headers[X_TEABLE_V2_REASON_HEADER]).toBe('unsupported_feature');
+    expect(redoResponse.headers[X_TEABLE_V2_REASON_HEADER]).toBe('undo_redo_engine');
+
+    const undoStream = await postSseStream(OPERATION_UNDO_STREAM, table.id, cookie, windowId);
+    expect(undoStream.headers[X_TEABLE_UNDO_REDO_ENGINE_HEADER]).toBe('v1');
+    expect(undoStream.headers[X_TEABLE_V2_HEADER]).toBe('false');
+    expect(undoStream.headers[X_TEABLE_V2_REASON_HEADER]).toBe('undo_redo_engine');
+    expect(undoStream.events).toContainEqual(
+      expect.objectContaining({ id: 'done', engine: 'v1', status: 'fulfilled' })
+    );
+
+    const redoStream = await postSseStream(OPERATION_REDO_STREAM, table.id, cookie, windowId);
+    expect(redoStream.headers[X_TEABLE_UNDO_REDO_ENGINE_HEADER]).toBe('v1');
+    expect(redoStream.headers[X_TEABLE_V2_HEADER]).toBe('false');
+    expect(redoStream.headers[X_TEABLE_V2_REASON_HEADER]).toBe('undo_redo_engine');
   });
 });

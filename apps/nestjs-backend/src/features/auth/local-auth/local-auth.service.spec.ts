@@ -72,6 +72,17 @@ describe('LocalAuthService password audit', () => {
     expect(fixture.audit.emitAtomic).not.toHaveBeenCalled();
   });
 
+  it('rejects a new password equal to the current one and keeps the sessions', async () => {
+    const fixture = await createFixture();
+
+    await expect(
+      fixture.service.changePassword({ password: 'old-password', newPassword: 'old-password' })
+    ).rejects.toThrow('New password must differ from the current one');
+    expect(fixture.update).not.toHaveBeenCalled();
+    expect(fixture.sessionStoreService.clearByUserId).not.toHaveBeenCalled();
+    expect(fixture.audit.emitAtomic).not.toHaveBeenCalled();
+  });
+
   it('writes user.password.reset for the owner of the emailed code', async () => {
     const fixture = await createFixture();
     fixture.cacheStore.set('reset-password-email:code123', { userId: USER_ID });
