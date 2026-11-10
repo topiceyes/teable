@@ -75,6 +75,37 @@ describe('table authority policy persistence and resolution', () => {
     });
     expect(tx.tableAuthorityPolicy.create).not.toHaveBeenCalled();
   });
+  it('includes the enterprise identifier for inline role management without exposing credentials', async () => {
+    const { service, tx } = fixture();
+    const connections = vi
+      .fn()
+      .mockResolvedValue([
+        {
+          id: 'connection',
+          name: 'Company',
+          tenantId: 'corp',
+          businessRoles: [{ id: 'finance', name: 'Finance' }],
+        },
+      ]);
+    const tables = vi.fn().mockResolvedValue([{ id: 'table', name: 'Invoices', fields: [] }]);
+    Object.assign(tx.directoryConnection, { findMany: connections });
+    Object.assign(tx.tableMeta, { findMany: tables });
+    expect(await service.options('base')).toEqual({
+      connections: [
+        {
+          id: 'connection',
+          name: 'Company',
+          corpId: 'corp',
+          roles: [{ id: 'finance', name: 'Finance' }],
+        },
+      ],
+      tables: [{ id: 'table', name: 'Invoices', fields: [] }],
+    });
+    const select = connections.mock.calls[0][0].select;
+    expect(select).not.toHaveProperty('encryptedAppSecret');
+    expect(select).not.toHaveProperty('appKey');
+    expect(connections.mock.calls[0][0].where).toEqual({ enabled: true });
+  });
   it('validates live base, enterprise roles and table scope before saving', async () => {
     const { service, tx, audit } = fixture();
     expect((await service.save(input)).revision).toBe(1);

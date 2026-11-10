@@ -183,6 +183,7 @@ export const tableAuthorityOptionsVoSchema = z.object({
     z.object({
       id: z.string(),
       name: z.string(),
+      corpId: z.string(),
       roles: z.array(z.object({ id: z.string(), name: z.string() })),
     })
   ),

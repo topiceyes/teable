@@ -39,6 +39,7 @@ function RoleEditor({
   const [enabled, setEnabled] = useState(role?.enabled ?? true);
   const [rules, setRules] = useState<IDirectoryRoleRule[]>(role?.rules || []);
   const [departmentId, setDepartmentId] = useState('');
+  const [departmentSearch, setDepartmentSearch] = useState('');
   const [includeDescendants, setIncludeDescendants] = useState(false);
   const [externalRoleId, setExternalRoleId] = useState('');
   const departments = useQuery({
@@ -88,14 +89,22 @@ function RoleEditor({
           />
           {t('roleEnabled')}
         </label>
-        <p className="text-muted-foreground text-sm">{t('roleRulesDescription')}</p>
+        <p className="text-sm text-muted-foreground">{t('roleRulesDescription')}</p>
         <section className="space-y-2 rounded border p-3">
           <h3 className="text-sm font-semibold">{t('departmentRule')}</h3>
           {departments.isError && (
-            <p role="alert" className="text-destructive text-sm">
+            <p role="alert" className="text-sm text-destructive">
               {t('loadFailed')}
             </p>
           )}
+          <Input
+            aria-label={t('roleDepartmentSearch')}
+            placeholder={t('roleDepartmentSearch')}
+            value={departmentSearch}
+            disabled={save.isPending}
+            maxLength={200}
+            onChange={(event) => setDepartmentSearch(event.target.value)}
+          />
           <Select
             value={departmentId}
             onValueChange={setDepartmentId}
@@ -105,11 +114,20 @@ function RoleEditor({
               <SelectValue placeholder={t('chooseDepartment')} />
             </SelectTrigger>
             <SelectContent>
-              {departments.data?.map((department) => (
-                <SelectItem key={department.id} value={department.id}>
-                  {department.pathName?.join(' / ') || department.name}
-                </SelectItem>
-              ))}
+              {departments.data
+                ?.filter(
+                  (department) =>
+                    department.id === departmentId ||
+                    (department.pathName?.join(' / ') || department.name)
+                      .normalize('NFKC')
+                      .toLocaleLowerCase()
+                      .includes(departmentSearch.trim().normalize('NFKC').toLocaleLowerCase())
+                )
+                .map((department) => (
+                  <SelectItem key={department.id} value={department.id}>
+                    {department.pathName?.join(' / ') || department.name}
+                  </SelectItem>
+                ))}
             </SelectContent>
           </Select>
           <label className="flex items-center gap-2 text-sm">
@@ -193,9 +211,9 @@ function RoleEditor({
             </li>
           ))}
         </ul>
-        {!rules.length && <p className="text-muted-foreground text-sm">{t('noRoleRules')}</p>}
+        {!rules.length && <p className="text-sm text-muted-foreground">{t('noRoleRules')}</p>}
         {save.isError && (
-          <p role="alert" className="text-destructive text-sm">
+          <p role="alert" className="text-sm text-destructive">
             {t('roleSaveFailed')}
           </p>
         )}
@@ -244,7 +262,7 @@ function RoleMembers({
             {t('effectiveMembers')} · {role.name}
           </DialogTitle>
         </DialogHeader>
-        <p className="text-muted-foreground text-sm">{t('effectiveMembersDescription')}</p>
+        <p className="text-sm text-muted-foreground">{t('effectiveMembersDescription')}</p>
         {query.isFetching && <p role="status">{t('loading')}</p>}
         {query.isError && <p role="alert">{t('loadFailed')}</p>}
         {query.data && (
@@ -282,7 +300,15 @@ function RoleMembers({
   );
 }
 
-export function DirectoryRoles({ corpId, syncBusy }: { corpId: string; syncBusy: boolean }) {
+export function DirectoryRoles({
+  corpId,
+  syncBusy,
+  onChanged,
+}: {
+  corpId: string;
+  syncBusy: boolean;
+  onChanged?: () => void;
+}) {
   const { t } = useTranslation('common', { keyPrefix: 'admin.directory' });
   const client = useQueryClient();
   const roles = useQuery({
@@ -302,10 +328,10 @@ export function DirectoryRoles({ corpId, syncBusy }: { corpId: string; syncBusy:
           {t('createRole')}
         </Button>
       </div>
-      <p className="text-muted-foreground text-sm">{t('rolesDescription')}</p>
+      <p className="text-sm text-muted-foreground">{t('rolesDescription')}</p>
       {roles.isLoading && <p role="status">{t('loading')}</p>}
       {roles.isError && (
-        <p role="alert" className="text-destructive text-sm">
+        <p role="alert" className="text-sm text-destructive">
           {t('directoryLoadFailed')}{' '}
           <Button variant="link" onClick={() => roles.refetch()}>
             {t('retry')}
@@ -318,7 +344,7 @@ export function DirectoryRoles({ corpId, syncBusy }: { corpId: string; syncBusy:
           <li key={role.id} className="flex items-center justify-between gap-3 rounded border p-3">
             <div>
               <h3 className="font-medium">{role.name}</h3>
-              <p className="text-muted-foreground text-xs">
+              <p className="text-xs text-muted-foreground">
                 {role.enabled ? t('roleEnabled') : t('roleDisabled')} ·{' '}
                 {t('ruleCount', { count: role.rules.length })}
               </p>
@@ -353,6 +379,7 @@ export function DirectoryRoles({ corpId, syncBusy }: { corpId: string; syncBusy:
           onSaved={() => {
             void client.invalidateQueries({ queryKey: ['directory-roles', corpId] });
             void client.invalidateQueries({ queryKey: ['directory-role-members', corpId] });
+            onChanged?.();
           }}
         />
       )}
