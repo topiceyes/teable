@@ -22,6 +22,7 @@ import {
 } from '@teable/ui-lib/shadcn';
 import { useTranslation } from 'next-i18next';
 import { useState } from 'react';
+import { DirectoryRolePeople } from './DirectoryRolePeople';
 
 function RoleEditor({
   corpId,
@@ -90,6 +91,18 @@ function RoleEditor({
           {t('roleEnabled')}
         </label>
         <p className="text-sm text-muted-foreground">{t('roleRulesDescription')}</p>
+        <DirectoryRolePeople
+          corpId={corpId}
+          memberIds={rules.flatMap((rule) => (rule.type === 'member' ? [rule.memberId] : []))}
+          disabled={save.isPending}
+          ruleCount={rules.length}
+          onChange={(memberIds) =>
+            setRules([
+              ...rules.filter((rule) => rule.type !== 'member'),
+              ...memberIds.map((memberId) => ({ type: 'member' as const, memberId })),
+            ])
+          }
+        />
         <section className="space-y-2 rounded border p-3">
           <h3 className="text-sm font-semibold">{t('departmentRule')}</h3>
           {departments.isError && (
@@ -186,30 +199,32 @@ function RoleEditor({
           </Button>
         </section>
         <ul className="space-y-2">
-          {rules.map((rule, index) => (
-            <li
-              key={
-                rule.type === 'department'
-                  ? `department:${rule.departmentId}`
-                  : `role:${rule.externalRoleId}`
-              }
-              className="flex items-center justify-between gap-2 rounded border p-2 text-sm"
-            >
-              <span>
-                {rule.type === 'department'
-                  ? `${departments.data?.find((department) => department.id === rule.departmentId)?.pathName?.join(' / ') || t('unavailableDepartment')} · ${rule.includeDescendants ? t('includeDescendants') : t('directDepartment')}`
-                  : `${t('sourceRoleRule')}: ${rule.externalRoleId}`}
-              </span>
-              <Button
-                size="sm"
-                variant="outline"
-                disabled={save.isPending}
-                onClick={() => setRules(rules.filter((_, i) => i !== index))}
+          {rules.map((rule, index) =>
+            rule.type === 'member' ? null : (
+              <li
+                key={
+                  rule.type === 'department'
+                    ? `department:${rule.departmentId}`
+                    : `role:${rule.externalRoleId}`
+                }
+                className="flex items-center justify-between gap-2 rounded border p-2 text-sm"
               >
-                {t('removeRule')}
-              </Button>
-            </li>
-          ))}
+                <span>
+                  {rule.type === 'department'
+                    ? `${departments.data?.find((department) => department.id === rule.departmentId)?.pathName?.join(' / ') || t('unavailableDepartment')} · ${rule.includeDescendants ? t('includeDescendants') : t('directDepartment')}`
+                    : `${t('sourceRoleRule')}: ${rule.externalRoleId}`}
+                </span>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={save.isPending}
+                  onClick={() => setRules(rules.filter((_, i) => i !== index))}
+                >
+                  {t('removeRule')}
+                </Button>
+              </li>
+            )
+          )}
         </ul>
         {!rules.length && <p className="text-sm text-muted-foreground">{t('noRoleRules')}</p>}
         {save.isError && (

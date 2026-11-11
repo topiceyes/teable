@@ -8,6 +8,7 @@ export const DIRECTORY_ROLES = '/admin/organization/dingtalk/listRoles';
 export const DIRECTORY_SAVE_ROLE = '/admin/organization/dingtalk/saveRole';
 export const DIRECTORY_ROLE_MEMBERS = '/admin/organization/dingtalk/roleMembers';
 export const directoryRoleRuleSchema = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('member'), memberId: z.string().min(1).max(200) }).strict(),
   z
     .object({
       type: z.literal('department'),
@@ -28,7 +29,9 @@ export const directoryRoleRulesSchema = z
       const key =
         rule.type === 'department'
           ? `department:${rule.departmentId}`
-          : `externalRole:${rule.externalRoleId}`;
+          : rule.type === 'member'
+            ? `member:${rule.memberId}`
+            : `externalRole:${rule.externalRoleId}`;
       if (seen.has(key))
         ctx.addIssue({ code: 'custom', path: [index], message: 'Duplicate role rule' });
       seen.add(key);

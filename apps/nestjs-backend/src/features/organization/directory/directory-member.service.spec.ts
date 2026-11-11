@@ -42,6 +42,13 @@ function fixture() {
   return { service, tx, audit };
 }
 describe('directory account binding', () => {
+  it('scopes exact selected employee lookups and counts to the requested enterprise', async () => {
+    const { service, tx } = fixture();
+    await service.list({ corpId: 'corp', memberIds: ['employee', 'another'], skip: 0, take: 100 });
+    const where = { connectionId: 'connection', id: { in: ['employee', 'another'] } };
+    expect(tx.directoryMember.findMany).toHaveBeenCalledWith(expect.objectContaining({ where }));
+    expect(tx.directoryMember.count).toHaveBeenCalledWith({ where });
+  });
   it('requires instance administration for listing and binding', () => {
     expect(new Reflector().get(PERMISSIONS_KEY, DirectoryMemberController)).toEqual([
       'instance|update',
