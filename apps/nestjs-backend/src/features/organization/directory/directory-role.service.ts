@@ -90,7 +90,7 @@ export class DirectoryRoleService {
         if (!lock?.acquired) throw new ConflictException('Directory update already running');
         if (ro.enabled && !connection.enabled)
           throw new ConflictException('Directory connection disabled');
-        await this.validateDepartments(tx, connection.id, ro);
+        await this.validateRules(tx, connection.id, ro);
         const data = {
           name: ro.name,
           nameKey: ro.name.normalize('NFKC').toLocaleLowerCase('en-US'),
@@ -127,7 +127,7 @@ export class DirectoryRoleService {
     }
   }
 
-  private async validateDepartments(
+  private async validateRules(
     tx: Prisma.TransactionClient,
     connectionId: string,
     ro: IDirectorySaveRoleRo
@@ -141,6 +141,14 @@ export class DirectoryRoleService {
     });
     if (count !== departmentIds.length)
       throw new NotFoundException('Active department not found in this enterprise');
+    const memberIds = ro.rules.flatMap((rule) => (rule.type === 'member' ? [rule.memberId] : []));
+    if (memberIds.length) {
+      const memberCount = await tx.directoryMember.count({
+        where: { connectionId, inactiveTime: null, id: { in: memberIds } },
+      });
+      if (memberCount !== memberIds.length)
+        throw new NotFoundException('Active employee not found in this enterprise');
+    }
   }
 
   async members(ro: IDirectoryRoleMembersRo) {
@@ -175,6 +183,7 @@ export class DirectoryRoleService {
         });
         const matched = rows.filter((row) =>
           match({
+            memberId: row.id,
             departmentIds: row.memberships.map((item) => item.departmentId),
             externalRoleIds: row.externalRoleIds,
           })
@@ -218,6 +227,7 @@ export class DirectoryRoleService {
             if (!rules.success) return [];
             const match = compileDirectoryRoleRules(rules.data, member.connection.departments);
             return match({
+              memberId: member.id,
               departmentIds: member.memberships.map((item) => item.departmentId),
               externalRoleIds: member.externalRoleIds,
             })

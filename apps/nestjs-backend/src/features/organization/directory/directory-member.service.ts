@@ -33,6 +33,7 @@ export class DirectoryMemberService {
         const connection = await this.connection(tx, ro.corpId);
         const where: Prisma.DirectoryMemberWhereInput = {
           connectionId: connection.id,
+          ...(ro.memberIds ? { id: { in: ro.memberIds } } : {}),
           ...(ro.search
             ? {
                 OR: [

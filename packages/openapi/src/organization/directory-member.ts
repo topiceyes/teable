@@ -10,6 +10,7 @@ export const DIRECTORY_BIND_MEMBER = '/admin/organization/dingtalk/bindMember';
 export const directoryMembersRoSchema = directoryConnectionRoSchema
   .extend({
     search: z.string().trim().max(200).optional(),
+    memberIds: z.array(z.string().min(1).max(200)).min(1).max(100).optional(),
     skip: z.coerce.number().int().min(0).default(0),
     take: z.coerce.number().int().min(1).max(100).default(50),
   })

@@ -31,7 +31,7 @@ function fixture() {
     $queryRaw: vi.fn().mockResolvedValue([{ acquired: true }]),
     directoryConnection: { findFirst: vi.fn().mockResolvedValue({ id: 'conn', enabled: true }) },
     directoryDepartment: {
-      count: vi.fn().mockResolvedValue(1),
+      count: vi.fn().mockImplementation(async ({ where }) => where.id.in.length),
       findMany: vi.fn().mockResolvedValue(nodes),
     },
     directoryBusinessRole: {
@@ -42,6 +42,7 @@ function fixture() {
       findMany: vi.fn().mockResolvedValue([role]),
     },
     directoryMember: {
+      count: vi.fn().mockResolvedValue(1),
       findMany: vi.fn().mockResolvedValue([
         {
           id: 'member',
@@ -194,6 +195,85 @@ describe('business role mappings', () => {
     );
     tx.directoryMember.findMany.mockResolvedValue([]);
     expect(await service.resolveForUser('user')).toEqual([]);
+  });
+  it('matches a specified employee without requiring any department or source role', () => {
+    const match = compileDirectoryRoleRules([{ type: 'member', memberId: 'member' }], []);
+    expect(match({ memberId: 'member', departmentIds: [], externalRoleIds: [] })).toBe(true);
+    expect(match({ memberId: 'other', departmentIds: [], externalRoleIds: [] })).toBe(false);
+    expect(match({ departmentIds: [], externalRoleIds: [] })).toBe(false);
+    const mixed = compileDirectoryRoleRules(
+      [{ type: 'member', memberId: 'member' }, ...role.rules],
+      nodes
+    );
+    expect(mixed({ memberId: 'other', departmentIds: ['child'], externalRoleIds: [] })).toBe(true);
+  });
+  it('persists specified people only from the same active enterprise directory', async () => {
+    const { service, tx, audit } = fixture();
+    const rules = [{ type: 'member' as const, memberId: 'member' }];
+    tx.directoryBusinessRole.create.mockResolvedValue({ ...role, rules });
+    expect((await service.save({ ...input, rules })).rules).toEqual(rules);
+    expect(tx.directoryMember.count).toHaveBeenCalledWith({
+      where: { connectionId: 'conn', inactiveTime: null, id: { in: ['member'] } },
+    });
+    expect(audit.emitAtomic).toHaveBeenCalledWith(
+      expect.objectContaining({
+        params: expect.objectContaining({ rules }),
+      })
+    );
+    tx.directoryMember.count.mockResolvedValue(0);
+    tx.directoryBusinessRole.create.mockClear();
+    await expect(service.save({ ...input, rules })).rejects.toThrow('Active employee not found');
+    expect(tx.directoryBusinessRole.create).not.toHaveBeenCalled();
+  });
+  it('can disable a role with departed specified people without revalidating them', async () => {
+    const { service, tx } = fixture();
+    await service.save({ ...input, enabled: false, rules: [{ type: 'member', memberId: 'gone' }] });
+    expect(tx.directoryMember.count).not.toHaveBeenCalled();
+  });
+  it('uses the same specified identity in previews and live permission resolution', async () => {
+    const { service, tx } = fixture();
+    const directRole = { ...role, rules: [{ type: 'member', memberId: 'member' }] };
+    tx.directoryBusinessRole.findFirst.mockResolvedValue(directRole);
+    tx.directoryMember.findMany.mockResolvedValue([
+      {
+        id: 'member',
+        userId: 'user',
+        connectionId: 'conn',
+        user: { id: 'user', name: 'Local', email: 'local@example.com' },
+        externalRoleIds: [],
+        memberships: [],
+        connection: { businessRoles: [directRole], departments: [] },
+      },
+    ]);
+    expect(
+      (await service.members({ corpId: 'corp', roleId: 'role', skip: 0, take: 50 })).total
+    ).toBe(1);
+    expect(await service.resolveForUser('user')).toEqual([
+      { roleId: 'role', connectionId: 'conn', name: 'Finance' },
+    ]);
+    directRole.rules = [];
+    expect(await service.resolveForUser('user')).toEqual([]);
+  });
+  it('rejects repeated, oversized and malformed specified-person rules', () => {
+    const member = { type: 'member', memberId: 'member' };
+    expect(directorySaveRoleRoSchema.safeParse({ ...input, rules: [member] }).success).toBe(true);
+    expect(directorySaveRoleRoSchema.safeParse({ ...input, rules: [member, member] }).success).toBe(
+      false
+    );
+    expect(
+      directorySaveRoleRoSchema.safeParse({ ...input, rules: [{ ...member, memberId: '' }] })
+        .success
+    ).toBe(false);
+    expect(
+      directorySaveRoleRoSchema.safeParse({ ...input, rules: [{ ...member, userId: 'user' }] })
+        .success
+    ).toBe(false);
+    expect(
+      directorySaveRoleRoSchema.safeParse({
+        ...input,
+        rules: Array.from({ length: 101 }, (_, i) => ({ ...member, memberId: String(i) })),
+      }).success
+    ).toBe(false);
   });
   it('rejects duplicate rules, unsupported grant fields, and invalid revisions', () => {
     expect(
