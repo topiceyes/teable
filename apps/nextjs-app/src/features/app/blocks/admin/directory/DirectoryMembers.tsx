@@ -4,6 +4,7 @@ import { listDirectoryMembers } from '@teable/openapi';
 import { Button, Input } from '@teable/ui-lib/shadcn';
 import { useTranslation } from 'next-i18next';
 import { useState } from 'react';
+import { DirectoryAuthorityDialog } from './DirectoryAuthorityDialog';
 import { DirectoryBindingDialog } from './DirectoryBindingDialog';
 
 export function DirectoryMembers({
@@ -21,6 +22,7 @@ export function DirectoryMembers({
   const [submittedSearch, setSubmittedSearch] = useState('');
   const [page, setPage] = useState(0);
   const [binding, setBinding] = useState<IDirectoryMemberVo>();
+  const [authorityMemberId, setAuthorityMemberId] = useState<string>();
   const members = useQuery({
     queryKey: ['directory-members', corpId, submittedSearch, page],
     queryFn: () =>
@@ -55,7 +57,7 @@ export function DirectoryMembers({
       </form>
       {members.isLoading && <p role="status">{t('loading')}</p>}
       {members.isError && (
-        <p role="alert" className="text-destructive text-sm">
+        <p role="alert" className="text-sm text-destructive">
           {t('directoryLoadFailed')}{' '}
           <Button variant="link" onClick={() => members.refetch()}>
             {t('retry')}
@@ -86,7 +88,7 @@ export function DirectoryMembers({
                   <tr key={member.id} className="border-t">
                     <td className="p-3">
                       <div className="font-medium">{member.name}</div>
-                      <div className="text-muted-foreground text-xs">{member.externalId}</div>
+                      <div className="text-xs text-muted-foreground">{member.externalId}</div>
                     </td>
                     <td className="p-3">
                       {member.departments.map((department) => department.name).join(', ') || '—'}
@@ -94,14 +96,24 @@ export function DirectoryMembers({
                     <td className="p-3">{member.active ? t('active') : t('inactive')}</td>
                     <td className="p-3">{member.user?.email || member.userId || t('unbound')}</td>
                     <td className="p-3">
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        disabled={syncBusy || (!member.active && !member.userId)}
-                        onClick={() => setBinding(member)}
-                      >
-                        {member.userId ? t('unbind') : t('bind')}
-                      </Button>
+                      <div className="flex flex-wrap gap-2">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={syncBusy || (!member.active && !member.userId)}
+                          onClick={() => setBinding(member)}
+                        >
+                          {member.userId ? t('unbind') : t('bind')}
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={syncBusy}
+                          onClick={() => setAuthorityMemberId(member.id)}
+                        >
+                          {t('viewAuthority')}
+                        </Button>
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -109,7 +121,7 @@ export function DirectoryMembers({
             </table>
           </div>
           {!members.data.members.length && (
-            <p className="text-muted-foreground text-sm">{t('noEmployees')}</p>
+            <p className="text-sm text-muted-foreground">{t('noEmployees')}</p>
           )}
           <div className="flex items-center justify-between gap-2 text-sm">
             <p>{t('total', { count: members.data.total })}</p>
@@ -149,6 +161,14 @@ export function DirectoryMembers({
             void queryClient.invalidateQueries({ queryKey: ['directory-role-members', corpId] });
             onChanged();
           }}
+        />
+      )}
+      {authorityMemberId && (
+        <DirectoryAuthorityDialog
+          key={`${corpId}:${authorityMemberId}`}
+          corpId={corpId}
+          memberId={authorityMemberId}
+          onClose={() => setAuthorityMemberId(undefined)}
         />
       )}
     </section>
