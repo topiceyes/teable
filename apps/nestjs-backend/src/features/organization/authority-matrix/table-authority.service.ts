@@ -6,6 +6,7 @@ import {
   tableAuthorityPolicySchema,
   type ITableAuthoritySaveRo,
   type ITableAuthorityVo,
+  type ITableDataRestriction,
 } from '@teable/openapi';
 import { ClsService } from 'nestjs-cls';
 import type { IClsStore } from '../../../types/cls';
@@ -140,7 +141,14 @@ export class TableAuthorityService {
       select: { id: true },
     });
     if (!connection) throw new NotFoundException('Enabled directory connection not found');
-    const roleIds = [...new Set(ro.policy.rules.map((rule) => rule.roleId))];
+    const roleIds = [
+      ...new Set([
+        ...ro.policy.rules.map((rule) => rule.roleId),
+        ...(ro.policy.restrictions || []).flatMap((restriction) =>
+          (restriction.roleOverrides || []).map((override) => override.roleId)
+        ),
+      ]),
+    ];
     const tableIds = [
       ...new Set([
         ...ro.policy.rules.map((rule) => rule.tableId),
@@ -155,19 +163,25 @@ export class TableAuthorityService {
     ]);
     if (roleCount !== roleIds.length || tableCount !== tableIds.length)
       throw new NotFoundException('Role or table is unavailable in this scope');
-    for (const restriction of ro.policy.restrictions || []) {
-      const fields = await tx.field.findMany({
-        where: { tableId: restriction.tableId, deletedTime: null },
-        select: { id: true, type: true, isPrimary: true },
-      });
-      const ids = new Set(fields.map((field) => field.id));
-      if (
-        [...restriction.hiddenFieldIds, ...restriction.readOnlyFieldIds].some((id) => !ids.has(id))
-      )
+    for (const restriction of ro.policy.restrictions || [])
+      await this.validateRestriction(tx, restriction);
+  }
+
+  private async validateRestriction(
+    tx: Prisma.TransactionClient,
+    restriction: ITableDataRestriction
+  ) {
+    const fields = await tx.field.findMany({
+      where: { tableId: restriction.tableId, deletedTime: null },
+      select: { id: true, type: true, isPrimary: true },
+    });
+    const ids = new Set(fields.map((field) => field.id));
+    for (const scope of [restriction, ...(restriction.roleOverrides || [])]) {
+      if ([...scope.hiddenFieldIds, ...scope.readOnlyFieldIds].some((id) => !ids.has(id)))
         throw new NotFoundException('Restriction field is unavailable in this table');
-      if (fields.some((field) => field.isPrimary && restriction.hiddenFieldIds.includes(field.id)))
+      if (fields.some((field) => field.isPrimary && scope.hiddenFieldIds.includes(field.id)))
         throw new ConflictException('Primary field cannot be hidden');
-      if (restriction.rowScope !== 'all' && !fields.some((field) => field.type === 'createdBy'))
+      if (scope.rowScope !== 'all' && !fields.some((field) => field.type === 'createdBy'))
         throw new ConflictException('Row restrictions require a Created By field');
     }
   }

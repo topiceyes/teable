@@ -69,14 +69,106 @@ function fixture(rowScope: 'all' | 'own' | 'department' = 'own') {
     dataKnexForTable: vi.fn().mockResolvedValue(() => query),
     queryDataPrismaForTable: vi.fn().mockResolvedValue([{ __id: 'recMine' }]),
   };
+  const roles = { resolveForUser: vi.fn().mockResolvedValue([]) };
   const service = new TableDataAccessService(
     prisma as never,
     { get: () => 'usrMine' } as never,
-    router as never
+    router as never,
+    roles as never
   );
-  return { service, prisma, router, query };
+  return { service, prisma, router, query, roles };
 }
 describe('server-side data restrictions', () => {
+  it('selects ordered role scopes for the explicit user and falls back after revocation', async () => {
+    const { service, prisma, roles } = fixture();
+    const restriction = {
+      tableId: 'tblMine',
+      rowScope: 'own',
+      hiddenFieldIds: ['fldPrivate'],
+      readOnlyFieldIds: ['fldName'],
+      roleOverrides: [
+        {
+          roleId: 'manager',
+          rowScope: 'department',
+          hiddenFieldIds: [],
+          readOnlyFieldIds: ['fldName'],
+        },
+        { roleId: 'executive', rowScope: 'all', hiddenFieldIds: [], readOnlyFieldIds: [] },
+      ],
+    };
+    prisma.tableAuthorityPolicy.findMany.mockResolvedValue([
+      {
+        baseId: 'bseMine',
+        connectionId: 'connMine',
+        policy: { version: 1, enabled: true, rules: [], restrictions: [restriction] },
+      },
+    ] as never);
+    roles.resolveForUser.mockResolvedValue([
+      { connectionId: 'connMine', roleId: 'executive' },
+      { connectionId: 'connMine', roleId: 'manager' },
+    ] as never);
+    const manager = (await service.scope('tblMine', 'targetUser'))!;
+    expect(roles.resolveForUser).toHaveBeenCalledWith('targetUser');
+    expect(manager.appliedRoleId).toBe('manager');
+    expect(manager.creatorIds).toEqual(['usrMine', 'usrPeer']);
+    expect(manager.hidden.has('fldPrivate')).toBe(false);
+    expect(manager.readOnly.has('fldName')).toBe(true);
+    roles.resolveForUser.mockResolvedValue([
+      { connectionId: 'foreign', roleId: 'manager' },
+    ] as never);
+    const fallback = (await service.scope('tblMine', 'targetUser'))!;
+    expect(fallback.appliedRoleId).toBeUndefined();
+    expect(fallback.creatorIds).toEqual(['targetUser']);
+    expect(fallback.hidden.has('fldPrivate')).toBe(true);
+    roles.resolveForUser.mockResolvedValue([
+      { connectionId: 'connMine', roleId: 'executive' },
+    ] as never);
+    const executive = (await service.scope('tblMine', 'targetUser'))!;
+    expect(executive.creatorIds).toBeUndefined();
+    expect(executive.hidden.size).toBe(0);
+    expect(executive.readOnly.size).toBe(0);
+    expect(executive.appliedRoleId).toBe('executive');
+  });
+  it('uses the selected role scope in cross-base incoming link redaction', async () => {
+    const { service, prisma, roles } = fixture();
+    prisma.tableAuthorityPolicy.findMany.mockResolvedValue([
+      {
+        baseId: 'bseMine',
+        connectionId: 'connMine',
+        policy: {
+          version: 1,
+          enabled: true,
+          rules: [],
+          restrictions: [
+            {
+              tableId: 'tblMine',
+              rowScope: 'own',
+              hiddenFieldIds: [],
+              readOnlyFieldIds: [],
+              roleOverrides: [
+                { roleId: 'manager', rowScope: 'all', hiddenFieldIds: [], readOnlyFieldIds: [] },
+              ],
+            },
+          ],
+        },
+      },
+    ] as never);
+    prisma.field.findMany.mockResolvedValue([
+      {
+        id: 'fldReference',
+        tableId: 'tblOther',
+        type: 'link',
+        options: JSON.stringify({ foreignTableId: 'tblMine' }),
+        table: { baseId: 'bseOther' },
+      },
+    ] as never);
+    roles.resolveForUser.mockResolvedValue([
+      { connectionId: 'connMine', roleId: 'manager' },
+    ] as never);
+    const linked = await service.restrictedTables('bseOther', 'targetUser');
+    expect(linked[0].restriction.hiddenFieldIds).toContain('fldReference');
+    expect(roles.resolveForUser).toHaveBeenCalledWith('targetUser');
+  });
   it('restricts own rows and hides both private and derived field values', async () => {
     const { service } = fixture();
     const scope = (await service.scope('tblMine'))!;

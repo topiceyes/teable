@@ -32,6 +32,7 @@ export const tableAuthorityPreviewVoSchema = z.object({
       hiddenFields: z.array(z.string()),
       readOnlyFields: z.array(z.string()),
       emptyRowScope: z.boolean().optional(),
+      appliedRole: z.object({ id: z.string(), name: z.string() }).nullable().optional(),
     })
     .nullable(),
 });
@@ -57,12 +58,23 @@ export const tableMatrixActions = [
   'record|update',
   'record|delete',
 ] as const;
+const dataRestrictionFields = {
+  hiddenFieldIds: z.array(z.string().min(1)).max(1000),
+  readOnlyFieldIds: z.array(z.string().min(1)).max(1000),
+  rowScope: z.enum(['all', 'own', 'department']),
+};
+export const tableRoleRestrictionSchema = z
+  .object({
+    roleId: z.string().min(1),
+    ...dataRestrictionFields,
+  })
+  .strict();
+export type ITableRoleRestriction = z.infer<typeof tableRoleRestrictionSchema>;
 export const tableDataRestrictionSchema = z
   .object({
     tableId: z.string().min(1),
-    hiddenFieldIds: z.array(z.string().min(1)).max(1000),
-    readOnlyFieldIds: z.array(z.string().min(1)).max(1000),
-    rowScope: z.enum(['all', 'own', 'department']),
+    ...dataRestrictionFields,
+    roleOverrides: z.array(tableRoleRestrictionSchema).max(100).optional(),
   })
   .strict();
 export type ITableDataRestriction = z.infer<typeof tableDataRestrictionSchema>;
@@ -94,13 +106,25 @@ export const tableAuthorityPolicySchema = z
           message: 'Duplicate table restriction',
         });
       tables.add(restriction.tableId);
-      for (const values of [restriction.hiddenFieldIds, restriction.readOnlyFieldIds]) {
-        if (new Set(values).size !== values.length)
+      const roleIds = new Set<string>();
+      for (const [roleIndex, override] of (restriction.roleOverrides || []).entries()) {
+        if (roleIds.has(override.roleId))
           ctx.addIssue({
             code: 'custom',
-            path: ['restrictions', index],
-            message: 'Duplicate field restriction',
+            path: ['restrictions', index, 'roleOverrides', roleIndex],
+            message: 'Duplicate role data restriction',
           });
+        roleIds.add(override.roleId);
+      }
+      for (const scope of [restriction, ...(restriction.roleOverrides || [])]) {
+        for (const values of [scope.hiddenFieldIds, scope.readOnlyFieldIds]) {
+          if (new Set(values).size !== values.length)
+            ctx.addIssue({
+              code: 'custom',
+              path: ['restrictions', index],
+              message: 'Duplicate field restriction',
+            });
+        }
       }
     }
     const keys = new Set<string>();

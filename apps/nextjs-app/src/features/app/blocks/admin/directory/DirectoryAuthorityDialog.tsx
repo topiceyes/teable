@@ -62,6 +62,9 @@ function TableResult({ table }: { table: IMemberAuthorityTablesVo['tables'][numb
       {table.dataScope && (
         <div className="space-y-1 text-sm">
           <p>
+            {t('scopeSource')}: {table.dataScope.appliedRole?.name || t('defaultScope')}
+          </p>
+          <p>
             {t('rowScope')}: {t(`scopes.${table.dataScope.rowScope}`)}
           </p>
           <p>

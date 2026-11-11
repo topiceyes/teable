@@ -82,6 +82,9 @@ export function MatrixPermissionPreview({
           {preview.data.dataScope && (
             <div>
               <p>
+                {t('scopeSource')}: {preview.data.dataScope.appliedRole?.name || t('defaultScope')}
+              </p>
+              <p>
                 {t('rowScope')}:{' '}
                 {t(
                   preview.data.dataScope.rowScope === 'own'
