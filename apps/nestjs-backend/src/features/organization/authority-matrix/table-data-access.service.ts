@@ -10,6 +10,8 @@ import {
 import { ClsService } from 'nestjs-cls';
 import { DatabaseRouter } from '../../../global/database-router.service';
 import type { IClsStore } from '../../../types/cls';
+import { DirectoryRoleService } from '../directory/directory-role.service';
+import { resolveRoleDataRestriction } from './role-data-restriction';
 
 type IField = {
   id: string;
@@ -32,6 +34,7 @@ export type IDataScope = {
   readOnly: Set<string>;
   creatorFieldId?: string;
   creatorIds?: string[];
+  appliedRoleId?: string;
 };
 
 function isViewConfiguration(object: Record<string, unknown>, key: string) {
@@ -199,19 +202,35 @@ export class TableDataAccessService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly cls: ClsService<IClsStore>,
-    private readonly router: DatabaseRouter
+    private readonly router: DatabaseRouter,
+    private readonly roles: DirectoryRoleService
   ) {}
 
-  async restrictedTables(baseId?: string) {
+  async restrictedTables(baseId?: string, userId = this.cls.get('user.id')) {
     const rows = await this.prisma.tableAuthorityPolicy.findMany({});
-    const restrictions = rows.flatMap((row) => {
+    // Resolve only when a policy uses role scopes. Every call uses the explicit target
+    // user, including previews, rather than inheriting the inspecting administrator.
+    const parsedRows = rows.map((row) => {
       const parsed = tableAuthorityPolicySchema.safeParse(row.policy);
       if (!parsed.success) throw new ForbiddenException('Invalid stored data access policy');
-      return parsed.data.enabled
-        ? (parsed.data.restrictions || []).map((restriction) => ({
+      return { row, policy: parsed.data };
+    });
+    const needsRoles = parsedRows.some(
+      ({ policy }) =>
+        policy.enabled && policy.restrictions?.some((item) => item.roleOverrides?.length)
+    );
+    const effectiveRoles = needsRoles && userId ? await this.roles.resolveForUser(userId) : [];
+    const restrictions = parsedRows.flatMap(({ row, policy }) => {
+      const roleIds = new Set(
+        effectiveRoles
+          .filter((role) => role.connectionId === row.connectionId)
+          .map((role) => role.roleId)
+      );
+      return policy.enabled
+        ? (policy.restrictions || []).map((restriction) => ({
             baseId: row.baseId,
             connectionId: row.connectionId,
-            restriction,
+            ...resolveRoleDataRestriction(restriction, roleIds),
           }))
         : [];
     });
@@ -293,7 +312,7 @@ export class TableDataAccessService {
       select: { id: true, baseId: true, dbTableName: true },
     });
     if (!table) return;
-    const restrictions = await this.restrictedTables();
+    const restrictions = await this.restrictedTables(undefined, userId);
     if (!restrictions.length) return;
     const own = restrictions.find((item) => item.restriction.tableId === tableId);
     const fields = await this.prisma.field.findMany({
@@ -353,6 +372,7 @@ export class TableDataAccessService {
       readOnly: new Set([...hidden, ...restriction.readOnlyFieldIds]),
       creatorFieldId,
       creatorIds,
+      appliedRoleId: own?.appliedRoleId,
     };
   }
 

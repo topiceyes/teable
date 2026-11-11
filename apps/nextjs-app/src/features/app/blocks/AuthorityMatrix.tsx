@@ -65,7 +65,11 @@ function hasUnavailableReferences(
         !options.tables.some((table) => table.id === rule.tableId)
     ) ||
     (policy.restrictions || []).some(
-      (rule) => !options.tables.some((table) => table.id === rule.tableId)
+      (rule) =>
+        !options.tables.some((table) => table.id === rule.tableId) ||
+        rule.roleOverrides?.some(
+          (override) => !connection.roles.some((role) => role.id === override.roleId)
+        )
     )
   );
 }
@@ -400,6 +404,7 @@ function MatrixEditor({
         policy={policy}
         tables={options.data?.tables || []}
         disabled={busy || !connection}
+        roles={connection?.roles || []}
         onChange={change}
       />
       <div className="sticky bottom-0 space-y-3 rounded border bg-background p-4 shadow-sm">

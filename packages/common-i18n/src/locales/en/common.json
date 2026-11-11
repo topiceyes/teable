@@ -1456,7 +1456,17 @@
       "retry": "Retry",
       "previewSavedOnly": "There are unsaved changes above. This preview uses only the policy saved on the server.",
       "creatorFieldRequired": "To use own or department scopes, add a Created By field to this table, then reload the available options.",
-      "refreshOptions": "Refresh roles and tables"
+      "refreshOptions": "Refresh roles and tables",
+      "roleScopes": "Role scopes (first match wins)",
+      "roleScopesHelp": "For each table, the first matching active business role replaces the entire default scope. Unmatched users use the default. A role scope grants no table actions or base membership. New scopes copy the current default; review fields and record scope before saving.",
+      "defaultScope": "Default scope",
+      "defaultScopeHelp": "Used when no role scope matches. A matching role replaces the record scope, hidden fields and read-only fields as one unit.",
+      "restrictionRole": "Choose scope role",
+      "addRoleScope": "Add role scope",
+      "moveUp": "Move up",
+      "moveDown": "Move down",
+      "removeRoleScope": "Remove role scope",
+      "scopeSource": "Data scope source"
     },
     "authority": {
       "title": "Employee authority overview and diagnostics",
@@ -1550,7 +1560,9 @@
         "emptyDepartmentScope": "The department record scope is empty. Check active bindings, departments and peers in the policy enterprise; access never falls back to all records.",
         "fieldRestrictions": "Hidden or read-only fields apply independently of allowed table actions.",
         "adminScopeExempt": "This account is an instance administrator and has a field and record management exemption. Test employee restrictions with an ordinary account."
-      }
+      },
+      "scopeSource": "Data scope source",
+      "defaultScope": "Default scope"
     }
   },
   "notification": {

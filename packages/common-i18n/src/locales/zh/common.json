@@ -1454,7 +1454,17 @@
       "retry": "重试",
       "previewSavedOnly": "上方有未保存的更改；本次预览只计算服务器上已保存的策略。",
       "creatorFieldRequired": "如需选择本人或部门范围，请先回到数据表添加“创建人”类型的字段，再重新加载候选项。",
-      "refreshOptions": "刷新角色和数据表"
+      "refreshOptions": "刷新角色和数据表",
+      "roleScopes": "按角色设置范围（从上到下匹配）",
+      "roleScopesHelp": "同一表从上往下使用第一个匹配的有效业务角色，整组替换该表默认范围；未匹配时使用默认范围。角色范围本身不授予表操作或数据库成员资格。新增规则先复制当前默认范围，请检查字段及记录范围后保存。",
+      "defaultScope": "默认范围",
+      "defaultScopeHelp": "未匹配任何角色范围时使用；角色范围会替换此处的记录范围、隐藏字段和只读字段。",
+      "restrictionRole": "选择范围角色",
+      "addRoleScope": "添加角色范围",
+      "moveUp": "上移",
+      "moveDown": "下移",
+      "removeRoleScope": "移除角色范围",
+      "scopeSource": "数据范围来源"
     },
     "authority": {
       "title": "人员授权总览与诊断",
@@ -1548,7 +1558,9 @@
         "emptyDepartmentScope": "当前部门记录范围为空：请核对策略所属企业的有效员工绑定、部门与同部门成员状态；不会退回全部记录。",
         "fieldRestrictions": "字段隐藏或只读限制已生效；表级操作“允许”仍需遵守这些字段限制。",
         "adminScopeExempt": "该本地账号是实例管理员，保留字段和记录范围的管理豁免；请用普通账号验证员工限制。"
-      }
+      },
+      "scopeSource": "数据范围来源",
+      "defaultScope": "默认范围"
     }
   },
   "notification": {

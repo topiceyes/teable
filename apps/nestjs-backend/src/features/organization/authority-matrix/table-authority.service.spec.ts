@@ -77,16 +77,14 @@ describe('table authority policy persistence and resolution', () => {
   });
   it('includes the enterprise identifier for inline role management without exposing credentials', async () => {
     const { service, tx } = fixture();
-    const connections = vi
-      .fn()
-      .mockResolvedValue([
-        {
-          id: 'connection',
-          name: 'Company',
-          tenantId: 'corp',
-          businessRoles: [{ id: 'finance', name: 'Finance' }],
-        },
-      ]);
+    const connections = vi.fn().mockResolvedValue([
+      {
+        id: 'connection',
+        name: 'Company',
+        tenantId: 'corp',
+        businessRoles: [{ id: 'finance', name: 'Finance' }],
+      },
+    ]);
     const tables = vi.fn().mockResolvedValue([{ id: 'table', name: 'Invoices', fields: [] }]);
     Object.assign(tx.directoryConnection, { findMany: connections });
     Object.assign(tx.tableMeta, { findMany: tables });
@@ -118,6 +116,105 @@ describe('table authority policy persistence and resolution', () => {
     expect(audit.emitAtomic).toHaveBeenCalledWith(
       expect.objectContaining({ action: 'base.authority-matrix.update', resourceId: 'base' })
     );
+  });
+  it('validates role scope references even when they grant no actions', async () => {
+    const { service, tx } = fixture();
+    Object.assign(tx, {
+      field: {
+        findMany: vi.fn().mockResolvedValue([
+          { id: 'primary', type: 'singleLineText', isPrimary: true },
+          { id: 'creator', type: 'createdBy', isPrimary: false },
+        ]),
+      },
+    });
+    const scope = {
+      roleId: 'manager',
+      rowScope: 'department' as const,
+      hiddenFieldIds: [],
+      readOnlyFieldIds: [],
+    };
+    const restriction = {
+      tableId: 'table',
+      rowScope: 'own' as const,
+      hiddenFieldIds: [],
+      readOnlyFieldIds: [],
+      roleOverrides: [scope],
+    };
+    const inputWithScope = {
+      ...input,
+      policy: { ...policy, rules: [], restrictions: [restriction] },
+    };
+    await service.save(inputWithScope);
+    expect(tx.directoryBusinessRole.count).toHaveBeenCalledWith({
+      where: { id: { in: ['manager'] }, connectionId: 'connection', enabled: true },
+    });
+    tx.directoryBusinessRole.count.mockResolvedValue(0);
+    await expect(service.save(inputWithScope)).rejects.toThrow('unavailable in this scope');
+  });
+  it.each([
+    { hiddenFieldIds: ['foreign'], message: 'field is unavailable' },
+    { hiddenFieldIds: ['primary'], message: 'Primary field cannot' },
+  ])(
+    'rejects invalid fields inside a role override: $message',
+    async ({ hiddenFieldIds, message }) => {
+      const { service, tx } = fixture();
+      Object.assign(tx, {
+        field: {
+          findMany: vi
+            .fn()
+            .mockResolvedValue([{ id: 'primary', type: 'singleLineText', isPrimary: true }]),
+        },
+      });
+      await expect(
+        service.save({
+          ...input,
+          policy: {
+            ...policy,
+            restrictions: [
+              {
+                tableId: 'table',
+                rowScope: 'all',
+                hiddenFieldIds: [],
+                readOnlyFieldIds: [],
+                roleOverrides: [
+                  { roleId: 'finance', rowScope: 'all', hiddenFieldIds, readOnlyFieldIds: [] },
+                ],
+              },
+            ],
+          },
+        })
+      ).rejects.toThrow(message);
+    }
+  );
+  it('requires creator fields for role-specific row scopes and permits disabling stale role scopes', async () => {
+    const { service, tx } = fixture();
+    Object.assign(tx, { field: { findMany: vi.fn().mockResolvedValue([]) } });
+    const next = {
+      ...input,
+      policy: {
+        ...policy,
+        restrictions: [
+          {
+            tableId: 'table',
+            rowScope: 'all' as const,
+            hiddenFieldIds: [],
+            readOnlyFieldIds: [],
+            roleOverrides: [
+              {
+                roleId: 'finance',
+                rowScope: 'own' as const,
+                hiddenFieldIds: [],
+                readOnlyFieldIds: [],
+              },
+            ],
+          },
+        ],
+      },
+    };
+    await expect(service.save(next)).rejects.toThrow('Created By');
+    tx.directoryBusinessRole.count.mockClear();
+    await service.save({ ...next, policy: { ...next.policy, enabled: false } });
+    expect(tx.directoryBusinessRole.count).not.toHaveBeenCalled();
   });
   it('rejects foreign or deleted tables and foreign business roles', async () => {
     for (const model of ['tableMeta', 'directoryBusinessRole'] as const) {

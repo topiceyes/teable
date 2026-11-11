@@ -106,6 +106,11 @@ export class TableAuthorityPreviewService {
                 .filter((field) => dataScope.readOnly.has(field.id))
                 .map((field) => field.name),
               emptyRowScope: dataScope.creatorIds?.length === 0,
+              appliedRole: dataScope.appliedRoleId
+                ? roles
+                    .filter((role) => role.roleId === dataScope.appliedRoleId)
+                    .map((role) => ({ id: role.roleId, name: role.name }))[0] || null
+                : null,
             }
           : null,
         note: 'Interactive account permissions; access tokens and share links have separate limits.',
