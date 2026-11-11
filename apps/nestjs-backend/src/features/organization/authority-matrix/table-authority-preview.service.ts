@@ -1,4 +1,5 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
+import { HttpErrorCode } from '@teable/core';
 import { PrismaService } from '@teable/db-main-prisma';
 import {
   tableAuthorityPolicySchema,
@@ -6,6 +7,7 @@ import {
   type ITableAuthorityPreviewRo,
 } from '@teable/openapi';
 import { ClsService } from 'nestjs-cls';
+import { CustomHttpException } from '../../../custom.exception';
 import type { IClsStore } from '../../../types/cls';
 import { PermissionService } from '../../auth/permission.service';
 import { DirectoryRoleService } from '../directory/directory-role.service';
@@ -20,6 +22,21 @@ export class TableAuthorityPreviewService {
     private readonly roles: DirectoryRoleService,
     private readonly dataAccess: TableDataAccessService
   ) {}
+
+  async baseAccess(user: IClsStore['user'], baseId: string) {
+    return this.cls.runWith({ user } as IClsStore, async () => {
+      try {
+        return await this.permissions.getPermissionsByResourceId(baseId);
+      } catch (error) {
+        if (
+          error instanceof CustomHttpException &&
+          error.code === HttpErrorCode.RESTRICTED_RESOURCE
+        )
+          return [];
+        throw error;
+      }
+    });
+  }
 
   async preview(ro: ITableAuthorityPreviewRo) {
     const table = await this.prisma.tableMeta.findFirst({
@@ -46,11 +63,7 @@ export class TableAuthorityPreviewService {
     // A fresh store simulates an interactive login. Never inherit the administrator, token, share or ancestry caches.
     return this.cls.runWith({ user } as IClsStore, async () => {
       let baseActions: Awaited<ReturnType<PermissionService['getPermissionsByResourceId']>> = [];
-      try {
-        baseActions = await this.permissions.getPermissionsByResourceId(ro.baseId);
-      } catch {
-        /* no base membership */
-      }
+      baseActions = await this.baseAccess(user, ro.baseId);
       const hasBaseAccess = baseActions.includes('base|read');
       const effective = hasBaseAccess
         ? await this.permissions.getPermissionsByResourceId(ro.tableId)
@@ -92,6 +105,7 @@ export class TableAuthorityPreviewService {
               readOnlyFields: dataScope.fields
                 .filter((field) => dataScope.readOnly.has(field.id))
                 .map((field) => field.name),
+              emptyRowScope: dataScope.creatorIds?.length === 0,
             }
           : null,
         note: 'Interactive account permissions; access tokens and share links have separate limits.',

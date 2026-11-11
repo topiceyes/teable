@@ -42,3 +42,5 @@
 第 22 期：[钉钉扫码登录与员工自动绑定](22-dingtalk-qr-login.md)。
 
 第 23 期：[权限矩阵配置流程完善](23-matrix-configuration-workflow.md)，1.1.1 串联角色、绑定和成员配置，提供部门搜索、权限快捷配置与编辑保护。
+
+第 24 期：[人员授权总览与权限诊断](24-member-authority-diagnostics.md)，1.2.0 提供员工身份、业务角色及逐库逐表权限来源的只读诊断。

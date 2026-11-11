@@ -6,9 +6,14 @@ import {
   type ITableAuthorityPreviewRo,
   type ITableAuthorityGetRo,
   type ITableAuthoritySaveRo,
+  memberAuthorityRoSchema,
+  memberAuthorityTablesRoSchema,
+  type IMemberAuthorityRo,
+  type IMemberAuthorityTablesRo,
 } from '@teable/openapi';
 import { ZodValidationPipe } from '../../../zod.validation.pipe';
 import { Permissions } from '../../auth/decorators/permissions.decorator';
+import { MemberAuthorityService } from './member-authority.service';
 import { TableAuthorityPreviewService } from './table-authority-preview.service';
 import { TableAuthorityService } from './table-authority.service';
 
@@ -17,8 +22,19 @@ import { TableAuthorityService } from './table-authority.service';
 export class TableAuthorityController {
   constructor(
     private readonly service: TableAuthorityService,
-    private readonly previewService: TableAuthorityPreviewService
+    private readonly previewService: TableAuthorityPreviewService,
+    private readonly members: MemberAuthorityService
   ) {}
+  @Get('memberOverview')
+  memberOverview(@Query(new ZodValidationPipe(memberAuthorityRoSchema)) ro: IMemberAuthorityRo) {
+    return this.members.overview(ro);
+  }
+  @Get('memberTables')
+  memberTables(
+    @Query(new ZodValidationPipe(memberAuthorityTablesRoSchema)) ro: IMemberAuthorityTablesRo
+  ) {
+    return this.members.tables(ro);
+  }
   @Get('preview')
   preview(
     @Query(new ZodValidationPipe(tableAuthorityPreviewRoSchema)) ro: ITableAuthorityPreviewRo

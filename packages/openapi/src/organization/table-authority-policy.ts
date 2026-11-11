@@ -31,6 +31,7 @@ export const tableAuthorityPreviewVoSchema = z.object({
       rowScope: z.enum(['all', 'own', 'department']),
       hiddenFields: z.array(z.string()),
       readOnlyFields: z.array(z.string()),
+      emptyRowScope: z.boolean().optional(),
     })
     .nullable(),
 });

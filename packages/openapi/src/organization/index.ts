@@ -5,3 +5,4 @@ export * from './directory-sync';
 export * from './directory-member';
 export * from './directory-role';
 export * from './table-authority-policy';
+export * from './member-authority';
