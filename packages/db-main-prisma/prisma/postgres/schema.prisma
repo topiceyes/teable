@@ -1475,6 +1475,8 @@ model DirectoryBusinessRole {
   @@unique([connectionId, nameKey])
   @@unique([id, connectionId])
   @@map("directory_business_role")
+  history DirectoryRoleHistory[]
+
 }
 
 
@@ -1492,4 +1494,19 @@ model TableAuthorityPolicy {
 
   @@index([connectionId])
   @@map("table_authority_policy")
+}
+
+// Transactional configuration history; actor labels and role snapshots survive account renames.
+model DirectoryRoleHistory {
+  id String @id @default(cuid())
+  roleId String @map("role_id")
+  actorId String? @map("actor_id")
+  actorName String? @map("actor_name")
+  before Json?
+  after Json
+  createdTime DateTime @default(now()) @map("created_time")
+  role DirectoryBusinessRole @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@index([roleId, createdTime, id])
+  @@map("directory_role_history")
 }

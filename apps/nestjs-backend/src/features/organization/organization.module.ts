@@ -5,6 +5,9 @@ import { DirectoryConnectionController } from './directory/directory-connection.
 import { DirectoryConnectionService } from './directory/directory-connection.service';
 import { DirectoryMemberController } from './directory/directory-member.controller';
 import { DirectoryMemberService } from './directory/directory-member.service';
+import { DirectoryRoleHistoryService } from './directory/directory-role-history.service';
+import { DirectoryRoleToolsController } from './directory/directory-role-tools.controller';
+import { DirectoryRoleToolsService } from './directory/directory-role-tools.service';
 import { DirectoryRoleController } from './directory/directory-role.controller';
 import { DirectoryRoleService } from './directory/directory-role.service';
 import { DirectorySyncController } from './directory/directory-sync.controller';
@@ -19,6 +22,7 @@ import { OrganizationService } from './organization.service';
     DirectorySyncController,
     DirectoryMemberController,
     DirectoryRoleController,
+    DirectoryRoleToolsController,
   ],
   exports: [DirectoryRoleService, DirectoryConnectionService],
   providers: [
@@ -29,6 +33,8 @@ import { OrganizationService } from './organization.service';
     DirectoryMemberService,
     OrganizationService,
     DirectoryRoleService,
+    DirectoryRoleHistoryService,
+    DirectoryRoleToolsService,
   ],
 })
 export class OrganizationModule {}

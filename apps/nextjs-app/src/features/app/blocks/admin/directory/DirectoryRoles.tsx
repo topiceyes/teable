@@ -4,6 +4,7 @@ import {
   getDirectoryRoleMembers,
   listDirectoryDepartments,
   listDirectoryRoles,
+  getDirectoryRoleCounts,
   saveDirectoryRole,
 } from '@teable/openapi';
 import {
@@ -22,9 +23,14 @@ import {
 } from '@teable/ui-lib/shadcn';
 import { useTranslation } from 'next-i18next';
 import { useState } from 'react';
+import { DirectoryAuthorityDialog } from './DirectoryAuthorityDialog';
+import { roleErrorKey, useRoleDiscard } from './DirectoryRoleEditing';
+import { DirectoryRoleHistory } from './DirectoryRoleHistory';
 import { DirectoryRolePeople } from './DirectoryRolePeople';
+import { DirectoryRolePreview } from './DirectoryRolePreview';
+import { DirectoryRoleRoster } from './DirectoryRoleRoster';
 
-function RoleEditor({
+export function RoleEditor({
   corpId,
   role,
   onClose,
@@ -62,11 +68,26 @@ function RoleEditor({
       onClose();
     },
   });
+  const draft = {
+    corpId,
+    roleId: role?.id,
+    expectedVersion: role?.version ?? 0,
+    name: name.trim(),
+    enabled,
+    rules,
+  };
+  const fingerprint = JSON.stringify(draft);
+  const [previewed, setPreviewed] = useState<string>();
+  const dirty =
+    name !== (role?.name ?? '') ||
+    enabled !== (role?.enabled ?? true) ||
+    JSON.stringify(rules) !== JSON.stringify(role?.rules ?? []);
+  const { requestClose, discardDialog } = useRoleDiscard(dirty, save.isPending, onClose);
   return (
     <Dialog
       open
       onOpenChange={(open) => {
-        if (!open && !save.isPending) onClose();
+        if (!open) requestClose();
       }}
     >
       <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto">
@@ -90,7 +111,7 @@ function RoleEditor({
           />
           {t('roleEnabled')}
         </label>
-        <p className="text-sm text-muted-foreground">{t('roleRulesDescription')}</p>
+        <p className="text-muted-foreground text-sm">{t('roleRulesDescription')}</p>
         <DirectoryRolePeople
           corpId={corpId}
           memberIds={rules.flatMap((rule) => (rule.type === 'member' ? [rule.memberId] : []))}
@@ -106,7 +127,7 @@ function RoleEditor({
         <section className="space-y-2 rounded border p-3">
           <h3 className="text-sm font-semibold">{t('departmentRule')}</h3>
           {departments.isError && (
-            <p role="alert" className="text-sm text-destructive">
+            <p role="alert" className="text-destructive text-sm">
               {t('loadFailed')}
             </p>
           )}
@@ -226,20 +247,32 @@ function RoleEditor({
             )
           )}
         </ul>
-        {!rules.length && <p className="text-sm text-muted-foreground">{t('noRoleRules')}</p>}
+        {!rules.length && <p className="text-muted-foreground text-sm">{t('noRoleRules')}</p>}
         {save.isError && (
-          <p role="alert" className="text-sm text-destructive">
-            {t('roleSaveFailed')}
+          <p role="alert" className="text-destructive text-sm">
+            {t(roleErrorKey(save.error))}
           </p>
         )}
         <div className="flex justify-end gap-2">
-          <Button variant="outline" disabled={save.isPending} onClick={onClose}>
+          <Button variant="outline" disabled={save.isPending} onClick={requestClose}>
             {t('cancel')}
           </Button>
-          <Button disabled={save.isPending || !name.trim()} onClick={() => save.mutate()}>
-            {save.isPending ? t('saving') : t('saveRole')}
+          <Button
+            disabled={save.isPending || !name.trim()}
+            onClick={() => setPreviewed(fingerprint)}
+          >
+            {t('previewRoleChanges')}
           </Button>
         </div>
+        {previewed === fingerprint && (
+          <DirectoryRolePreview
+            key={fingerprint}
+            draft={draft}
+            busy={save.isPending}
+            onSave={() => save.mutate()}
+          />
+        )}
+        {discardDialog}
       </DialogContent>
     </Dialog>
   );
@@ -277,7 +310,7 @@ function RoleMembers({
             {t('effectiveMembers')} · {role.name}
           </DialogTitle>
         </DialogHeader>
-        <p className="text-sm text-muted-foreground">{t('effectiveMembersDescription')}</p>
+        <p className="text-muted-foreground text-sm">{t('effectiveMembersDescription')}</p>
         {query.isFetching && <p role="status">{t('loading')}</p>}
         {query.isError && <p role="alert">{t('loadFailed')}</p>}
         {query.data && (
@@ -332,6 +365,14 @@ export function DirectoryRoles({
   });
   const [editor, setEditor] = useState<IDirectoryRoleVo | 'new'>();
   const [members, setMembers] = useState<IDirectoryRoleVo>();
+  const [roster, setRoster] = useState<IDirectoryRoleVo>();
+  const [history, setHistory] = useState<IDirectoryRoleVo>();
+  const [diagnose, setDiagnose] = useState<string>();
+  const counts = useQuery({
+    queryKey: ['directory-role-counts', corpId],
+    queryFn: () => getDirectoryRoleCounts(corpId).then(({ data }) => data),
+    staleTime: 0,
+  });
   return (
     <section className="space-y-3">
       <div className="flex items-center justify-between gap-2">
@@ -343,10 +384,10 @@ export function DirectoryRoles({
           {t('createRole')}
         </Button>
       </div>
-      <p className="text-sm text-muted-foreground">{t('rolesDescription')}</p>
+      <p className="text-muted-foreground text-sm">{t('rolesDescription')}</p>
       {roles.isLoading && <p role="status">{t('loading')}</p>}
       {roles.isError && (
-        <p role="alert" className="text-sm text-destructive">
+        <p role="alert" className="text-destructive text-sm">
           {t('directoryLoadFailed')}{' '}
           <Button variant="link" onClick={() => roles.refetch()}>
             {t('retry')}
@@ -359,12 +400,31 @@ export function DirectoryRoles({
           <li key={role.id} className="flex items-center justify-between gap-3 rounded border p-3">
             <div>
               <h3 className="font-medium">{role.name}</h3>
-              <p className="text-xs text-muted-foreground">
+              <p className="text-muted-foreground text-xs">
                 {role.enabled ? t('roleEnabled') : t('roleDisabled')} ·{' '}
                 {t('ruleCount', { count: role.rules.length })}
               </p>
+              {counts.data?.find((row) => row.roleId === role.id) && (
+                <p className="text-muted-foreground text-xs">
+                  {t(
+                    'roleCounts',
+                    counts.data.find((row) => row.roleId === role.id)!
+                  )}
+                </p>
+              )}
             </div>
-            <div className="flex gap-2">
+            <div className="flex flex-wrap gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={syncBusy}
+                onClick={() => setRoster(role)}
+              >
+                {t('manageRoleMembers')}
+              </Button>
+              <Button size="sm" variant="outline" onClick={() => setHistory(role)}>
+                {t('roleHistory')}
+              </Button>
               <Button
                 size="sm"
                 variant="outline"
@@ -394,8 +454,51 @@ export function DirectoryRoles({
           onSaved={() => {
             void client.invalidateQueries({ queryKey: ['directory-roles', corpId] });
             void client.invalidateQueries({ queryKey: ['directory-role-members', corpId] });
+            for (const key of [
+              'directory-role-counts',
+              'directory-role-roster',
+              'directory-role-history',
+              'directory-role-checks',
+              'directory-member-roles',
+              'directory-role-impact',
+              'member-authority-overview',
+              'member-authority-tables',
+            ]) {
+              void client.invalidateQueries({ queryKey: [key, corpId] });
+            }
             onChanged?.();
           }}
+        />
+      )}
+      {counts.isError && (
+        <p role="alert">
+          {t('roleCountsFailed')}{' '}
+          <Button variant="link" onClick={() => counts.refetch()}>
+            {t('retry')}
+          </Button>
+        </p>
+      )}
+      {roster && (
+        <DirectoryRoleRoster
+          corpId={corpId}
+          role={roster}
+          syncBusy={syncBusy}
+          onClose={() => setRoster(undefined)}
+          onDiagnose={setDiagnose}
+        />
+      )}
+      {history && (
+        <DirectoryRoleHistory
+          corpId={corpId}
+          role={history}
+          onClose={() => setHistory(undefined)}
+        />
+      )}
+      {diagnose && (
+        <DirectoryAuthorityDialog
+          corpId={corpId}
+          memberId={diagnose}
+          onClose={() => setDiagnose(undefined)}
         />
       )}
       {members && (

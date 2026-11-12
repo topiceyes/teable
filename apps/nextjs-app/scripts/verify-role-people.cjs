@@ -249,6 +249,7 @@ async function browserCheck() {
   await dialog.getByRole('textbox', { name: '搜索姓名或钉钉员工 ID', exact: true }).fill('员工');
   await dialog.getByRole('button', { name: '搜索', exact: true }).click();
   await dialog.getByRole('button', { name: '添加人员 员工', exact: true }).click();
+  await dialog.getByRole('button', { name: '预览成员变化', exact: true }).click();
   await dialog.getByRole('button', { name: '保存角色', exact: true }).click();
   await dialog.waitFor({ state: 'hidden' });
   let rolesResponse = await request(
@@ -273,6 +274,7 @@ async function browserCheck() {
   await roleItem.getByRole('button', { name: '编辑角色', exact: true }).click();
   dialog = page.getByRole('dialog');
   await dialog.getByRole('button', { name: '移除人员 员工', exact: true }).click();
+  await dialog.getByRole('button', { name: '预览成员变化', exact: true }).click();
   await dialog.getByRole('button', { name: '保存角色', exact: true }).click();
   await dialog.waitFor({ state: 'hidden' });
   rolesResponse = await request('GET', '/admin/organization/dingtalk/listRoles?corpId=' + corpId);

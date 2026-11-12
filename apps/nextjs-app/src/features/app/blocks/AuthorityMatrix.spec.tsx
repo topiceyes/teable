@@ -9,7 +9,11 @@ const mocks = vi.hoisted(() => ({
   saveTableAuthorityPolicy: vi.fn(),
   previewTableAuthority: vi.fn(),
   listDirectoryRoles: vi.fn(),
+  getDirectoryRoleCounts: vi.fn(),
   saveDirectoryRole: vi.fn(),
+  previewDirectoryRole: vi.fn(),
+  getDirectoryMemberRoles: vi.fn(),
+  saveDirectoryMemberRoles: vi.fn(),
   listDirectoryDepartments: vi.fn(),
   getDirectoryRoleMembers: vi.fn(),
   listDirectoryMembers: vi.fn(),
@@ -47,6 +51,7 @@ function mount() {
 }
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.getDirectoryRoleCounts.mockResolvedValue({ data: [] });
   mocks.session.user.isAdmin = true;
   mocks.getTableAuthorityPolicy.mockResolvedValue({ data: structuredClone(saved) });
   mocks.getTableAuthorityOptions.mockResolvedValue({
@@ -75,6 +80,15 @@ beforeEach(() => {
   mocks.saveTableAuthorityPolicy.mockResolvedValue({ data: { ...saved, revision: 4 } });
   mocks.listDirectoryRoles.mockResolvedValue({ data: [] });
   mocks.saveDirectoryRole.mockResolvedValue({ data: {} });
+  mocks.previewDirectoryRole.mockResolvedValue({
+    data: {
+      before: 0,
+      after: 0,
+      counts: { added: 0, removed: 0, retained: 0, pending: 0 },
+      total: 0,
+      members: [],
+    },
+  });
   mocks.listDirectoryDepartments.mockResolvedValue({ data: [] });
   mocks.listDirectoryMembers.mockResolvedValue({ data: { members: [], total: 0 } });
   mocks.searchDirectoryAccounts.mockResolvedValue({
@@ -219,6 +233,8 @@ describe('community table matrix configuration', () => {
       )
     );
     options.connections[0].roles = [{ id: 'sales', name: 'Sales' }];
+    fireEvent.click(dialog.getByRole('button', { name: 'previewRoleChanges' }));
+    await waitFor(() => expect(dialog.getByRole('button', { name: 'saveRole' })).toBeEnabled());
     fireEvent.click(dialog.getByRole('button', { name: 'saveRole' }));
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
     expect(mocks.saveDirectoryRole).toHaveBeenCalledWith(

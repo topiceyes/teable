@@ -6,10 +6,12 @@ import { DirectoryRoles } from './DirectoryRoles';
 
 const mocks = vi.hoisted(() => ({
   listDirectoryRoles: vi.fn(),
+  getDirectoryRoleCounts: vi.fn(),
   listDirectoryMembers: vi.fn(),
   listDirectoryDepartments: vi.fn(),
   saveDirectoryRole: vi.fn(),
   getDirectoryRoleMembers: vi.fn(),
+  previewDirectoryRole: vi.fn(),
 }));
 vi.mock('@teable/openapi', () => mocks);
 vi.mock('next-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
@@ -48,12 +50,24 @@ function mount() {
 }
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.getDirectoryRoleCounts.mockResolvedValue({ data: [] });
   mocks.listDirectoryRoles.mockResolvedValue({ data: [role] });
   mocks.listDirectoryDepartments.mockResolvedValue({
     data: [{ id: 'dept', name: 'Finance', pathName: ['Finance'] }],
   });
   mocks.listDirectoryMembers.mockResolvedValue({ data: { members: [employee], total: 1 } });
   mocks.saveDirectoryRole.mockResolvedValue({ data: role });
+  mocks.previewDirectoryRole.mockResolvedValue({
+    data: {
+      before: 1,
+      after: 1,
+      counts: { added: 0, removed: 0, retained: 1, pending: 0 },
+      total: 1,
+      members: [
+        { memberId: 'employee', name: 'Alice', externalId: 'dt-alice', change: 'retained' },
+      ],
+    },
+  });
 });
 afterEach(cleanup);
 describe('specified role people', () => {
@@ -69,6 +83,8 @@ describe('specified role people', () => {
     });
     expect(screen.getByText('removeRoleMemberDescription')).toBeInTheDocument();
     fireEvent.click(selected.getByRole('button', { name: 'removeRoleMember Alice' }));
+    fireEvent.click(screen.getByRole('button', { name: 'previewRoleChanges' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'saveRole' })).toBeEnabled());
     fireEvent.click(screen.getByRole('button', { name: 'saveRole' }));
     await waitFor(() =>
       expect(mocks.saveDirectoryRole).toHaveBeenCalledWith({
@@ -96,6 +112,8 @@ describe('specified role people', () => {
     fireEvent.click(screen.getByRole('button', { name: 'search' }));
     fireEvent.click(await screen.findByRole('button', { name: 'addRoleMember Alice' }));
     expect(screen.getByRole('button', { name: 'addRoleMember Alice' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'previewRoleChanges' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'saveRole' })).toBeEnabled());
     fireEvent.click(screen.getByRole('button', { name: 'saveRole' }));
     await waitFor(() =>
       expect(mocks.saveDirectoryRole).toHaveBeenCalledWith({
@@ -137,9 +155,58 @@ describe('specified role people', () => {
     mount();
     fireEvent.click(await screen.findByRole('button', { name: 'editRole' }));
     await screen.findByText('Alice');
+    fireEvent.click(screen.getByRole('button', { name: 'previewRoleChanges' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'saveRole' })).toBeEnabled());
     fireEvent.click(screen.getByRole('button', { name: 'saveRole' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('roleSaveFailed');
     expect(screen.getByRole('dialog')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'removeRoleMember Alice' })).toBeEnabled();
+  });
+  it('invalidates the displayed preview when the draft changes', async () => {
+    mount();
+    fireEvent.click(await screen.findByRole('button', { name: 'editRole' }));
+    fireEvent.click(screen.getByRole('button', { name: 'previewRoleChanges' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'saveRole' })).toBeEnabled());
+    expect(screen.getByText(/roleChange_retained/)).toBeInTheDocument();
+    fireEvent.change(screen.getByRole('textbox', { name: 'roleName' }), {
+      target: { value: 'New' },
+    });
+    expect(screen.queryByRole('button', { name: 'saveRole' })).not.toBeInTheDocument();
+    expect(mocks.saveDirectoryRole).not.toHaveBeenCalled();
+  });
+  it('blocks saving after a failed preview and gives a specific conflict message', async () => {
+    mocks.previewDirectoryRole.mockRejectedValue(
+      new Error('Role changed or unavailable; refresh before editing')
+    );
+    mount();
+    fireEvent.click(await screen.findByRole('button', { name: 'editRole' }));
+    fireEvent.click(screen.getByRole('button', { name: 'previewRoleChanges' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('roleErrorConflict');
+    expect(screen.getByRole('button', { name: 'saveRole' })).toBeDisabled();
+    expect(mocks.saveDirectoryRole).not.toHaveBeenCalled();
+  });
+  it('protects modified content when cancelling and allows explicit discard', async () => {
+    mount();
+    fireEvent.click(await screen.findByRole('button', { name: 'editRole' }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'roleName' }), {
+      target: { value: 'Unsaved' },
+    });
+    const unload = new Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(unload);
+    expect(unload.defaultPrevented).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: 'cancel' }));
+    expect(screen.getByRole('alertdialog')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'continueEditing' }));
+    expect(screen.getByRole('textbox', { name: 'roleName' })).toHaveValue('Unsaved');
+    fireEvent.click(screen.getByRole('button', { name: 'cancel' }));
+    fireEvent.click(screen.getByRole('button', { name: 'discardChanges' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+  });
+  it('closes an unchanged editor without asking to discard', async () => {
+    mount();
+    fireEvent.click(await screen.findByRole('button', { name: 'editRole' }));
+    fireEvent.click(screen.getByRole('button', { name: 'cancel' }));
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 });

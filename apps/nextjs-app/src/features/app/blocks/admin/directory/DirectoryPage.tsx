@@ -20,6 +20,7 @@ import { useTranslation } from 'next-i18next';
 import { useState } from 'react';
 import { DirectoryConnectionEditor } from './DirectoryConnectionEditor';
 import { DirectoryMembers } from './DirectoryMembers';
+import { DirectoryRoleChecks } from './DirectoryRoleChecks';
 import { DirectoryRoles } from './DirectoryRoles';
 import { DirectorySyncPreview } from './DirectorySyncPreview';
 
@@ -76,7 +77,7 @@ function DirectoryDepartments({ corpId }: { corpId: string }) {
       </nav>
       {departments.isLoading && <p role="status">{t('loading')}</p>}
       {departments.isError && (
-        <p role="alert" className="text-sm text-destructive">
+        <p role="alert" className="text-destructive text-sm">
           {t('directoryLoadFailed')}{' '}
           <Button variant="link" onClick={() => departments.refetch()}>
             {t('retry')}
@@ -89,7 +90,7 @@ function DirectoryDepartments({ corpId }: { corpId: string }) {
             <li key={department.id} className="flex items-center justify-between gap-3 p-3 text-sm">
               <div>
                 <p className="font-medium">{department.name}</p>
-                <p className="text-xs text-muted-foreground">{department.pathName?.join(' / ')}</p>
+                <p className="text-muted-foreground text-xs">{department.pathName?.join(' / ')}</p>
               </div>
               {department.hasChildren && (
                 <Button
@@ -106,7 +107,7 @@ function DirectoryDepartments({ corpId }: { corpId: string }) {
             </li>
           ))}
           {!visible?.length && (
-            <li className="p-3 text-sm text-muted-foreground">{t('noDepartments')}</li>
+            <li className="text-muted-foreground p-3 text-sm">{t('noDepartments')}</li>
           )}
         </ul>
       )}
@@ -131,6 +132,10 @@ function DirectoryConnectionPanel({ corpId }: { corpId: string }) {
       'directory-departments',
       'directory-accounts',
       'directory-role-members',
+      'directory-role-counts',
+      'directory-role-checks',
+      'directory-role-roster',
+      'directory-member-roles',
     ]) {
       void queryClient.invalidateQueries({ queryKey: [key, corpId] });
     }
@@ -147,7 +152,9 @@ function DirectoryConnectionPanel({ corpId }: { corpId: string }) {
     },
   });
   const busy = preview.isPending || sync.isPending;
-  const [tab, setTab] = useState<'members' | 'departments' | 'roles' | 'runs'>('members');
+  const [tab, setTab] = useState<'members' | 'departments' | 'roles' | 'checks' | 'runs'>(
+    'members'
+  );
   const statusLabel = (status: string) => {
     switch (status) {
       case 'pending':
@@ -165,7 +172,7 @@ function DirectoryConnectionPanel({ corpId }: { corpId: string }) {
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border p-4">
-        <p className="max-w-2xl text-sm text-muted-foreground">{t('syncDescription')}</p>
+        <p className="text-muted-foreground max-w-2xl text-sm">{t('syncDescription')}</p>
         <div className="flex gap-2">
           <Button variant="outline" disabled={busy} onClick={refresh}>
             {t('refresh')}
@@ -182,12 +189,12 @@ function DirectoryConnectionPanel({ corpId }: { corpId: string }) {
         </div>
       </div>
       {preview.isError && (
-        <p role="alert" className="text-sm text-destructive">
+        <p role="alert" className="text-destructive text-sm">
           {t('previewFailed')}
         </p>
       )}
       {sync.isError && (
-        <p role="alert" className="text-sm text-destructive">
+        <p role="alert" className="text-destructive text-sm">
           {t('syncFailed')}
         </p>
       )}
@@ -197,7 +204,7 @@ function DirectoryConnectionPanel({ corpId }: { corpId: string }) {
         </p>
       )}
       <div className="flex gap-2 border-b pb-3" role="group" aria-label={t('sections')}>
-        {(['members', 'departments', 'roles', 'runs'] as const).map((key) => (
+        {(['members', 'departments', 'roles', 'checks', 'runs'] as const).map((key) => (
           <Button
             key={key}
             variant={tab === key ? 'default' : 'outline'}
@@ -210,7 +217,9 @@ function DirectoryConnectionPanel({ corpId }: { corpId: string }) {
                 ? t('departments')
                 : key === 'roles'
                   ? t('businessRoles')
-                  : t('syncLogs')}
+                  : key === 'checks'
+                    ? t('roleChecks')
+                    : t('syncLogs')}
           </Button>
         ))}
       </div>
@@ -226,12 +235,13 @@ function DirectoryConnectionPanel({ corpId }: { corpId: string }) {
       )}
       {tab === 'departments' && <DirectoryDepartments corpId={corpId} />}
       {tab === 'roles' && <DirectoryRoles corpId={corpId} syncBusy={busy} />}
+      {tab === 'checks' && <DirectoryRoleChecks corpId={corpId} syncBusy={busy} />}
       {tab === 'runs' && (
         <section className="space-y-3">
           <h2 className="text-lg font-semibold">{t('syncLogs')}</h2>
           {runs.isLoading && <p role="status">{t('loading')}</p>}
           {runs.isError && (
-            <p role="alert" className="text-sm text-destructive">
+            <p role="alert" className="text-destructive text-sm">
               {t('loadFailed')}
             </p>
           )}
@@ -272,7 +282,7 @@ function DirectoryConnectionPanel({ corpId }: { corpId: string }) {
                 </tbody>
               </table>
               {!runs.data.length && (
-                <p className="p-3 text-sm text-muted-foreground">{t('noLogs')}</p>
+                <p className="text-muted-foreground p-3 text-sm">{t('noLogs')}</p>
               )}
             </div>
           )}
@@ -326,7 +336,7 @@ function DirectoryContent() {
       {connections.data?.length === 0 && (
         <div className="rounded-lg border p-6">
           <h2 className="font-semibold">{t('noConnections')}</h2>
-          <p className="mt-2 text-sm text-muted-foreground">{t('setupDescription')}</p>
+          <p className="text-muted-foreground mt-2 text-sm">{t('setupDescription')}</p>
         </div>
       )}
       {corpId && (
@@ -349,7 +359,7 @@ function DirectoryContent() {
             </Select>
           </div>
           {selectedConnection?.source === 'environment' && (
-            <p className="mb-4 text-sm text-muted-foreground">{t('environmentManaged')}</p>
+            <p className="text-muted-foreground mb-4 text-sm">{t('environmentManaged')}</p>
           )}
           <DirectoryConnectionPanel
             key={`${corpId}:${selectedConnection?.version}`}
@@ -378,7 +388,7 @@ export function DirectoryPage() {
     <main className="flex h-full min-w-0 flex-1 flex-col">
       <header className="border-b px-6 py-5">
         <h1 className="text-2xl font-semibold">{t('title')}</h1>
-        <p className="mt-1 text-sm text-muted-foreground">{t('description')}</p>
+        <p className="text-muted-foreground mt-1 text-sm">{t('description')}</p>
       </header>
       <div className="flex-1 overflow-y-auto p-6">
         {user?.isAdmin ? <DirectoryContent /> : <p role="alert">{t('adminRequired')}</p>}

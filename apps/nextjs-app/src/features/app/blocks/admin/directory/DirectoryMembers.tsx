@@ -6,6 +6,7 @@ import { useTranslation } from 'next-i18next';
 import { useState } from 'react';
 import { DirectoryAuthorityDialog } from './DirectoryAuthorityDialog';
 import { DirectoryBindingDialog } from './DirectoryBindingDialog';
+import { DirectoryMemberRoles } from './DirectoryMemberRoles';
 
 export function DirectoryMembers({
   corpId,
@@ -21,6 +22,7 @@ export function DirectoryMembers({
   const [search, setSearch] = useState('');
   const [submittedSearch, setSubmittedSearch] = useState('');
   const [page, setPage] = useState(0);
+  const [roleMember, setRoleMember] = useState<IDirectoryMemberVo>();
   const [binding, setBinding] = useState<IDirectoryMemberVo>();
   const [authorityMemberId, setAuthorityMemberId] = useState<string>();
   const members = useQuery({
@@ -57,7 +59,7 @@ export function DirectoryMembers({
       </form>
       {members.isLoading && <p role="status">{t('loading')}</p>}
       {members.isError && (
-        <p role="alert" className="text-sm text-destructive">
+        <p role="alert" className="text-destructive text-sm">
           {t('directoryLoadFailed')}{' '}
           <Button variant="link" onClick={() => members.refetch()}>
             {t('retry')}
@@ -88,7 +90,7 @@ export function DirectoryMembers({
                   <tr key={member.id} className="border-t">
                     <td className="p-3">
                       <div className="font-medium">{member.name}</div>
-                      <div className="text-xs text-muted-foreground">{member.externalId}</div>
+                      <div className="text-muted-foreground text-xs">{member.externalId}</div>
                     </td>
                     <td className="p-3">
                       {member.departments.map((department) => department.name).join(', ') || '—'}
@@ -113,6 +115,14 @@ export function DirectoryMembers({
                         >
                           {t('viewAuthority')}
                         </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={syncBusy}
+                          onClick={() => setRoleMember(member)}
+                        >
+                          {t('manageRoles')}
+                        </Button>
                       </div>
                     </td>
                   </tr>
@@ -121,7 +131,7 @@ export function DirectoryMembers({
             </table>
           </div>
           {!members.data.members.length && (
-            <p className="text-sm text-muted-foreground">{t('noEmployees')}</p>
+            <p className="text-muted-foreground text-sm">{t('noEmployees')}</p>
           )}
           <div className="flex items-center justify-between gap-2 text-sm">
             <p>{t('total', { count: members.data.total })}</p>
@@ -145,6 +155,17 @@ export function DirectoryMembers({
             </div>
           </div>
         </>
+      )}
+      {roleMember && (
+        <DirectoryMemberRoles
+          key={roleMember.id}
+          corpId={corpId}
+          member={roleMember}
+          syncBusy={syncBusy}
+          onClose={() => setRoleMember(undefined)}
+          onChanged={onChanged}
+          onDiagnose={() => setAuthorityMemberId(roleMember.id)}
+        />
       )}
       {binding && (
         <DirectoryBindingDialog

@@ -16,8 +16,12 @@ const mocks = vi.hoisted(() => ({
   bindDirectoryMember: vi.fn(),
   searchDirectoryAccounts: vi.fn(),
   listDirectoryRoles: vi.fn(),
+  getDirectoryRoleCounts: vi.fn(),
   saveDirectoryRole: vi.fn(),
   getDirectoryRoleMembers: vi.fn(),
+  previewDirectoryRole: vi.fn(),
+  getDirectoryMemberRoles: vi.fn(),
+  saveDirectoryMemberRoles: vi.fn(),
   saveDirectoryConnection: vi.fn(),
   testDirectoryConnection: vi.fn(),
 }));
@@ -54,6 +58,7 @@ function mount(ui = <DirectoryPage />) {
 }
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.getDirectoryRoleCounts.mockResolvedValue({ data: [] });
   mocks.session.user.isAdmin = true;
   mocks.getDirectoryConnections.mockResolvedValue({
     data: [{ corpId: 'corp', name: 'Company', provider: 'dingtalk' }],
@@ -68,6 +73,16 @@ beforeEach(() => {
   });
   mocks.listDirectoryRoles.mockResolvedValue({ data: [] });
   mocks.saveDirectoryRole.mockResolvedValue({ data: {} });
+  mocks.previewDirectoryRole.mockResolvedValue({
+    data: {
+      before: 0,
+      after: 0,
+      counts: { added: 0, removed: 0, retained: 0, pending: 0 },
+      total: 0,
+      members: [],
+    },
+  });
+  mocks.getDirectoryMemberRoles.mockResolvedValue({ data: { eligible: false, roles: [] } });
   mocks.getDirectoryRoleMembers.mockResolvedValue({
     data: {
       total: 1,
@@ -290,6 +305,8 @@ describe('directory admin workflow', () => {
       .getByRole('heading', { name: 'sourceRoleRule' })
       .closest('section')!;
     fireEvent.click(within(sourceSection).getByRole('button', { name: 'addRule' }));
+    fireEvent.click(screen.getByRole('button', { name: 'previewRoleChanges' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'saveRole' })).toBeEnabled());
     fireEvent.click(screen.getByRole('button', { name: 'saveRole' }));
     await waitFor(() =>
       expect(mocks.saveDirectoryRole).toHaveBeenCalledWith({
@@ -371,5 +388,18 @@ describe('directory admin workflow', () => {
       })
     );
     expect(mocks.searchDirectoryAccounts).not.toHaveBeenCalled();
+  });
+  it('opens role management from the employee row with the scoped identity', async () => {
+    mocks.listDirectoryMembers.mockResolvedValue({ data: { members: [member], total: 1 } });
+    mount();
+    fireEvent.click(await screen.findByRole('button', { name: 'manageRoles' }));
+    expect(await screen.findByRole('dialog')).toBeInTheDocument();
+    await waitFor(() =>
+      expect(mocks.getDirectoryMemberRoles).toHaveBeenCalledWith({
+        corpId: 'corp',
+        memberId: 'employee',
+      })
+    );
+    expect(await screen.findByText('manageRolesDescription')).toBeInTheDocument();
   });
 });

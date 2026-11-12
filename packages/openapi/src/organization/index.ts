@@ -6,3 +6,5 @@ export * from './directory-member';
 export * from './directory-role';
 export * from './table-authority-policy';
 export * from './member-authority';
+export * from './directory-role-management';
+export * from './directory-role-tools';

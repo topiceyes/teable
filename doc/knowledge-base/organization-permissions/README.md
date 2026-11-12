@@ -46,3 +46,5 @@
 第 24 期：[人员授权总览与权限诊断](24-member-authority-diagnostics.md)，1.2.0 提供员工身份、业务角色及逐库逐表权限来源的只读诊断。
 
 第 25 期：[按角色配置字段和记录范围](25-role-data-scopes.md)，1.3.0 支持有序角色范围、默认回退及诊断来源。
+
+Version 1.4.0: [employee role editing](27-employee-role-management.md) and [role management tools](28-role-management-tools.md). Includes batch members, transactional history, permission checks and direct access to employee diagnosis.

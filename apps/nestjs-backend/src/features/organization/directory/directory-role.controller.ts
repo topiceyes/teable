@@ -1,6 +1,12 @@
 import { Body, Controller, Get, HttpCode, Post, Query } from '@nestjs/common';
 import {
   directoryConnectionRoSchema,
+  directoryPreviewRoleRoSchema,
+  directoryMemberRolesRoSchema,
+  directorySaveMemberRolesRoSchema,
+  type IDirectoryPreviewRoleRo,
+  type IDirectoryMemberRolesRo,
+  type IDirectorySaveMemberRolesRo,
   directoryRoleMembersRoSchema,
   directorySaveRoleRoSchema,
   type IDirectoryConnectionRo,
@@ -27,5 +33,23 @@ export class DirectoryRoleController {
   @Get('roleMembers')
   members(@Query(new ZodValidationPipe(directoryRoleMembersRoSchema)) ro: IDirectoryRoleMembersRo) {
     return this.service.members(ro);
+  }
+  @Post('previewRole')
+  @HttpCode(200)
+  preview(@Body(new ZodValidationPipe(directoryPreviewRoleRoSchema)) ro: IDirectoryPreviewRoleRo) {
+    return this.service.preview(ro);
+  }
+  @Get('memberRoles')
+  memberRoles(
+    @Query(new ZodValidationPipe(directoryMemberRolesRoSchema)) ro: IDirectoryMemberRolesRo
+  ) {
+    return this.service.memberRoles(ro);
+  }
+  @Post('saveMemberRoles')
+  @HttpCode(200)
+  saveMemberRoles(
+    @Body(new ZodValidationPipe(directorySaveMemberRolesRoSchema)) ro: IDirectorySaveMemberRolesRo
+  ) {
+    return this.service.saveMemberRoles(ro);
   }
 }
